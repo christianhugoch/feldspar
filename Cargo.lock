@@ -9352,8 +9352,12 @@ dependencies = [
 name = "sc-live"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "sc-auth",
+ "sc-catalog",
  "sc-error",
+ "sc-expr",
  "sc-stream",
  "serde",
  "serde_json",
@@ -9606,6 +9610,7 @@ dependencies = [
  "rumqttc",
  "rustls",
  "rustls-native-certs 0.8.4",
+ "sc-auth",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",

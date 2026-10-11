@@ -19,6 +19,16 @@ sc-auth.workspace = true
 # What a subscription is *to*: a running stream, its envelope and its topics.
 # The hub holds one receiver per running stream and fans its elements out.
 sc-stream.workspace = true
+# The write seam (`TableEvents`): a row topic's access is re-checked when a
+# table its read rule reads is written to (§3 rule 6). And `sc-expr`'s
+# `LiveHost`, the seam the `publish` action and `live.publish` reach the hub
+# through, installed on the catalog.
+sc-catalog.workspace = true
+sc-expr.workspace = true
+async-trait.workspace = true
+# A retained element's freshness is judged against the wall clock, as its
+# `received_at` was stamped by it.
+chrono.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 uuid.workspace = true

@@ -905,5 +905,10 @@
   },
   "Email, localisation and development settings, including the SMTP password.": "电子邮件、本地化和开发设置，包括 SMTP 密码。",
   "Subscribers": "订阅者",
-  "Live subscriptions from applications' pages on this server, right now": "此服务器上应用页面当前的实时订阅"
+  "Live subscriptions from applications' pages on this server, right now": "此服务器上应用页面当前的实时订阅",
+  "Topic": "主题",
+  "Topic (user)": "主题（用户）",
+  "Topic (row)": "主题（行）",
+  "Topic ({table} row)": "主题（{table} 的行）",
+  "Show one topic — part of a user id or row key": "只显示一个主题——用户 ID 或行键的一部分"
 }

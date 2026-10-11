@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! saltcorn.SaltcornError(Exception)
-//! ├── DbError · FetchError · FileError · TriggerError · ModuleError
+//! ├── DbError · FetchError · FileError · TriggerError · ModuleError · LiveError
 //! saltcorn.Timeout(BaseException)
 //! ```
 //!
@@ -64,6 +64,13 @@ create_exception!(
     ModuleError,
     SaltcornError,
     "A module function that could not be called, or that failed."
+);
+create_exception!(
+    saltcorn,
+    LiveError,
+    SaltcornError,
+    "An element `live.publish` could not publish: no such stream, a stream not \
+     running, a topic of the wrong kind, a value that does not match."
 );
 create_exception!(
     saltcorn,

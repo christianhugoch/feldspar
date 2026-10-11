@@ -31,6 +31,18 @@
 //! session that is gone closes the socket with `signed_out`. A sign-out on this
 //! node does not wait for the clock — the hub listens to the session store.
 //!
+//! ## Topics (L2)
+//!
+//! A `user` stream's subscriber names no topic and is put on their own user
+//! id; an anonymous caller is told the stream is not there. A `row` stream's
+//! subscriber names a row's key, and is let in only if **the application's
+//! REST read of that row, as them,** returns it ([`sc_api::row_readable_as`]) —
+//! a missing row and a forbidden one are the same `unavailable`. A row
+//! subscription then watches its row's table and every table the table's
+//! ownership formula reads ([`sc_live::read_rule_tables`]); a write to one
+//! wakes this connection, which re-asks the same read for the subscriptions it
+//! could affect and revokes those that now fail, without waiting for the clock.
+//!
 //! ## Following the stream
 //!
 //! A subscription to a stream that is not running here (disabled, or failing
@@ -39,7 +51,7 @@
 //! attaches it and sends `ready` again, so the page follows the flow without
 //! reconnecting.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,11 +59,11 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use sc_auth::{SessionStore, User};
-use sc_catalog::Catalog;
+use sc_catalog::{Catalog, TableId};
 use sc_live::{
-    Attached, ClientFrame, CloseReason, Connection, ConnectionInfo, Delivery, Denied, ErrorCode,
-    FrameError, LiveHub, LiveLimits, ServerFrame, StoredStream, StreamFacts, Subscription,
-    SubscriptionSet, caller_role, may_subscribe,
+    Attached, Caller, ClientFrame, CloseReason, Connection, ConnectionInfo, Delivery, ErrorCode,
+    FrameError, LiveHub, LiveLimits, Refusal, RowFact, ServerFrame, StoredStream, StreamFacts,
+    Subscription, SubscriptionSet, Touch, Watch, may_open, may_subscribe, read_rule_tables,
 };
 use sc_stream::{RunningStream, Stream, StreamSupervisor, TopicSpec};
 use serde_json::{Value as Json, json};
@@ -128,6 +140,9 @@ pub(crate) struct LiveEnv {
     pub sessions: Arc<SessionStore>,
     pub catalog: Arc<Catalog>,
     pub supervisor: Option<Arc<StreamSupervisor>>,
+    /// The formula evaluator a row topic's read uses when the table's
+    /// ownership formula does not translate — the REST read's own.
+    pub evaluator: Option<Arc<dyn sc_expr::JsEvaluator>>,
     pub app: AppHandle,
     /// The application's subdomain, which the per-user connection limit is
     /// counted within.
@@ -156,6 +171,7 @@ enum Event {
     Incoming(Option<Result<Message, axum::Error>>),
     Delivery(Delivery),
     Lagged,
+    Touched,
     Recheck,
     Status,
     Ping,
@@ -183,6 +199,7 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
     let mut live = Live {
         subs: SubscriptionSet::new(limits.max_subscriptions),
         by_attachment: HashMap::new(),
+        row_subs: HashMap::new(),
         connection,
         env,
         caller,
@@ -199,6 +216,7 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
             incoming = receiver.next() => Event::Incoming(incoming),
             Some(delivery) = deliveries.recv() => Event::Delivery(delivery),
             () = live.connection.lagged() => Event::Lagged,
+            () = live.connection.touched() => Event::Touched,
             _ = recheck.tick() => Event::Recheck,
             _ = status.tick() => Event::Status,
             _ = ping.tick() => Event::Ping,
@@ -212,6 +230,7 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
             }
             Event::Delivery(delivery) => live.deliver(&delivery),
             Event::Lagged => live.lagged(),
+            Event::Touched => live.touched().await,
             Event::Recheck => match live.recheck().await {
                 Ok(frames) => frames,
                 Err(reason) => break Some(reason),
@@ -250,13 +269,46 @@ struct Live {
     subs: SubscriptionSet<Attached>,
     /// Attachment id → the `sub` it belongs to, for routing deliveries.
     by_attachment: HashMap<u64, String>,
+    /// The `row` subscriptions, by `sub`: which row, which tables its access
+    /// depends on, and the watch that wakes this connection when one of them
+    /// is written to.
+    row_subs: HashMap<String, RowSub>,
     connection: Connection,
     env: LiveEnv,
     caller: LiveCaller,
     limits: LiveLimits,
 }
 
+/// A `row` subscription's access, as far as writes can change it.
+struct RowSub {
+    /// The table its topic is a row of.
+    table: String,
+    /// The row's key — the topic.
+    key: String,
+    /// The tables its table's read rule reads, other than itself.
+    deps: BTreeSet<String>,
+    /// Held for as long as the subscription is.
+    _watch: Watch,
+}
+
+impl RowSub {
+    /// Whether a write could have changed this subscription's verdict: its own
+    /// row, or any row of a table the read rule reads.
+    fn affected_by(&self, touch: &Touch) -> bool {
+        if touch.table == self.table {
+            return touch.keys.is_empty() || touch.keys.contains(&self.key);
+        }
+        self.deps.contains(&touch.table)
+    }
+}
+
 impl Live {
+    /// Who this connection is, as access is decided.
+    fn caller(&self) -> Caller {
+        let user = self.caller.user.as_ref();
+        Caller::new(user.map(|u| u.role), user.map(|u| u.id))
+    }
+
     /// One message from the client.
     async fn receive(&mut self, message: Message) -> Vec<ServerFrame> {
         match message {
@@ -359,23 +411,19 @@ impl Live {
         let Some(app) = self.env.app.current() else {
             return vec![FrameError::unavailable(&sub, &stream).frame()];
         };
-        let facts = self.facts(&app, &stream).await;
-        let role = caller_role(self.caller.user.as_ref().map(|user| user.role));
-        let stored: StoredStream = match may_subscribe(&facts, role) {
-            Ok(stored) => stored.clone(),
-            Err(Denied) => return vec![FrameError::unavailable(&sub, &stream).frame()],
+        let caller = self.caller();
+        let facts = self.facts(&app, &stream, topic.as_deref(), &caller).await;
+        let grant = match may_subscribe(&facts, &caller, topic.as_deref()) {
+            Ok(grant) => grant,
+            Err(Refusal::Denied) => return vec![FrameError::unavailable(&sub, &stream).frame()],
+            // The caller may know the stream is there now, so a malformed
+            // request for it is answered as one.
+            Err(Refusal::Invalid(message)) => {
+                return vec![
+                    FrameError::invalid(Some(sub), format!("`{stream}`: {message}")).frame(),
+                ];
+            }
         };
-        // The caller may know the stream is there now, so a malformed request
-        // for it is answered as one.
-        if topic.is_some() && !stored.topics.takes_topic() {
-            return vec![
-                FrameError::invalid(
-                    Some(sub),
-                    format!("`{stream}` has no topics; subscribe to it without one"),
-                )
-                .frame(),
-            ];
-        }
         if filter.is_some() {
             return vec![
                 FrameError::invalid(
@@ -385,7 +433,8 @@ impl Live {
                 .frame(),
             ];
         }
-        let mut subscription = Subscription::waiting(sub, stream, topic);
+        let row_sub = self.watch_row(&grant);
+        let mut subscription = Subscription::waiting(sub.clone(), stream, grant.topic);
         let frames = start(
             &self.connection,
             &mut self.by_attachment,
@@ -395,18 +444,54 @@ impl Live {
         .await;
         // `check_new` passed above and nothing has been added since, so this
         // cannot fail; if it somehow did, dropping the subscription detaches it.
-        let _ = self.subs.insert(subscription);
+        if self.subs.insert(subscription).is_ok()
+            && let Some(row_sub) = row_sub
+        {
+            self.row_subs.insert(sub, row_sub);
+        }
         frames
     }
 
-    /// What access to `name` is decided by, for `app`.
-    async fn facts(&self, app: &MountedApp, name: &str) -> StreamFacts {
+    /// For a `row` subscription, watch its table and every table its read rule
+    /// reads, so a write to any of them wakes this connection to re-check it.
+    fn watch_row(&self, grant: &sc_live::Grant) -> Option<RowSub> {
+        let TopicSpec::Row { table } = &grant.stored.topics else {
+            return None;
+        };
+        let key = grant.topic.clone()?;
+        let deps = match self.env.catalog.get(table) {
+            Ok(Some(found)) => read_rule_tables(&self.env.catalog, &found),
+            _ => BTreeSet::new(),
+        };
+        let watch = self
+            .connection
+            .watch(std::iter::once(table.clone()).chain(deps.iter().cloned()));
+        Some(RowSub {
+            table: table.clone(),
+            key,
+            deps,
+            _watch: watch,
+        })
+    }
+
+    /// What access to `name` is decided by, for `app` and `caller` — and, for
+    /// a `row` stream asked about `topic`, what the caller's REST read of that
+    /// row finds. The row is read only once the stream-level rules have passed,
+    /// so a caller below the floor never causes a read.
+    async fn facts(
+        &self,
+        app: &MountedApp,
+        name: &str,
+        topic: Option<&str>,
+        caller: &Caller,
+    ) -> StreamFacts {
         let exposed = app.app.exposes_stream(name);
         if !exposed {
             // Not even read: an unexposed stream does not exist for this app.
             return StreamFacts {
                 exposed,
                 stored: None,
+                row: RowFact::NotAsked,
             };
         }
         let stored = match sc_stream::load_stream_by_name(&self.env.catalog, name).await {
@@ -425,7 +510,53 @@ impl Live {
                 None
             }
         };
-        StreamFacts { exposed, stored }
+        let mut facts = StreamFacts {
+            exposed,
+            stored,
+            row: RowFact::NotAsked,
+        };
+        if let (Some(key), Ok(stored)) = (topic, may_open(&facts, caller))
+            && let TopicSpec::Row { table } = &stored.topics
+        {
+            facts.row = self.row_fact(app, table, key).await;
+        }
+        facts
+    }
+
+    /// What this connection's caller's REST read of `table`'s row `key` finds.
+    async fn row_fact(&self, app: &MountedApp, table: &str, key: &str) -> RowFact {
+        // Rule 3: a table outside the application's subset does not exist for
+        // its pages, whatever the caller may read elsewhere.
+        if !app.app.can_access_table(&TableId(table.to_owned())) {
+            return RowFact::TableNotExposed;
+        }
+        let found = match self.env.catalog.get(table) {
+            Ok(Some(found)) => found,
+            _ => return RowFact::Unreadable,
+        };
+        let user = self.caller.user.as_ref();
+        match sc_api::row_readable_as(
+            &self.env.catalog,
+            &found,
+            key,
+            self.caller().role,
+            user,
+            self.env.evaluator.as_ref(),
+        )
+        .await
+        {
+            Ok(true) => RowFact::Readable,
+            Ok(false) => RowFact::Unreadable,
+            // Refused rather than guessed at, as an unreadable stream is.
+            Err(e) => {
+                sc_log::log_warn!(
+                    "the live socket could not read row `{key}` of `{table}`, so its topic is \
+                     refused: {}",
+                    sc_error::format_chain(&e)
+                );
+                RowFact::Unreadable
+            }
+        }
     }
 
     /// How `row`'s elements are split into topics: the running stream's
@@ -565,28 +696,72 @@ impl Live {
                 message: "this application is no longer served here".to_owned(),
             });
         };
-        let role = caller_role(self.caller.user.as_ref().map(|user| user.role));
-        let mut decided: HashMap<String, bool> = HashMap::new();
+        let names = self.subs.names();
+        Ok(self.recheck_subs(&app, names).await)
+    }
+
+    /// Writes this connection watches have happened: re-check every `row`
+    /// subscription one of them could affect, at once rather than at the next
+    /// clock (§3 rule 6).
+    async fn touched(&mut self) -> Vec<ServerFrame> {
+        let touches = self.connection.take_touches();
+        if touches.is_empty() {
+            return Vec::new();
+        }
+        let affected: Vec<String> = self
+            .row_subs
+            .iter()
+            .filter(|(_, row)| touches.iter().any(|touch| row.affected_by(touch)))
+            .map(|(sub, _)| sub.clone())
+            .collect();
+        if affected.is_empty() {
+            return Vec::new();
+        }
+        let Some(app) = self.env.app.current() else {
+            return Vec::new();
+        };
+        self.recheck_subs(&app, affected).await
+    }
+
+    /// Ask access again for each of `names`, and revoke those that no longer
+    /// pass — the same function a subscribe asks, with the same facts looked up
+    /// afresh. A grant onto a different topic than the subscription is on (a
+    /// stream whose topics were reconfigured) is no longer this subscription.
+    async fn recheck_subs(&mut self, app: &MountedApp, names: Vec<String>) -> Vec<ServerFrame> {
+        let caller = self.caller();
+        let mut decided: HashMap<(String, Option<String>), Option<Option<String>>> = HashMap::new();
         let mut frames = Vec::new();
-        for name in self.subs.names() {
-            let Some(stream) = self.subs.get(&name).map(|s| s.stream.clone()) else {
+        for name in names {
+            let Some((stream, topic)) = self
+                .subs
+                .get(&name)
+                .map(|s| (s.stream.clone(), s.topic.clone()))
+            else {
                 continue;
             };
-            let allowed = match decided.get(&stream) {
-                Some(allowed) => *allowed,
+            // Only a row subscription named its topic; every other kind is
+            // asked as it was subscribed, without one.
+            let asked = self.row_subs.get(&name).map(|row| row.key.clone());
+            let key = (stream.clone(), asked.clone());
+            let granted = match decided.get(&key) {
+                Some(granted) => granted.clone(),
                 None => {
-                    let facts = self.facts(&app, &stream).await;
-                    let allowed = may_subscribe(&facts, role).is_ok();
-                    decided.insert(stream, allowed);
-                    allowed
+                    let facts = self.facts(app, &stream, asked.as_deref(), &caller).await;
+                    let granted = may_subscribe(&facts, &caller, asked.as_deref())
+                        .ok()
+                        .map(|grant| grant.topic);
+                    decided.insert(key, granted.clone());
+                    granted
                 }
             };
-            if !allowed && let Some(gone) = self.subs.revoke(&name) {
+            if granted != Some(topic)
+                && let Some(gone) = self.subs.revoke(&name)
+            {
                 self.forget(&gone);
                 frames.push(ServerFrame::Revoked { sub: name });
             }
         }
-        Ok(frames)
+        frames
     }
 
     /// A subscription that has ended: forget its attachment, so anything still
@@ -595,6 +770,9 @@ impl Live {
         if let Some(attached) = gone.attached() {
             self.by_attachment.remove(&attached.attachment());
         }
+        // Its watch goes with it, and with the last watcher of a table the
+        // hub stops observing writes to it.
+        self.row_subs.remove(&gone.sub);
     }
 }
 

@@ -238,6 +238,22 @@ pub fn build_router_with_apps(
     // Weakly held: the hub lives as long as the registry does.
     let live_listener: Arc<dyn sc_auth::SessionListener> = apps.live().hub().clone();
     sessions.add_listener(Arc::downgrade(&live_listener));
+    // The hub's other two seams (TODO.md "Live updates" L2): Saltcorn's own
+    // publishers reach it through the catalog's live host — the `publish`
+    // action, `live.publish` in a code body — and it hears the writes that
+    // could change a row topic's access through the catalog's write seam,
+    // beside the trigger dispatcher rather than instead of it.
+    if let Some(catalog) = apps.catalog() {
+        let hub = apps.live().hub().clone();
+        if let Some(streams) = apps.streams() {
+            hub.set_streams(streams.supervisor().clone());
+        }
+        catalog.set_live_host(hub.clone() as Arc<dyn sc_expr::LiveHost>)?;
+        catalog.add_table_events(
+            sc_catalog::LIVE_EVENTS,
+            hub as Arc<dyn sc_catalog::TableEvents>,
+        )?;
+    }
 
     let routes = Arc::new(build_matchit(endpoints)?);
     let mut handlers = handlers;
@@ -1953,6 +1969,7 @@ async fn app_live(
             .apps
             .streams()
             .map(|streams| streams.supervisor().clone()),
+        evaluator: state.apps.evaluator(),
         app: handle,
         subdomain,
     };

@@ -92,7 +92,10 @@ async fn setup(db: &TestDb) -> Result<(Arc<Catalog>, Events)> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     let events: Events = Arc::new(Mutex::new(Vec::new()));
-    catalog.set_table_events(Arc::new(Recorder(Arc::clone(&events))))?;
+    catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::new(Recorder(Arc::clone(&events))),
+    )?;
     Ok((catalog, events))
 }
 

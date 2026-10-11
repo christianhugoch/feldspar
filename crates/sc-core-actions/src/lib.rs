@@ -2,7 +2,7 @@
 //!
 //! Every action Saltcorn ships with, in one crate: [`InsertRow`], [`UpdateRows`],
 //! [`DeleteRows`], [`Fetch`], [`RunJsCode`], [`RunPythonCode`], [`SendEmail`],
-//! and [`FitModel`]. The set is **deliberately small** — GOALS asks for a
+//! [`Publish`] and [`FitModel`]. The set is **deliberately small** — GOALS asks for a
 //! minimal one, because control flow belongs to the workflow engine (§10.3)
 //! rather than to a proliferation of actions — and [`builtin_actions`] is the
 //! single constructor that assembles it.
@@ -45,6 +45,7 @@ mod delete_rows;
 mod fetch;
 mod fit_model;
 mod insert_row;
+mod publish;
 mod rows_scope;
 mod run_js_code;
 mod run_python_code;
@@ -61,6 +62,7 @@ pub use delete_rows::DeleteRows;
 pub use fetch::Fetch;
 pub use fit_model::FitModel;
 pub use insert_row::InsertRow;
+pub use publish::{INTERNAL_STREAMS_QUERY, Publish};
 pub use run_js_code::RunJsCode;
 pub use run_python_code::RunPythonCode;
 pub use send_email::SendEmail;
@@ -92,6 +94,7 @@ pub fn register_builtin_actions(registry: &mut ActionRegistry) -> Result<()> {
     registry.register(Arc::new(RunJsCode::new()?))?;
     registry.register(Arc::new(RunPythonCode::new()?))?;
     registry.register(Arc::new(SendEmail))?;
+    registry.register(Arc::new(Publish))?;
     Ok(())
 }
 
@@ -128,6 +131,7 @@ mod tests {
                 "delete_rows",
                 "fetch",
                 "insert_row",
+                "publish",
                 "run_js_code",
                 "run_python_code",
                 "send_email",
@@ -210,6 +214,7 @@ mod tests {
             vec!["url", "method", "headers", "body", "timeout_ms"]
         );
         assert_eq!(names("run_js_code"), vec!["code", "timeout_ms"]);
+        assert_eq!(names("publish"), vec!["stream", "topic", "value"]);
         assert_eq!(
             names("send_email"),
             vec!["to", "cc", "bcc", "from", "subject", "html", "mjml", "text"]

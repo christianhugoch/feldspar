@@ -1,5 +1,5 @@
 //! **The Python code adapter**: a code body — and a plugin module — run on one
-//! embedded CPython, over `sc-expr`'s own [`CodeCall`] and its five host traits
+//! embedded CPython, over `sc-expr`'s own [`CodeCall`] and its six host traits
 //! (design §15; TODO "The Python code adapter").
 //!
 //! ```python
@@ -568,6 +568,7 @@ impl PythonRuntime {
                 file_ops: call.max_file_ops,
                 trigger_runs: call.max_trigger_runs,
                 module_calls: call.max_module_calls,
+                publishes: sc_expr::MAX_LIVE_PUBLISHES,
             };
             let timeout = call
                 .timeout
@@ -622,6 +623,7 @@ impl PythonRuntime {
                             file_ops: call.max_file_ops,
                             trigger_runs: call.max_trigger_runs,
                             module_calls: call.max_module_calls,
+                            publishes: sc_expr::MAX_LIVE_PUBLISHES,
                         },
                         timeout: call.timeout,
                     },
@@ -644,7 +646,7 @@ impl PythonRuntime {
 /// [`CodeCall`] itself: there is no source and no bindings here, and a call that
 /// carried two unused fields would invite somebody to fill them in. What the two
 /// *do* share is the part that matters — [`CodeHosts`](sc_expr::CodeHosts), so
-/// the five surfaces a plugin reaches are the five a body reaches, with the same
+/// the six surfaces a plugin reaches are the six a body reaches, with the same
 /// authority and the same budgets counted the same way.
 #[cfg_attr(
     not(feature = "python-host"),
@@ -687,7 +689,7 @@ impl<'a> PluginCall<'a> {
         }
     }
 
-    /// The same call, over the five surfaces this run may reach.
+    /// The same call, over the six surfaces this run may reach.
     #[must_use]
     pub(crate) fn with_hosts(mut self, hosts: sc_expr::CodeHosts<'a>) -> PluginCall<'a> {
         self.hosts = hosts;

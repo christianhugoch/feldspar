@@ -1,13 +1,19 @@
-//! The stream providers that are compiled in (TODO §11, tasks 1.4 and 4.2).
+//! The stream providers that are compiled in (TODO §11, tasks 1.4 and 4.2;
+//! TODO.md "Live updates" §2).
 //!
-//! One of them: **MQTT** ([`mqtt`]), behind a default-on `mqtt` feature so a
-//! build can drop it — `smartcore`'s arrangement, for `smartcore`'s reason.
-//! Everything else a stream can be observed from comes from a module (§12).
+//! Two of them:
 //!
-//! An **empty** built-in set is therefore a real state and not a bug: a build
-//! with `--no-default-features` and no module installed has no stream
-//! providers, and the Streams screen says so in a sentence rather than showing
-//! an empty picker (task 6.1) — see [`BUILTINS_COMPILED_OUT`].
+//! - **MQTT** ([`mqtt`]), behind a default-on `mqtt` feature so a build can
+//!   drop it — `smartcore`'s arrangement, for `smartcore`'s reason;
+//! - **internal** ([`internal`]), always: its elements are Saltcorn's own, it
+//!   carries no network client, and it is what an application's toasts and
+//!   progress bars are made of.
+//!
+//! Everything else a stream can be observed from comes from a module (§12). A
+//! build with `--no-default-features` and no module installed therefore offers
+//! only `internal`, and the Streams screen says why MQTT is missing in a
+//! sentence rather than leaving the admin to wonder — see
+//! [`BUILTINS_COMPILED_OUT`].
 
 use std::sync::Arc;
 
@@ -16,6 +22,7 @@ use sc_error::Result;
 use crate::provider::StreamProvider;
 use crate::registry::StreamRegistry;
 
+pub mod internal;
 #[cfg(feature = "mqtt")]
 pub mod mqtt;
 
@@ -26,24 +33,22 @@ pub mod mqtt;
 /// `sc-model`'s `SMARTCORE`.
 pub const MQTT_COMPILED_IN: bool = cfg!(feature = "mqtt");
 
-/// What the admin screen says when there is no built-in stream provider in this
-/// build (task 6.1).
+/// What the admin screen says when this build has no MQTT provider (task 6.1).
 ///
-/// An empty provider list reads like a bug; "this build was made without it"
-/// reads like a decision, which is what it is. The sentence names the flag,
+/// A picker without the provider the docs name reads like a bug; "this build
+/// was made without it" reads like a decision, which is what it is. The sentence names the flag,
 /// because the person reading it is usually the person who can rebuild, and it
 /// names the other way to get a provider, because that one needs no rebuild.
 pub const BUILTINS_COMPILED_OUT: &str = "this server was built with `--no-default-features`, so the built-in MQTT stream provider was \
-     compiled out; a module can still supply stream providers";
+     compiled out; internal streams still work, and a module can still supply stream providers";
 
 /// Every compiled-in stream provider.
 ///
-/// One with the `mqtt` feature on, none with it off.
+/// `internal` always, and MQTT with the `mqtt` feature on.
 pub fn builtin_providers() -> Vec<Arc<dyn StreamProvider>> {
+    let mut providers: Vec<Arc<dyn StreamProvider>> = vec![Arc::new(internal::Internal)];
     #[cfg(feature = "mqtt")]
-    let providers: Vec<Arc<dyn StreamProvider>> = vec![Arc::new(mqtt::Mqtt)];
-    #[cfg(not(feature = "mqtt"))]
-    let providers: Vec<Arc<dyn StreamProvider>> = Vec::new();
+    providers.push(Arc::new(mqtt::Mqtt));
     providers
 }
 
@@ -85,10 +90,18 @@ mod tests {
         assert!(!kind.config_spec.is_empty());
     }
 
+    #[test]
+    fn internal_is_built_in_whatever_the_features() {
+        let registry = builtin_registry().unwrap();
+        let provider = registry.require(internal::INTERNAL).unwrap();
+        assert!(provider.accepts_publish());
+        assert!(provider.kind().module.is_none());
+    }
+
     #[cfg(not(feature = "mqtt"))]
     #[test]
     fn a_build_without_the_feature_has_a_sentence_rather_than_an_empty_picker() {
-        assert!(builtin_providers().is_empty());
+        assert_eq!(builtin_providers().len(), 1, "only `internal`");
         const { assert!(!MQTT_COMPILED_IN) };
         assert!(BUILTINS_COMPILED_OUT.contains("--no-default-features"));
     }

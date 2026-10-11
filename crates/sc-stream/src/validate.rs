@@ -70,6 +70,15 @@ pub async fn validate_stream(
     }
     check_stream(registry, stream)?;
 
+    // The part of the configuration only the schema can judge — a row topic's
+    // table, a presence field's column. `check_stream` has already proved the
+    // provider is registered, so the lookup cannot fail here.
+    if let Ok(provider) = registry.require(stream.provider.trim()) {
+        provider
+            .validate_in(&stream.configuration, catalog)
+            .map_err(|e| Error::invalid(format!("stream `{}`: {e}", stream.name.trim())))?;
+    }
+
     // Unique, because the name *is* the reference: a trigger's channel, an
     // application's `StreamRef` and a socket path all resolve through it, and
     // two streams answering to one name means the flow a trigger fires on

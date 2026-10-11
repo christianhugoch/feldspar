@@ -978,5 +978,10 @@
   },
   "Email, localisation and development settings, including the SMTP password.": "إعدادات البريد الإلكتروني والترجمة والتطوير، بما في ذلك كلمة مرور SMTP.",
   "Subscribers": "المشتركون",
-  "Live subscriptions from applications' pages on this server, right now": "الاشتراكات المباشرة من صفحات التطبيقات على هذا الخادم الآن"
+  "Live subscriptions from applications' pages on this server, right now": "الاشتراكات المباشرة من صفحات التطبيقات على هذا الخادم الآن",
+  "Topic": "الموضوع",
+  "Topic (user)": "الموضوع (مستخدم)",
+  "Topic (row)": "الموضوع (صف)",
+  "Topic ({table} row)": "الموضوع (صف من {table})",
+  "Show one topic — part of a user id or row key": "اعرض موضوعًا واحدًا — جزء من معرّف مستخدم أو مفتاح صف"
 }

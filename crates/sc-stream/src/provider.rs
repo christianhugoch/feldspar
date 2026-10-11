@@ -47,6 +47,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use sc_catalog::Catalog;
 use sc_error::Result;
 use sc_types::{Attrs, FormField};
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,42 @@ impl TopicSpec {
     pub fn takes_topic(&self) -> bool {
         matches!(self, TopicSpec::Row { .. })
     }
+
+    /// The table whose rows the topics or elements are, for the two kinds
+    /// that have one.
+    pub fn table(&self) -> Option<&str> {
+        match self {
+            TopicSpec::Row { table } | TopicSpec::PerElementRow { table } => Some(table),
+            TopicSpec::Single | TopicSpec::User => None,
+        }
+    }
+}
+
+/// What a new live subscriber is handed before the next element
+/// ([`StreamProvider::replay`]).
+///
+/// Decided by the provider, as a function of the configuration, for the reason
+/// the element type is: "show me what I missed" means the last hundred
+/// readings for a sensor, the current progress for a long job, and nothing at
+/// all for a stream of toasts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Replay {
+    /// The last elements this server saw on the subscriber's topic, from the
+    /// stream's ring — every provider there was before live updates.
+    #[default]
+    Ring,
+    /// Nothing: a new subscriber starts with the next element.
+    Nothing,
+    /// The latest element per topic, while it is younger than `ttl` — MQTT's
+    /// *retained* message, which is what lets a page reloaded halfway through a
+    /// job show the current progress straight away. At most `max_topics` are
+    /// kept per stream; past that the oldest is forgotten first.
+    Latest {
+        /// How long a retained element stays worth sending.
+        ttl: std::time::Duration,
+        /// How many topics' latest elements one stream keeps.
+        max_topics: usize,
+    },
 }
 
 /// One stream provider the picker offers, and everything about it that can be
@@ -260,6 +297,44 @@ pub trait StreamProvider: Send + Sync {
     /// whether or not it has another.
     fn validate(&self, config: &Attrs) -> Result<()> {
         self.element_type(config)?.validate()
+    }
+
+    /// Check a configuration against **the schema it names** — the part
+    /// [`validate`](StreamProvider::validate) cannot see, because it is a
+    /// function of the configuration alone.
+    ///
+    /// `internal` is the provider that needs it: a `row` topic names a table,
+    /// which must exist and have a one-column primary key, and its presence
+    /// fields name columns of `users`. Run on save beside `validate`, against
+    /// the catalog as it stands; the default has nothing to look up.
+    fn validate_in(&self, config: &Attrs, catalog: &Catalog) -> Result<()> {
+        let _ = (config, catalog);
+        Ok(())
+    }
+
+    /// What a new live subscriber is handed before the next element, for
+    /// `config` (see [`Replay`]).
+    ///
+    /// Defaults to [`Replay::Ring`] — the last elements this server saw, on the
+    /// subscriber's topic — which is what every provider before live updates
+    /// gave an observer. `internal` answers [`Replay::Latest`] when it retains
+    /// its last element and [`Replay::Nothing`] when it does not, because a
+    /// toast published a minute ago is not news to a page that just opened.
+    fn replay(&self, config: &Attrs) -> Result<Replay> {
+        let _ = config;
+        Ok(Replay::Ring)
+    }
+
+    /// Whether Saltcorn's own code — the `publish` action, `live.publish` in a
+    /// code body — may put elements into a stream of this provider
+    /// ([`RunningStream::publish_value`](crate::RunningStream::publish_value)).
+    ///
+    /// `false` by default, and that default is the point: an MQTT stream's
+    /// elements are a broker's word, and a server-side publisher able to add
+    /// to them could make a reading up. Only an in-process provider whose
+    /// elements *are* Saltcorn's — `internal` — answers `true`.
+    fn accepts_publish(&self) -> bool {
+        false
     }
 
     /// Everything this provider is, as the picker and the module seam see it.

@@ -941,5 +941,10 @@
   },
   "Email, localisation and development settings, including the SMTP password.": "Paramètres d’e-mail, de localisation et de développement, y compris le mot de passe SMTP.",
   "Subscribers": "Abonnés",
-  "Live subscriptions from applications' pages on this server, right now": "Abonnements en direct depuis les pages des applications sur ce serveur, en ce moment"
+  "Live subscriptions from applications' pages on this server, right now": "Abonnements en direct depuis les pages des applications sur ce serveur, en ce moment",
+  "Topic": "Sujet",
+  "Topic (user)": "Sujet (utilisateur)",
+  "Topic (row)": "Sujet (ligne)",
+  "Topic ({table} row)": "Sujet (ligne de {table})",
+  "Show one topic — part of a user id or row key": "Afficher un seul sujet — une partie d’un identifiant d’utilisateur ou d’une clé de ligne"
 }

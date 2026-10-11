@@ -127,7 +127,10 @@ pub async fn install_triggers_with_adapters(
             issue.trigger, issue.problem
         );
     }
-    catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
+    catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>,
+    )?;
     Ok(dispatcher)
 }
 

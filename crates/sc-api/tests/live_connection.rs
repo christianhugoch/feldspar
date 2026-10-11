@@ -130,6 +130,7 @@ fn the_live_connection_reconnects_resubscribes_and_lets_go() -> std::io::Result<
         name: name.to_owned(),
         path: "/api/live".to_owned(),
         value: TypeSchema::json(),
+        topics: sc_api::StreamTopics::Single,
     });
     let client_ts = sc_api::generate_client_with_streams(&sc_api::EndpointSet::new(), &streams)
         .replace("from \"./helper\"", "from \"./helper.ts\"");
@@ -218,6 +219,7 @@ void a;
         name: "boiler".to_owned(),
         path: "/api/live".to_owned(),
         value: TypeSchema::json(),
+        topics: sc_api::StreamTopics::Single,
     }];
     let client_ts = sc_api::generate_client_with_streams(&sc_api::EndpointSet::new(), &streams)
         .replace("from \"./helper\"", "from \"./helper.ts\"");
@@ -250,5 +252,84 @@ void a;
             "sockets": 1,
         })
     );
+    Ok(())
+}
+
+/// A row stream's subscription names its row on the wire — as text, whether the
+/// page wrote `7` or `"7"` — and asks for the same row again after a
+/// reconnect; a per-user stream's names nothing (TODO.md "Live updates" L2.10).
+#[test]
+fn a_row_topic_is_sent_with_its_subscription_and_again_after_a_reconnect() -> std::io::Result<()> {
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("skipping: no `node` on PATH to run the generated client");
+        return Ok(());
+    }
+    const DRIVER: &str = r#"
+import { createClient } from "./client.ts";
+const sockets: any[] = [];
+class FakeSocket {
+  readyState = 0; sent: unknown[] = []; closed = false;
+  onopen: any = null; onmessage: any = null; onclose: any = null; onerror: any = null;
+  url: string;
+  constructor(url: string) { this.url = url; sockets.push(this); }
+  send(d: string) { this.sent.push(JSON.parse(d)); }
+  close() { this.closed = true; }
+}
+const api = createClient({ live: { WebSocket: FakeSocket as unknown as typeof WebSocket, minDelay: 1, maxDelay: 2 } });
+api.live.board_activity.subscribe(7, { element() {} });
+api.live.board_activity.topic("8").subscribe({ element() {} });
+api.live.job_status.subscribe({ element() {} });
+const same = api.live.board_activity.topic(7) === api.live.board_activity.topic("7");
+sockets[0].readyState = 1;
+sockets[0].onopen({});
+const first = [...sockets[0].sent];
+sockets[0].readyState = 3;
+sockets[0].onclose({});
+await new Promise((r) => setTimeout(r, 30));
+sockets[1].readyState = 1;
+sockets[1].onopen({});
+console.log(JSON.stringify({ first, second: sockets[1].sent, same }));
+"#;
+    let message = TypeSchema::json();
+    let streams = [
+        StreamExport {
+            name: "board_activity".to_owned(),
+            path: "/api/live".to_owned(),
+            value: message.clone(),
+            topics: sc_api::StreamTopics::Row,
+        },
+        StreamExport {
+            name: "job_status".to_owned(),
+            path: "/api/live".to_owned(),
+            value: message,
+            topics: sc_api::StreamTopics::User,
+        },
+    ];
+    let client_ts = sc_api::generate_client_with_streams(&sc_api::EndpointSet::new(), &streams)
+        .replace("from \"./helper\"", "from \"./helper.ts\"");
+    let dir = std::env::temp_dir().join(format!("sc-api-live-topics-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("client.ts"), client_ts)?;
+    std::fs::write(
+        dir.join(sc_api::CLIENT_HELPER_FILE),
+        sc_api::client_helper(),
+    )?;
+    std::fs::write(dir.join("driver.ts"), DRIVER)?;
+    let output = Command::new("node").arg(dir.join("driver.ts")).output()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let frames = serde_json::json!([
+        { "type": "subscribe", "sub": "s1", "stream": "board_activity", "topic": "7" },
+        { "type": "subscribe", "sub": "s2", "stream": "board_activity", "topic": "8" },
+        { "type": "subscribe", "sub": "s3", "stream": "job_status" },
+    ]);
+    assert_eq!(seen["first"], frames);
+    assert_eq!(seen["second"], frames, "the same rows asked for again");
+    assert_eq!(seen["same"], serde_json::json!(true));
     Ok(())
 }

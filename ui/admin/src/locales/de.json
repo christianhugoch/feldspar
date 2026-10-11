@@ -920,5 +920,10 @@
   },
   "Email, localisation and development settings, including the SMTP password.": "E-Mail-, Lokalisierungs- und Entwicklungseinstellungen, einschließlich des SMTP-Passworts.",
   "Subscribers": "Abonnenten",
-  "Live subscriptions from applications' pages on this server, right now": "Live-Abonnements von Anwendungsseiten auf diesem Server, gerade jetzt"
+  "Live subscriptions from applications' pages on this server, right now": "Live-Abonnements von Anwendungsseiten auf diesem Server, gerade jetzt",
+  "Topic": "Thema",
+  "Topic (user)": "Thema (Benutzer)",
+  "Topic (row)": "Thema (Zeile)",
+  "Topic ({table} row)": "Thema (Zeile von {table})",
+  "Show one topic — part of a user id or row key": "Ein Thema anzeigen – Teil einer Benutzer-ID oder eines Zeilenschlüssels"
 }

@@ -810,6 +810,7 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
             // `predict_row` and no `write_posterior` (milestone 31 §1).
             "fit_model",
             "insert_row",
+            "publish",
             "run_agent",
             "run_js_code",
             "run_python_code",

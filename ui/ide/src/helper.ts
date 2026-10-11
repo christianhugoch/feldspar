@@ -274,12 +274,24 @@ export interface LiveSubscription {
   close(): void;
 }
 
-/** One stream an application exposes, ready to subscribe to. */
+/** One stream an application exposes, ready to subscribe to — or one row's topic of a row stream. */
 export interface LiveStream<E> {
   readonly name: string;
   /** The connection it is subscribed over, for its `status`. */
   readonly connection: LiveConnection;
   subscribe(handlers: LiveHandlers<E>): LiveSubscription;
+}
+
+/** A row's key, as a topic: `"7"` and `7` name the same row. */
+export type LiveTopic = string | number;
+
+/** A stream with a topic per row: subscribe naming the row's key. */
+export interface LiveRowStream<E> {
+  readonly name: string;
+  readonly connection: LiveConnection;
+  subscribe(topic: LiveTopic, handlers: LiveHandlers<E>): LiveSubscription;
+  /** One row's topic as a stream of its own — the same object for the same key, so a hook can depend on it. */
+  topic(topic: LiveTopic): LiveStream<E>;
 }
 
 /** How a live connection behaves. */
@@ -300,7 +312,17 @@ export function liveUrl(baseUrl: string, path: string): string {
   return url.toString();
 }
 
-type LiveEntry = { stream: string; handlers: LiveHandlers<unknown>; ready: boolean };
+/** A `subscribe` frame: the topic only when there is one. */
+function subscribeFrame(sub: string, stream: string, topic: string | undefined): Record<string, unknown> {
+  return topic === undefined ? { type: "subscribe", sub, stream } : { type: "subscribe", sub, stream, topic };
+}
+
+type LiveEntry = {
+  stream: string;
+  topic: string | undefined;
+  handlers: LiveHandlers<unknown>;
+  ready: boolean;
+};
 
 /** One socket, any number of subscriptions, reconnecting by itself. */
 export class LiveConnection {
@@ -335,7 +357,7 @@ export class LiveConnection {
     };
   }
 
-  /** The accessor for the stream called `name`. */
+  /** The accessor for the stream called `name` — one with no topic, or whose topic is the subscriber's own. */
   stream<E>(name: string): LiveStream<E> {
     return {
       name,
@@ -344,12 +366,36 @@ export class LiveConnection {
     };
   }
 
-  /** Subscribe to `stream`, opening the socket if this is the first subscription. */
-  subscribe<E>(stream: string, handlers: LiveHandlers<E>): LiveSubscription {
+  /** The accessor for the stream called `name`, whose topics are rows. */
+  rowStream<E>(name: string): LiveRowStream<E> {
+    const topics = new Map<string, LiveStream<E>>();
+    return {
+      name,
+      connection: this,
+      subscribe: (topic: LiveTopic, handlers: LiveHandlers<E>) =>
+        this.subscribe(name, handlers, String(topic)),
+      topic: (topic: LiveTopic) => {
+        const key = String(topic);
+        let stream = topics.get(key);
+        if (!stream) {
+          stream = {
+            name,
+            connection: this,
+            subscribe: (handlers: LiveHandlers<E>) => this.subscribe(name, handlers, key),
+          };
+          topics.set(key, stream);
+        }
+        return stream;
+      },
+    };
+  }
+
+  /** Subscribe to `stream` (on `topic`, for a row stream), opening the socket if this is the first subscription. */
+  subscribe<E>(stream: string, handlers: LiveHandlers<E>, topic?: string): LiveSubscription {
     const sub = `s${this.nextSub++}`;
-    this.entries.set(sub, { stream, handlers: handlers as LiveHandlers<unknown>, ready: false });
+    this.entries.set(sub, { stream, topic, handlers: handlers as LiveHandlers<unknown>, ready: false });
     if (this.socket && this.socket.readyState === 1) {
-      this.send({ type: "subscribe", sub, stream });
+      this.send(subscribeFrame(sub, stream, topic));
     } else {
       this.open();
     }
@@ -395,7 +441,7 @@ export class LiveConnection {
       this.setStatus("open");
       this.entries.forEach((entry, sub) => {
         entry.ready = false;
-        this.send({ type: "subscribe", sub, stream: entry.stream });
+        this.send(subscribeFrame(sub, entry.stream, entry.topic));
         if (reconnect) entry.handlers.resync?.();
       });
     };

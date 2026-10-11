@@ -158,6 +158,22 @@ pub struct StreamExport {
     pub path: String,
     /// The shape of the envelope's `value`, from the stream's element type.
     pub value: TypeSchema,
+    /// How a page subscribes to it: with no topic, or naming a row.
+    pub topics: StreamTopics,
+}
+
+/// How a page names what it subscribes to on a stream (TODO.md "Live updates"
+/// §6) — `sc-stream`'s `TopicSpec` as the client generator needs it, in a crate
+/// that cannot name that one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StreamTopics {
+    /// No topic: one flow for every subscriber (`live.boiler.subscribe(h)`).
+    #[default]
+    Single,
+    /// The subscriber's own topic, never named (`live.job_status.subscribe(h)`).
+    User,
+    /// A row's key (`live.board_activity.subscribe(7, h)`).
+    Row,
 }
 
 /// Generate a TypeScript client module from an endpoint set.
@@ -210,8 +226,11 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
         values.extend(["LiveConnection", "liveUrl"]);
     }
     let mut types: Vec<&str> = vec!["ClientOptions"];
-    if !streams.is_empty() {
+    if streams.iter().any(|s| s.topics != StreamTopics::Row) {
         types.push("LiveStream");
+    }
+    if streams.iter().any(|s| s.topics == StreamTopics::Row) {
+        types.push("LiveRowStream");
     }
     if !tables.is_empty() {
         types.push("Selected");
@@ -252,8 +271,8 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
     if !streams.is_empty() {
         out.push_str(
             "export { LiveConnection } from \"./helper\";\n\
-             export type { LiveError, LiveHandlers, LiveOptions, LiveReady, LiveStatus, LiveStream, \
-             LiveSubscription } from \"./helper\";\n",
+             export type { LiveError, LiveHandlers, LiveOptions, LiveReady, LiveRowStream, LiveStatus, \
+             LiveStream, LiveSubscription, LiveTopic } from \"./helper\";\n",
         );
     }
     if !tables.is_empty() {
@@ -305,7 +324,7 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
              \x20 source?: unknown;\n\
              }};\n",
             stream.name,
-            to_pascal_case(&stream.name),
+            stream_type_name(&stream.name),
             element_value_type(&stream.value),
         );
     }
@@ -313,12 +332,19 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
         out.push_str("/** The streams this application exposes, one accessor each. */\n");
         out.push_str("export interface LiveStreams {\n");
         for stream in streams {
+            let (accessor, what) = match stream.topics {
+                StreamTopics::Single => ("LiveStream", "stream"),
+                StreamTopics::User => {
+                    ("LiveStream", "stream; each subscriber gets their own topic")
+                }
+                StreamTopics::Row => ("LiveRowStream", "stream; subscribe naming a row's key"),
+            };
             let _ = writeln!(
                 out,
-                "  /** The `{}` stream. */\n  readonly {}: LiveStream<{}Envelope>;",
+                "  /** The `{}` {what}. */\n  readonly {}: {accessor}<{}Envelope>;",
                 stream.name,
                 stream.name,
-                to_pascal_case(&stream.name),
+                stream_type_name(&stream.name),
             );
         }
         out.push_str("}\n\n");
@@ -391,11 +417,15 @@ pub fn generate_client_with_streams(set: &EndpointSet, streams: &[StreamExport])
     if !streams.is_empty() {
         out.push_str("    live: {\n");
         for stream in streams {
+            let accessor = match stream.topics {
+                StreamTopics::Single | StreamTopics::User => "stream",
+                StreamTopics::Row => "rowStream",
+            };
             let _ = writeln!(
                 out,
-                "      {}: connection.stream<{}Envelope>(\"{}\"),",
+                "      {}: connection.{accessor}<{}Envelope>(\"{}\"),",
                 stream.name,
-                to_pascal_case(&stream.name),
+                stream_type_name(&stream.name),
                 stream.name,
             );
         }
@@ -709,6 +739,23 @@ fn element_value_type(schema: &TypeSchema) -> String {
 }
 
 /// Convert a `camelCase` operation name to `PascalCase` for type names.
+/// The prefix a stream's types are named with: its name in PascalCase,
+/// `job_status` → `JobStatus`, so its envelope is `JobStatusEnvelope`. A stream
+/// name is letters, digits and `_` (`check_stream_name`), so splitting on `_`
+/// is the whole of it; a name that is all underscores keeps one, to stay a name.
+fn stream_type_name(name: &str) -> String {
+    let joined: String = name
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(to_pascal_case)
+        .collect();
+    if joined.is_empty() {
+        "_".to_owned()
+    } else {
+        joined
+    }
+}
+
 fn to_pascal_case(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
@@ -1235,12 +1282,24 @@ export interface LiveSubscription {
   close(): void;
 }
 
-/** One stream an application exposes, ready to subscribe to. */
+/** One stream an application exposes, ready to subscribe to — or one row's topic of a row stream. */
 export interface LiveStream<E> {
   readonly name: string;
   /** The connection it is subscribed over, for its `status`. */
   readonly connection: LiveConnection;
   subscribe(handlers: LiveHandlers<E>): LiveSubscription;
+}
+
+/** A row's key, as a topic: `"7"` and `7` name the same row. */
+export type LiveTopic = string | number;
+
+/** A stream with a topic per row: subscribe naming the row's key. */
+export interface LiveRowStream<E> {
+  readonly name: string;
+  readonly connection: LiveConnection;
+  subscribe(topic: LiveTopic, handlers: LiveHandlers<E>): LiveSubscription;
+  /** One row's topic as a stream of its own — the same object for the same key, so a hook can depend on it. */
+  topic(topic: LiveTopic): LiveStream<E>;
 }
 
 /** How a live connection behaves. */
@@ -1261,7 +1320,17 @@ export function liveUrl(baseUrl: string, path: string): string {
   return url.toString();
 }
 
-type LiveEntry = { stream: string; handlers: LiveHandlers<unknown>; ready: boolean };
+/** A `subscribe` frame: the topic only when there is one. */
+function subscribeFrame(sub: string, stream: string, topic: string | undefined): Record<string, unknown> {
+  return topic === undefined ? { type: "subscribe", sub, stream } : { type: "subscribe", sub, stream, topic };
+}
+
+type LiveEntry = {
+  stream: string;
+  topic: string | undefined;
+  handlers: LiveHandlers<unknown>;
+  ready: boolean;
+};
 
 /** One socket, any number of subscriptions, reconnecting by itself. */
 export class LiveConnection {
@@ -1296,7 +1365,7 @@ export class LiveConnection {
     };
   }
 
-  /** The accessor for the stream called `name`. */
+  /** The accessor for the stream called `name` — one with no topic, or whose topic is the subscriber's own. */
   stream<E>(name: string): LiveStream<E> {
     return {
       name,
@@ -1305,12 +1374,36 @@ export class LiveConnection {
     };
   }
 
-  /** Subscribe to `stream`, opening the socket if this is the first subscription. */
-  subscribe<E>(stream: string, handlers: LiveHandlers<E>): LiveSubscription {
+  /** The accessor for the stream called `name`, whose topics are rows. */
+  rowStream<E>(name: string): LiveRowStream<E> {
+    const topics = new Map<string, LiveStream<E>>();
+    return {
+      name,
+      connection: this,
+      subscribe: (topic: LiveTopic, handlers: LiveHandlers<E>) =>
+        this.subscribe(name, handlers, String(topic)),
+      topic: (topic: LiveTopic) => {
+        const key = String(topic);
+        let stream = topics.get(key);
+        if (!stream) {
+          stream = {
+            name,
+            connection: this,
+            subscribe: (handlers: LiveHandlers<E>) => this.subscribe(name, handlers, key),
+          };
+          topics.set(key, stream);
+        }
+        return stream;
+      },
+    };
+  }
+
+  /** Subscribe to `stream` (on `topic`, for a row stream), opening the socket if this is the first subscription. */
+  subscribe<E>(stream: string, handlers: LiveHandlers<E>, topic?: string): LiveSubscription {
     const sub = `s${this.nextSub++}`;
-    this.entries.set(sub, { stream, handlers: handlers as LiveHandlers<unknown>, ready: false });
+    this.entries.set(sub, { stream, topic, handlers: handlers as LiveHandlers<unknown>, ready: false });
     if (this.socket && this.socket.readyState === 1) {
-      this.send({ type: "subscribe", sub, stream });
+      this.send(subscribeFrame(sub, stream, topic));
     } else {
       this.open();
     }
@@ -1356,7 +1449,7 @@ export class LiveConnection {
       this.setStatus("open");
       this.entries.forEach((entry, sub) => {
         entry.ready = false;
-        this.send({ type: "subscribe", sub, stream: entry.stream });
+        this.send(subscribeFrame(sub, entry.stream, entry.topic));
         if (reconnect) entry.handlers.resync?.();
       });
     };

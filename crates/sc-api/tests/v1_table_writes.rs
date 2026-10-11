@@ -262,7 +262,10 @@ async fn watching(
     )
     .await?;
     dispatcher.reload(cat).await?;
-    cat.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
+    cat.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>,
+    )?;
     Ok(dispatcher)
 }
 

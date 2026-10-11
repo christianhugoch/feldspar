@@ -16,15 +16,18 @@
 //! | [`topic`] | Subscriptions bucketed by topic, for the fan-out |
 //! | [`access`] | Who may subscribe, as pure functions over looked-up facts |
 //! | [`limits`] | The per-connection limits and clocks, as configuration |
-//! | [`hub`] | Connections, and one fan-out task per running stream |
+//! | [`hub`] | Connections, one fan-out task per running stream, publishing, and the write watch |
+//! | [`rows`] | Which tables a row topic's read rule reads |
 //!
 //! ## Where this sits
 //!
 //! Layer 7, beside `sc-workflow` and `sc-agent`: above `sc-stream`, whose
-//! running streams it subscribes to, and `sc-auth`, whose roles it decides by
-//! and whose session ends it listens for; below `sc-server`. From L2 it also
-//! sits above the ownership evaluator (`sc-expr`), because a row topic is
-//! authorised by the row's read rule.
+//! running streams it subscribes to and publishes into, `sc-auth`, whose roles
+//! it decides by and whose session ends it listens for, and `sc-catalog`,
+//! whose write seam tells it a row topic's access may have changed; below
+//! `sc-server`. It implements `sc-expr`'s `LiveHost`, which is how the
+//! `publish` action and a code body's `live.publish` reach it without naming
+//! it.
 //!
 //! ## The rules every later milestone keeps
 //!
@@ -42,14 +45,20 @@ pub mod access;
 pub mod hub;
 pub mod limits;
 pub mod protocol;
+pub mod rows;
 pub mod subscription;
 pub mod topic;
 
-pub use access::{Denied, StoredStream, StreamFacts, caller_role, may_subscribe};
+pub use access::{
+    Caller, Denied, Grant, Refusal, RowFact, StoredStream, StreamFacts, caller_role, may_open,
+    may_subscribe,
+};
 pub use hub::{
-    Attached, CloseReason, CloseSignal, Connection, ConnectionId, ConnectionInfo, Delivery, LiveHub,
+    Attached, CloseReason, CloseSignal, Connection, ConnectionId, ConnectionInfo, Delivery,
+    LiveHub, Touch, Watch, topic_of,
 };
 pub use limits::LiveLimits;
 pub use protocol::{ClientFrame, ErrorCode, FrameError, ServerFrame};
+pub use rows::read_rule_tables;
 pub use subscription::{Phase, Subscription, SubscriptionSet};
 pub use topic::TopicIndex;

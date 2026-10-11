@@ -2,6 +2,86 @@
 
 Changes in reverse chronological order.
 
+## Live updates L2: internal streams, topics and server-side publishing
+
+Saltcorn can now say things to an application's page itself — a toast when a job starts, a
+progress bar while it runs — to exactly the users who should hear them. TODO.md L2.1–L2.11, and
+L3.2, which L2.6 needed first.
+
+- **The `internal` stream provider** (`sc-stream::providers::internal`, always built in):
+  declared keys, `topics` (`single | user | row`, `table` shown for `row`), `retain_last` +
+  `retain_ttl_s`, and — read from L4 — `client_publish`, `presence`, `presence_fields`. A new
+  `StreamProvider::validate_in(config, catalog)` save-time hook refuses a `row` table that is
+  missing or has no one-column key, and a presence field that is not a column of `users` (or is
+  its password hash). Two more provider hooks, each defaulting to the old behaviour:
+  `replay` (`Ring | Nothing | Latest { ttl, max_topics }`) and `accepts_publish`.
+- **Publishing**: `RunningStream::publish_value(topic, value)` delivers through the sink the
+  running subscription was handed (the supervisor now keeps it beside the subscription), so the
+  rate cap, stamp, ring, broadcast and trigger bridge all apply. It refuses, by name, a stream
+  Saltcorn may not publish to, one not running here, a topic of the wrong kind, and a value that
+  does not match the element type (counted as `malformed`). `LiveHub::publish`/`topics` find the
+  stream by name through the supervisor (`LiveHub::set_streams`). **Deviation from the plan**:
+  no separate name → sink registry; a provider-owned one would be orphaned by a module change and
+  a process-wide one would collide between two servers in one process.
+- **Retaining the latest element** (`sc-stream::Retained`): the latest envelope per topic, for a
+  TTL and at most 10 000 topics, kept under the same lock as the ring and handed out with it, so
+  the fan-out's copy never gaps or doubles; sent after `ready` and counted in `replayed`.
+- **Topics** (`sc-live::access`): `may_open` (exposure, stored, floor) and
+  `may_subscribe(facts, caller, topic)` → a `Grant` naming the routing topic. A `user` stream puts
+  each subscriber on their own id (anonymous is `unavailable`; naming a topic is `invalid`). A
+  `row` stream needs **the application's REST read of that row** to return it —
+  `sc_api::row_readable_as`, i.e. `read_row_values_as` with `pk = key`, so the floor, the
+  ownership formula and RLS decide exactly as REST does — and a row of a table outside the app's
+  subset is absent. Missing, forbidden and absent rows are one `unavailable`.
+- **Re-checking row topics on writes**: a row subscription watches its table and every table its
+  ownership formula reads (`sc_live::read_rule_tables`, from the formula's Ⱶ paths and `Ↄ`
+  aggregations). The hub is a second `TableEvents` listener that observes only watched tables and
+  hands a write to the watching connections as a `Touch`; they re-ask the REST read off the write
+  path and send `revoked`. A write inside a `SharedTx` is handed over again two seconds later
+  until L3.1 publishes after commit.
+- **The write seam holds several listeners** (L3.2): `Catalog::add_table_events(key, listener)`
+  replaces `set_table_events` — the trigger dispatcher under `TRIGGER_EVENTS`, the hub under
+  `LIVE_EVENTS`; the same key replaces, a different key adds; `observes_writes` is the OR and a
+  write goes only to the listeners that observe it, each its own copy (`TableWrite` is `Clone`),
+  one's failure not starving the next. Every caller updated.
+- **The `publish` action** (`sc-core-actions`): `stream` (a picker the server fills with the
+  internal streams, `INTERNAL_STREAMS_QUERY`), `topic` (formula; blank is `user.id` on a `user`
+  stream), `value` (a formula per key). As a workflow step it tells the user who started the run;
+  a per-user publish with no user is an error naming the trigger.
+- **`live.publish(stream, topic, value)` in code bodies**: `sc_expr::LiveHost` (with
+  `LiveTopics`), installed on the catalog (`Catalog::set_live_host`) by the router, is a sixth
+  surface. JavaScript: a synchronous op, a budget of `MAX_LIVE_PUBLISHES` (1 000) per run, two
+  arguments for a stream without topics. Python: `Surface::Live`, `__sc_live`, `LiveError`,
+  `live = Live()` in the `saltcorn` package. Not bound in formulas.
+- **Client**: `StreamExport.topics` (`StreamTopics`); a `row` stream's accessor is a
+  `LiveRowStream` (`subscribe(topic, handlers)`, `topic(key)` memoised); the topic is sent with
+  `subscribe` and again on reconnect; envelope types are PascalCase (`JobStatusEnvelope`, not
+  `Job_statusEnvelope`). React: `useLatest(accessor)`. All four UIs' `helper.ts` regenerated.
+- **Fixed from L1**: `live-react.ts` imported `api` even for an app with no streams, so every
+  generated React app without one failed to build under `noUnusedLocals`; the scaffold's file
+  list tests had not been told about `live-react.ts`.
+- **Admin**: the Observe screen has a topic column (`Topic (user)`, `Topic (boards row)`) and a
+  topic filter box (`readTopics`, `topicHeading`, `filterByTopic` in `streams.ts`, translated in
+  all five catalogues); the stream form renders the internal provider (the conditional `table`
+  field); the trigger form offers `publish`. The Streams notice for a `--no-default-features`
+  build now says only MQTT is missing.
+- **Docs**: TECHNICAL_DESIGN §14.10 (internal streams, topics, retaining, re-checks, publishing,
+  client, admin, tests), §14.3, §10.1 (`publish`, the `live` surface), §10.2 (the keyed write
+  seam), §15, §2; `docs/tutorial-live.md` part 2; `live` in tutorial-python and tutorial-triggers.
+- **Tests**: `sc-stream` (the provider's settings, refusals and topic/replay answers; `Retained`;
+  a retaining running stream; server-side topic checks), `sc-live` (`may_subscribe` as tables for
+  user and row topics), `sc-catalog` `table_events.rs` (two keys both hear, same key replaces, a
+  failure does not starve), `sc-expr` (a JS loop publishing in order, a catchable refusal, no
+  `live` without a host), `sc-python` `python_live.rs` (type-checked here; this machine has no
+  libpython, CI links and runs it), `sc-api` (`live_connection` row topics on the wire and after a
+  reconnect; `typescript_typecheck` per-user and per-row accessors including what must not
+  compile), `sc-server` `app_live_topics.rs` (8 socket tests, two users) and `tutorial_live.rs`
+  part 2. A browser walk on a scratch database checked the stream form, the Observe topic column
+  and filter, and the tutorial's React component built and served: toasts and a progress bar for
+  one user, nothing for the other, the bar restored at once on a mid-job reload.
+- Also fixed: `sc-stream`'s MQTT test used `geometry` as an unknown type name, which it has not
+  been since the analytics milestones made it a known one.
+
 ## Live updates L1: one live socket per page, with the access rules
 
 An application's page now holds **one** WebSocket, `GET {mount}/live`, carrying any number of

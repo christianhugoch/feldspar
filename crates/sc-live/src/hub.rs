@@ -28,19 +28,56 @@
 //! moment: everything before is replay, everything after is delivered, and
 //! nothing is both.
 //!
+//! ## What a new subscription is replayed is the stream's to say
+//!
+//! [`Replay::Ring`] hands over the ring's elements on the subscriber's topic —
+//! the last readings of a sensor. [`Replay::Latest`] hands over the latest
+//! element on the topic, if it is still fresh — the current progress of a job,
+//! and nobody else's: a `user` subscription is on its own id, so the retained
+//! element it is handed is its own. [`Replay::Nothing`] hands over nothing.
+//! The fan-out keeps its own copy of the retained elements for the reason it
+//! keeps its own ring.
+//!
 //! ## Connections, so a sign-out reaches them
 //!
 //! [`LiveHub::connect`] registers a connection with its application, user and
 //! session, which is what makes two rules possible: the per-user connection
 //! limit, and closing a session's sockets the moment it ends on this node
 //! ([`SessionListener`]) rather than at the next re-check.
+//!
+//! ## Writes that could change who may read a row topic
+//!
+//! A `row` subscription was authorised by its row's read rule, and a write can
+//! change that verdict: the row itself, or a row in a table its ownership
+//! formula reads (a share removed). So a connection **watches** the tables its
+//! row subscriptions depend on ([`Connection::watch`]), the hub is a
+//! [`TableEvents`] listener that observes exactly the watched tables, and a
+//! write to one is handed to the watching connections as a [`Touch`] — which
+//! they re-check on their own task, off the write's path (§3 rule 6). A table
+//! nobody watches is not observed, so the write pays nothing.
+//!
+//! ## Publishing
+//!
+//! [`LiveHub::publish`] is the one door Saltcorn's own publishers use — the
+//! `publish` action, `live.publish` in a code body — through the
+//! [`LiveHost`](sc_expr::LiveHost) seam the catalog holds. It finds the
+//! running stream by name ([`LiveHub::set_streams`] hands it the supervisor)
+//! and publishes through the sink its subscription was handed
+//! ([`RunningStream::publish_value`]), so a published element takes exactly
+//! the path a provider's would.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
+use std::time::Duration;
 
+use chrono::Utc;
 use sc_auth::{SessionEnded, SessionListener};
-use sc_stream::{Envelope, RunningStream, StreamId};
+use sc_catalog::{Catalog, TableEvents, TableWrite, WriteOp};
+use sc_error::{Error, Result};
+use sc_expr::{LiveHost, LiveTopics};
+use sc_stream::{Envelope, Replay, Retained, RunningStream, StreamId, StreamSupervisor, TopicSpec};
+use serde_json::Value as Json;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use uuid::Uuid;
@@ -86,17 +123,42 @@ pub struct Delivery {
     pub envelope: Arc<Envelope>,
 }
 
+/// A write to a table some of a connection's row subscriptions depend on —
+/// what it re-checks them for (§3 rule 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Touch {
+    /// The table written to.
+    pub table: String,
+    /// The written row's key, as a topic spells it — before and after, for an
+    /// update that changed it. Empty for a table without a one-column key.
+    pub keys: Vec<String>,
+}
+
 /// Every live connection, and the fan-outs.
 pub struct LiveHub {
     limits: LiveLimits,
     next_connection: AtomicU64,
     connections: Mutex<HashMap<ConnectionId, ConnectionEntry>>,
     fanouts: Mutex<Fanouts>,
+    /// The running streams, for publishing — set once at boot.
+    streams: RwLock<Option<Arc<StreamSupervisor>>>,
+    /// Table → connection → how many of its subscriptions watch it.
+    watched: Mutex<HashMap<String, HashMap<ConnectionId, usize>>>,
+    /// Itself, for a task that outlives the call that spawned it.
+    me: Weak<LiveHub>,
 }
 
 struct ConnectionEntry {
     info: ConnectionInfo,
     close: watch::Sender<Option<CloseReason>>,
+    touches: Arc<Touches>,
+}
+
+/// The writes waiting for a connection to re-check against, and the bell.
+#[derive(Default)]
+struct Touches {
+    pending: Mutex<Vec<Touch>>,
+    bell: Notify,
 }
 
 /// The fan-outs a new subscription joins, and the subscriber count per stream.
@@ -110,12 +172,120 @@ struct Fanouts {
 impl LiveHub {
     /// A hub with no connections, enforcing `limits`.
     pub fn new(limits: LiveLimits) -> Arc<LiveHub> {
-        Arc::new(LiveHub {
+        Arc::new_cyclic(|me| LiveHub {
             limits,
             next_connection: AtomicU64::new(1),
             connections: Mutex::new(HashMap::new()),
             fanouts: Mutex::new(Fanouts::default()),
+            streams: RwLock::new(None),
+            watched: Mutex::new(HashMap::new()),
+            me: me.clone(),
         })
+    }
+
+    fn self_ref(&self) -> Option<Arc<LiveHub>> {
+        self.me.upgrade()
+    }
+
+    /// Hand the hub the running streams, so it can publish to them. Once, at
+    /// boot; a hub with none refuses every publish by name.
+    pub fn set_streams(&self, supervisor: Arc<StreamSupervisor>) {
+        if let Ok(mut guard) = self.streams.write() {
+            *guard = Some(supervisor);
+        }
+    }
+
+    /// The running stream called `name`, or the refusal a publisher sees.
+    fn running(&self, name: &str) -> Result<Arc<RunningStream>> {
+        let supervisor = match self.streams.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let supervisor = supervisor.ok_or_else(|| {
+            Error::config("this server runs no streams, so there is nothing to publish to")
+        })?;
+        // The supervisor holds what it has started, so a stream that was
+        // disabled before this server started is not here either; the sentence
+        // covers both rather than claiming the stream does not exist.
+        supervisor.by_name(name).ok_or_else(|| {
+            Error::invalid(format!(
+                "there is no stream `{name}` running on this server — it does not exist, or it \
+                 is disabled"
+            ))
+        })
+    }
+
+    /// Publish `value` on `topic` of the stream called `stream` (TODO.md "Live
+    /// updates" L2.2) — what the `publish` action and `live.publish` in a code
+    /// body reach, through [`LiveHost`].
+    ///
+    /// Every refusal is an error the caller sees: an unknown stream, one whose
+    /// provider Saltcorn does not publish to, one not running here, a topic of
+    /// the wrong kind, a value that does not match the element type (counted as
+    /// `malformed`). See [`RunningStream::publish_value`].
+    pub fn publish(
+        &self,
+        stream: &str,
+        topic: Option<String>,
+        value: Json,
+    ) -> Result<Option<String>> {
+        self.running(stream)?.publish_value(topic, value)
+    }
+
+    /// How the stream called `stream` is split into topics, for a publisher —
+    /// refused for a stream Saltcorn does not publish to.
+    pub fn topics(&self, stream: &str) -> Result<LiveTopics> {
+        let running = self.running(stream)?;
+        if !running.provider().is_some_and(|p| p.accepts_publish()) {
+            return Err(Error::invalid(format!(
+                "stream `{stream}` is not an internal stream, so Saltcorn cannot publish to it"
+            )));
+        }
+        match running.topic_spec()? {
+            TopicSpec::Single => Ok(LiveTopics::Single),
+            TopicSpec::User => Ok(LiveTopics::User),
+            TopicSpec::Row { table } => Ok(LiveTopics::Row { table }),
+            TopicSpec::PerElementRow { table } => Err(Error::invalid(format!(
+                "stream `{stream}` carries the row changes of `{table}`, which only a write makes"
+            ))),
+        }
+    }
+
+    /// Hand a write to `table` to every connection watching it.
+    pub fn touch(&self, touch: Touch) {
+        let watchers: Vec<ConnectionId> = match lock(&self.watched).get(&touch.table) {
+            Some(by_connection) => by_connection.keys().copied().collect(),
+            None => return,
+        };
+        let connections = lock(&self.connections);
+        for id in watchers {
+            if let Some(entry) = connections.get(&id) {
+                lock(&entry.touches.pending).push(touch.clone());
+                entry.touches.bell.notify_one();
+            }
+        }
+    }
+
+    /// Whether any connection watches `table`.
+    pub fn watches(&self, table: &str) -> bool {
+        lock(&self.watched).contains_key(table)
+    }
+
+    fn unwatch(&self, connection: ConnectionId, tables: &[String]) {
+        let mut watched = lock(&self.watched);
+        for table in tables {
+            if let Some(by_connection) = watched.get_mut(table) {
+                if let Some(count) = by_connection.get_mut(&connection) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        by_connection.remove(&connection);
+                    }
+                }
+                if by_connection.is_empty() {
+                    watched.remove(table);
+                }
+            }
+        }
     }
 
     /// The limits every connection is held to.
@@ -151,11 +321,13 @@ impl LiveHub {
         }
         let id = self.next_connection.fetch_add(1, Ordering::Relaxed);
         let (close, closed) = watch::channel(None);
+        let touches = Arc::new(Touches::default());
         connections.insert(
             id,
             ConnectionEntry {
                 info: info.clone(),
                 close,
+                touches: Arc::clone(&touches),
             },
         );
         drop(connections);
@@ -168,6 +340,7 @@ impl LiveHub {
                 closed,
                 queue,
                 wake: Arc::new(Notify::new()),
+                touches,
                 next_attachment: AtomicU64::new(1),
             },
             deliveries,
@@ -263,6 +436,74 @@ impl SessionListener for LiveHub {
     }
 }
 
+impl LiveHost for LiveHub {
+    fn topics(&self, stream: &str) -> Result<LiveTopics> {
+        LiveHub::topics(self, stream)
+    }
+
+    fn publish(&self, stream: &str, topic: Option<String>, value: Json) -> Result<Option<String>> {
+        LiveHub::publish(self, stream, topic, value)
+    }
+}
+
+/// How long after a write made inside a shared transaction it is handed to
+/// the watching connections a second time.
+///
+/// `TableEvents::emit` runs **before** such a transaction commits (§10.2), so
+/// a re-check made at once reads the state from before the write and passes.
+/// The second touch is the interim answer until writes are published after
+/// commit (TODO.md "Live updates" L3.1); the clock re-check is the backstop
+/// behind both.
+const IN_TRANSACTION_RETOUCH: Duration = Duration::from_secs(2);
+
+/// The re-check half of §3 rule 6: the hub observes exactly the tables some
+/// connection's row subscriptions depend on, and hands each write to them as a
+/// [`Touch`]. It does no access work itself — that is the connections', on
+/// their own tasks — so a write's latency does not grow with the number of
+/// subscribers.
+#[async_trait::async_trait]
+impl TableEvents for LiveHub {
+    fn observes(&self, table: &str, _op: WriteOp) -> bool {
+        self.watches(table)
+    }
+
+    async fn emit(&self, _catalog: &Catalog, write: TableWrite<'_>) -> Result<()> {
+        let mut keys = BTreeSet::new();
+        if let [key] = write.table.primary_key.as_slice() {
+            for row in std::iter::once(&write.row).chain(write.old_row.iter()) {
+                if let Some(topic) = row.get(key).and_then(topic_of) {
+                    keys.insert(topic);
+                }
+            }
+        }
+        let touch = Touch {
+            table: write.table.name.clone(),
+            keys: keys.into_iter().collect(),
+        };
+        if write.tx.is_some() {
+            let hub_touch = touch.clone();
+            if let Some(hub) = self.self_ref() {
+                tokio::spawn(async move {
+                    tokio::time::sleep(IN_TRANSACTION_RETOUCH).await;
+                    hub.touch(hub_touch);
+                });
+            }
+        }
+        self.touch(touch);
+        Ok(())
+    }
+}
+
+/// A row key as a topic spells it: a string as it is, a number as its digits.
+pub fn topic_of(value: &Json) -> Option<String> {
+    match value {
+        Json::String(text) => Some(text.clone()),
+        Json::Number(n) => Some(n.to_string()),
+        Json::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// One registered connection. Dropping it deregisters it.
 pub struct Connection {
     id: ConnectionId,
@@ -271,7 +512,38 @@ pub struct Connection {
     closed: watch::Receiver<Option<CloseReason>>,
     queue: mpsc::Sender<Delivery>,
     wake: Arc<Notify>,
+    touches: Arc<Touches>,
     next_attachment: AtomicU64,
+}
+
+/// A connection's watch on some tables, held by the subscription it is for.
+/// Dropping it stops the watch — and, with the last watcher of a table gone,
+/// stops the hub observing writes to it.
+pub struct Watch {
+    hub: Arc<LiveHub>,
+    connection: ConnectionId,
+    tables: Vec<String>,
+}
+
+impl Watch {
+    /// The tables watched.
+    pub fn tables(&self) -> &[String] {
+        &self.tables
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.hub.unwatch(self.connection, &self.tables);
+    }
+}
+
+impl std::fmt::Debug for Watch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Watch")
+            .field("tables", &self.tables)
+            .finish()
+    }
 }
 
 impl Connection {
@@ -297,6 +569,44 @@ impl Connection {
     /// for the next element to get through.
     pub async fn lagged(&self) {
         self.wake.notified().await;
+    }
+
+    /// Watch `tables` for writes, for as long as the returned [`Watch`] is
+    /// held — what a `row` subscription holds for its row's table and every
+    /// table its read rule reads.
+    pub fn watch(&self, tables: impl IntoIterator<Item = String>) -> Watch {
+        let tables: Vec<String> = tables
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut watched = lock(&self.hub.watched);
+        for table in &tables {
+            *watched
+                .entry(table.clone())
+                .or_default()
+                .entry(self.id)
+                .or_insert(0) += 1;
+        }
+        drop(watched);
+        Watch {
+            hub: Arc::clone(&self.hub),
+            connection: self.id,
+            tables,
+        }
+    }
+
+    /// Resolves when a watched table was written to; [`take_touches`] says
+    /// what.
+    ///
+    /// [`take_touches`]: Connection::take_touches
+    pub async fn touched(&self) {
+        self.touches.bell.notified().await;
+    }
+
+    /// The writes waiting to be re-checked against, oldest first, taken.
+    pub fn take_touches(&self) -> Vec<Touch> {
+        std::mem::take(&mut *lock(&self.touches.pending))
     }
 
     /// Attach a subscription to `running`, on `topic`: join (or start) the
@@ -476,8 +786,28 @@ impl Fanout {
 /// every handle on the mailbox is gone.
 async fn route(running: Arc<RunningStream>, mut inbox: mpsc::UnboundedReceiver<Command>) {
     let feed = running.subscribe_elements();
-    let capacity = running.ring_capacity();
-    let mut ring: VecDeque<Arc<Envelope>> = feed.replay.into_iter().map(Arc::new).collect();
+    let policy = running.replay().clone();
+    // Only the copy the policy reads is kept: a retaining stream's subscriber
+    // is never handed the ring, and a ring stream has nothing retained.
+    let capacity = match policy {
+        Replay::Ring => running.ring_capacity(),
+        Replay::Nothing | Replay::Latest { .. } => 0,
+    };
+    let mut ring: VecDeque<Arc<Envelope>> = match policy {
+        Replay::Ring => feed.replay.into_iter().map(Arc::new).collect(),
+        Replay::Nothing | Replay::Latest { .. } => VecDeque::new(),
+    };
+    let mut retained = match &policy {
+        Replay::Latest { ttl, max_topics } => {
+            let mut retained = Retained::new(*ttl, *max_topics);
+            let now = Utc::now();
+            for envelope in feed.retained {
+                retained.keep(envelope, now);
+            }
+            Some(retained)
+        }
+        Replay::Ring | Replay::Nothing => None,
+    };
     let mut elements = feed.receiver;
     let mut index: TopicIndex<Key, Sink> = TopicIndex::new();
     let mut flowing = true;
@@ -490,11 +820,18 @@ async fn route(running: Arc<RunningStream>, mut inbox: mpsc::UnboundedReceiver<C
             command = inbox.recv() => match command {
                 None => break,
                 Some(Command::Add { key, topic, sink, reply }) => {
-                    let replay = ring
-                        .iter()
-                        .filter(|envelope| envelope.topic == topic)
-                        .cloned()
-                        .collect();
+                    let replay = match &retained {
+                        Some(retained) => retained
+                            .get(topic.as_deref(), Utc::now())
+                            .map(|envelope| Arc::new(envelope.clone()))
+                            .into_iter()
+                            .collect(),
+                        None => ring
+                            .iter()
+                            .filter(|envelope| envelope.topic == topic)
+                            .cloned()
+                            .collect(),
+                    };
                     index.insert(topic, key, sink);
                     let _ = reply.send(replay);
                 }
@@ -504,6 +841,9 @@ async fn route(running: Arc<RunningStream>, mut inbox: mpsc::UnboundedReceiver<C
             },
             received = elements.recv(), if flowing => match received {
                 Ok(envelope) => {
+                    if let Some(retained) = retained.as_mut() {
+                        retained.keep(envelope.clone(), Utc::now());
+                    }
                     let envelope = Arc::new(envelope);
                     if capacity > 0 {
                         if ring.len() >= capacity {

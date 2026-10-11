@@ -453,7 +453,10 @@ async fn a_delegated_write_is_an_event_at_the_depth_its_chain_says() -> Result<(
     )
     .await?;
     dispatcher.reload(&cat).await?;
-    cat.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
+    cat.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>,
+    )?;
 
     // A delegated write goes through `ownership::insert_row_as` rather than
     // straight to the row layer — and it has to carry the same chain the

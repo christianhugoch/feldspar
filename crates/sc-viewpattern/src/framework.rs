@@ -1436,6 +1436,8 @@ impl<'a> ViewerHosts<'a> {
             files: Some(&self.files),
             triggers: self.triggers.as_ref().map(|t| t as &dyn TriggerHost),
             module_fns: self.module_fns.as_deref(),
+            // A view's code renders a page; it publishes nothing.
+            live: None,
         }
     }
 }

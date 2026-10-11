@@ -168,7 +168,10 @@ async fn fixture() -> Result<Fixture> {
     let evaluator: Arc<dyn JsEvaluator> = Arc::new(DenoEvaluator::new());
     let dispatcher =
         Arc::new(TriggerDispatcher::new(Arc::new(registry)).with_evaluator(Arc::clone(&evaluator)));
-    catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn TableEvents>)?;
+    catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn TableEvents>,
+    )?;
 
     let trigger = Trigger::with_body(
         TriggerId::new(),

@@ -39,10 +39,10 @@
 
 use std::sync::{Arc, RwLock};
 
-use sc_api::{StreamExport, StructField, TypeSchema, ValueType};
+use sc_api::{StreamExport, StreamTopics, StructField, TypeSchema, ValueType};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
-use sc_stream::{ElementType, Stream, StreamRegistry};
+use sc_stream::{ElementType, Stream, StreamRegistry, TopicSpec};
 use sc_types::BasicType;
 
 use crate::application::Application;
@@ -95,6 +95,9 @@ pub struct ExposedStream {
     pub stream: Stream,
     /// What an element of it is, from its provider and its configuration (§3).
     pub element_type: ElementType,
+    /// How its elements are split into topics, and so how a page names what
+    /// it subscribes to (TODO.md "Live updates" §2).
+    pub topics: TopicSpec,
 }
 
 /// The app's mount: its first API's, which is what "beside the endpoint set"
@@ -209,9 +212,16 @@ pub async fn app_streams(app: &Application, cat: &Catalog) -> Result<Vec<Exposed
                     app.name
                 ))
             })?;
+        let topics = provider.topic_spec(&stream.configuration).map_err(|e| {
+            Error::config(format!(
+                "application `{}` exposes stream `{declared}`: {e}",
+                app.name
+            ))
+        })?;
         resolved.push(ExposedStream {
             stream,
             element_type,
+            topics,
         });
     }
     Ok(resolved)
@@ -225,6 +235,14 @@ pub fn stream_exports(app: &Application, streams: &[ExposedStream]) -> Vec<Strea
             name: exposed.stream.name.clone(),
             path: live_socket_path(app),
             value: element_value_schema(&exposed.element_type),
+            topics: match exposed.topics {
+                TopicSpec::Single => StreamTopics::Single,
+                TopicSpec::User => StreamTopics::User,
+                // A stream of row changes is subscribed with a filter (L3), not
+                // a topic; until then it is subscribed as a plain stream.
+                TopicSpec::Row { .. } => StreamTopics::Row,
+                TopicSpec::PerElementRow { .. } => StreamTopics::Single,
+            },
         })
         .collect()
 }

@@ -439,46 +439,48 @@ re-checking. No new providers yet. Everything later builds on this.
 ## L2 — Internal streams and server-side publishing (A)
 
 ### Phase 1: the provider
-- [ ] **L2.1** The `internal` provider: config spec (declared keys, `topics: single|user|row`,
+- [x] **L2.1** The `internal` provider: config spec (declared keys, `topics: single|user|row`,
   `table` when `row`, `retain_last` + TTL, `client_publish`, `presence`, `presence_fields`), and
   `element_type` and `TopicSpec` from the configuration. Validation: the `row` table exists and
   has a single-column primary key, and every `presence_fields` entry is a column of `users`.
-- [ ] **L2.2** `LiveHub`: a process-wide registry from stream name to the internal provider's
+- [x] **L2.2** *(Built with the sink held by the running stream and found by name through the
+  supervisor, not a separate registry — TECHNICAL_DESIGN §14.10 says why.)*
+  `LiveHub`: a process-wide registry from stream name to the internal provider's
   sink, filled in by `subscribe` and emptied when the subscription is dropped.
   `LiveHub::publish(stream, topic, value)` validates against the element type (counted as
   `malformed` and refused on a mismatch) and delivers. Publishing to a stopped or unknown stream
   is an error the caller sees.
-- [ ] **L2.3** `retain_last`: the latest envelope per topic, with a TTL and a cap per stream,
+- [x] **L2.3** `retain_last`: the latest envelope per topic, with a TTL and a cap per stream,
   sent after `ready` (counted in `replayed`).
 
 ### Phase 2: topic access
-- [ ] **L2.4** `User` topics: the subscriber names no topic and gets their own user id;
+- [x] **L2.4** `User` topics: the subscriber names no topic and gets their own user id;
   anonymous gets `unavailable`. Test: user X's elements never reach user Y, including through
   `retain_last`.
-- [ ] **L2.5** `Row` topics: subscribing checks read access to the row with the §7.3 rule
+- [x] **L2.5** `Row` topics: subscribing checks read access to the row with the §7.3 rule
   (`may_subscribe` in `sc-live`, a pure function over row, user and table access, plus a test
   table). A missing row and an unreadable row give the same `unavailable`. Test on a runtime-check
   table and on an RLS table.
-- [ ] **L2.6** Re-checking `Row` topics when they could have changed: on a write to the topic's
+- [x] **L2.6** Re-checking `Row` topics when they could have changed: on a write to the topic's
   row, or to any table its ownership formula reads (Ⱶ paths and `AggUse`), re-check the affected
   subscriptions and send `revoked` to those that now fail. Test: removing a user's share row
   (the tutorial-ownership `shares` pattern) revokes their subscription without waiting for the
   60 s interval.
 
 ### Phase 3: publishers
-- [ ] **L2.7** The `publish` action in `sc-core-actions`: `stream` (a picker over internal
+- [x] **L2.7** The `publish` action in `sc-core-actions`: `stream` (a picker over internal
   streams), `topic` (a formula, defaulting to `user.id` for `user` streams), `value` (a map of
   formulas). A `user` topic with no user is an error naming the trigger. Works as a trigger body
   and as a workflow Action step. Test: a workflow started by user X publishes "started", sleeps,
   publishes "finished", and only X's socket receives both.
-- [ ] **L2.8** `live.publish(stream, topic, value)` in JS code bodies (beside `db`) and in
+- [x] **L2.8** `live.publish(stream, topic, value)` in JS code bodies (beside `db`) and in
   Python bodies (`sc-python`), with the same validation. Not bound in formulas. Test: a
   `run_js_code` loop publishing ten progress elements arrives in order.
-- [ ] **L2.9** Admin: the stream form renders the internal provider's settings (it already
+- [x] **L2.9** Admin: the stream form renders the internal provider's settings (it already
   renders whatever the spec declares, so check the repeating group and the conditional `table`
   field). The Observe screen gets a **topic** column and a topic filter box. The trigger form's
   action picker lists `publish`.
-- [ ] **L2.10** Client: `live.<s>.subscribe(handlers)` for `user` streams (no topic) and
+- [x] **L2.10** Client: `live.<s>.subscribe(handlers)` for `user` streams (no topic) and
   `live.<s>.subscribe(topic, handlers)` for `row` streams, typed. React:
   `useStream(live.job_status, …)` and a `useLatest(live.job_status)` helper that returns the
   latest element (what a progress bar wants).
@@ -492,7 +494,7 @@ re-checking. No new providers yet. Everything later builds on this.
    "Done". Bob, signed in at the same time, sees nothing.
 4. Reload Alice's page halfway through: the progress bar shows the current value straight away.
 
-- [ ] **L2.11** Tutorial part 2 (notifications and progress from a workflow) and its
+- [x] **L2.11** Tutorial part 2 (notifications and progress from a workflow) and its
   definition-of-done test. TECHNICAL_DESIGN §14.10 internal streams, topics, `publish`; §10.1
   `live` in code bodies.
 
@@ -504,7 +506,8 @@ re-checking. No new providers yet. Everything later builds on this.
 - [ ] **L3.1** `SharedTx::after_commit(callback)`: run after commit, dropped on rollback. Test: a
   workflow step whose write is rolled back publishes nothing; one that commits publishes once,
   after the commit.
-- [ ] **L3.2** Make the `TableEvents` seam hold more than one listener:
+- [x] **L3.2** *(Done with L2.6, which needed a second listener first; keyed, so a second
+  install under the same key replaces.)* Make the `TableEvents` seam hold more than one listener:
   `Catalog::add_table_events` instead of the replacing `set_table_events`, with `observes` as the
   OR over listeners and `emit` called only on the listeners that observe. Update the callers
   (`sc-server::triggers` and the tests that install a dispatcher). Test: with both the trigger

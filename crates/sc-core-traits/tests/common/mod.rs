@@ -259,8 +259,10 @@ impl Env {
             TriggerDispatcher::new(Arc::new(actions))
                 .with_evaluator(Arc::new(DenoEvaluator::new())),
         );
-        self.catalog
-            .set_table_events(Arc::clone(&dispatcher) as Arc<dyn TableEvents>)?;
+        self.catalog.add_table_events(
+            sc_catalog::TRIGGER_EVENTS,
+            Arc::clone(&dispatcher) as Arc<dyn TableEvents>,
+        )?;
         self.dispatcher = Some(dispatcher);
         Ok(self)
     }

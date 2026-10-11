@@ -50,9 +50,13 @@ use serde::Serialize;
 use serde_json::Value as Json;
 use tokio::sync::broadcast;
 
-use crate::element::ElementType;
+use sc_error::{Error, Result};
+use uuid::Uuid;
+
+use crate::element::{ElementType, RawPayload};
 use crate::envelope::{Element, Envelope};
-use crate::provider::{StreamProvider, TopicSpec};
+use crate::provider::{Replay, StreamProvider, StreamSink, TopicSpec};
+use crate::retained::Retained;
 use crate::stream::{Stream, StreamId};
 use crate::subscription::Subscription;
 
@@ -207,6 +211,10 @@ pub struct ElementFeed {
     /// The last envelopes this process saw, oldest first — "since this server
     /// started", and the Observe screen says exactly that (§9).
     pub replay: Vec<Envelope>,
+    /// The latest envelope per topic, for a stream whose provider retains them
+    /// ([`Replay::Latest`]) — empty otherwise. Taken under the same lock as the
+    /// other two halves, for their reason.
+    pub retained: Vec<Envelope>,
     /// Everything from here on. A receiver that falls behind the channel's
     /// capacity gets `RecvError::Lagged(n)`, which is the consumer's cue to
     /// say so rather than to show a gap (§7).
@@ -237,6 +245,15 @@ pub struct RunningStream {
     /// When the supervisor should try again, set alongside a `Failed` status.
     retry_at: Mutex<Option<DateTime<Utc>>>,
     subscription: Mutex<Option<Subscription>>,
+    /// The sink the current subscription was handed, while it lives — what
+    /// Saltcorn's own publishers deliver through for a provider that
+    /// [accepts them](StreamProvider::accepts_publish). Cleared with the
+    /// subscription, so publishing to a stopped stream is refused rather than
+    /// broadcast by a flow that is not running.
+    sink: Mutex<Option<Arc<dyn StreamSink>>>,
+    /// What a new live subscriber is handed before the next element, from the
+    /// provider and the configuration, computed when the stream starts.
+    replay: Replay,
     elements: AtomicU64,
     dropped_for_triggers: AtomicU64,
     dropped_for_rate: AtomicU64,
@@ -246,9 +263,18 @@ pub struct RunningStream {
     /// consumer can subscribe to a failing stream and start receiving the
     /// moment it comes back.
     sender: broadcast::Sender<Envelope>,
-    ring: Mutex<VecDeque<Envelope>>,
+    /// The replay ring and, for a stream that retains them, the latest element
+    /// per topic: one lock, which `publish` holds across the broadcast send.
+    history: Mutex<History>,
     ring_capacity: usize,
     rate: Mutex<RateWindow>,
+}
+
+/// What a running stream remembers of its own elements — both halves of it,
+/// behind one lock.
+struct History {
+    ring: VecDeque<Envelope>,
+    retained: Option<Retained>,
 }
 
 impl RunningStream {
@@ -258,16 +284,24 @@ impl RunningStream {
     /// `provider` and `element_type` are `Option` together — either both
     /// resolved or neither — and a `None` here means the caller has already put
     /// the reason in the status.
+    // Eight values the supervisor resolves once per start and hands over
+    // together; a struct of them would be built in exactly one place.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         row: Stream,
         provider: Option<Arc<dyn StreamProvider>>,
         element_type: Option<ElementType>,
+        replay: Replay,
         status: StreamStatus,
         channel_capacity: usize,
         ring_capacity: usize,
         rate_cap: u64,
     ) -> RunningStream {
         let (sender, _) = broadcast::channel(channel_capacity.max(1));
+        let retained = match &replay {
+            Replay::Latest { ttl, max_topics } => Some(Retained::new(*ttl, *max_topics)),
+            Replay::Ring | Replay::Nothing => None,
+        };
         RunningStream {
             id: row.id,
             row: RwLock::new(row),
@@ -276,13 +310,18 @@ impl RunningStream {
             status: Mutex::new(status),
             retry_at: Mutex::new(None),
             subscription: Mutex::new(None),
+            sink: Mutex::new(None),
+            replay,
             elements: AtomicU64::new(0),
             dropped_for_triggers: AtomicU64::new(0),
             dropped_for_rate: AtomicU64::new(0),
             malformed: AtomicU64::new(0),
             last_element_at: Mutex::new(None),
             sender,
-            ring: Mutex::new(VecDeque::new()),
+            history: Mutex::new(History {
+                ring: VecDeque::new(),
+                retained,
+            }),
             ring_capacity,
             rate: Mutex::new(RateWindow::new(rate_cap)),
         }
@@ -351,6 +390,11 @@ impl RunningStream {
     /// its own copy of the ring (the live hub's fan-out) sizes it by.
     pub fn ring_capacity(&self) -> usize {
         self.ring_capacity
+    }
+
+    /// What a new live subscriber is handed before the next element.
+    pub fn replay(&self) -> &Replay {
+        &self.replay
     }
 
     /// Replace the row **without** touching the connection.
@@ -422,14 +466,20 @@ impl RunningStream {
         // still held, so nothing can be published into the gap between them.
         // `publish` takes the same lock before sending, which is what makes
         // that true.
-        let guard = match self.ring.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let replay = guard.iter().cloned().collect();
+        let guard = self.history();
+        let replay = guard.ring.iter().cloned().collect();
+        let retained = guard
+            .retained
+            .as_ref()
+            .map(|retained| retained.all(Utc::now()))
+            .unwrap_or_default();
         let receiver = self.sender.subscribe();
         drop(guard);
-        ElementFeed { replay, receiver }
+        ElementFeed {
+            replay,
+            retained,
+            receiver,
+        }
     }
 
     /// How many consumers are currently listening. For a log line and a test;
@@ -463,15 +513,15 @@ impl RunningStream {
         }
 
         {
-            let mut ring = match self.ring.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let mut history = self.history();
             if self.ring_capacity > 0 {
-                if ring.len() == self.ring_capacity {
-                    ring.pop_front();
+                if history.ring.len() == self.ring_capacity {
+                    history.ring.pop_front();
                 }
-                ring.push_back(envelope.clone());
+                history.ring.push_back(envelope.clone());
+            }
+            if let Some(retained) = history.retained.as_mut() {
+                retained.keep(envelope.clone(), received_at);
             }
             // Sent under the ring lock, so a `subscribe_elements` racing this
             // sees the element in exactly one of the two halves it hands out.
@@ -494,13 +544,96 @@ impl RunningStream {
     }
 
     /// Install the live subscription, dropping — and so stopping — whatever was
-    /// there.
+    /// there. Clearing it clears the sink too: nothing is delivered through a
+    /// flow that is not running.
     pub(crate) fn set_subscription(&self, subscription: Option<Subscription>) {
+        if subscription.is_none() {
+            self.set_sink(None);
+        }
         let mut guard = match self.subscription.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         *guard = subscription;
+    }
+
+    /// Install the sink the current subscription was handed (see
+    /// [`publish_value`](RunningStream::publish_value)).
+    pub(crate) fn set_sink(&self, sink: Option<Arc<dyn StreamSink>>) {
+        let mut guard = match self.sink.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = sink;
+    }
+
+    /// Publish one element from Saltcorn's own code — the `publish` action,
+    /// `live.publish` in a code body — on `topic` (TODO.md "Live updates"
+    /// L2.2).
+    ///
+    /// Everything a provider's element goes through, this goes through: the
+    /// sink the running subscription was handed, so the per-second cap, the
+    /// stamp, the ring, the broadcast and the trigger bridge all apply. What is
+    /// checked first, each refusal an error the caller sees:
+    ///
+    /// - the provider **accepts** publishes ([`StreamProvider::accepts_publish`]):
+    ///   an MQTT stream's elements are the broker's word, not Saltcorn's;
+    /// - the stream is **running** here — a stopped or failing stream has no
+    ///   sink, and pretending to publish into it would be a silent drop;
+    /// - the **topic** is the kind the stream's [`TopicSpec`] takes: none for
+    ///   `single`, a user id for `user`, a row's key for `row`;
+    /// - the **value** decodes against the element type — a mismatch is
+    ///   counted as `malformed`, exactly as a broker's bad payload is, and
+    ///   refused.
+    ///
+    /// Returns the topic as it was published (a user id normalised to its
+    /// canonical spelling).
+    pub fn publish_value(&self, topic: Option<String>, value: Json) -> Result<Option<String>> {
+        let name = self.name();
+        let Some(provider) = &self.provider else {
+            return Err(Error::invalid(format!(
+                "stream `{name}` cannot be published to: its provider is not installed"
+            )));
+        };
+        if !provider.accepts_publish() {
+            return Err(Error::invalid(format!(
+                "stream `{name}` is a `{}` stream, whose elements come from outside Saltcorn; \
+                 only an `internal` stream can be published to",
+                provider.name()
+            )));
+        }
+        let sink = match self.sink.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(sink) = sink else {
+            return Err(Error::invalid(format!(
+                "stream `{name}` is not running on this server ({}), so nothing can be published \
+                 to it",
+                self.status().as_str()
+            )));
+        };
+        let topic = check_topic(&name, &self.topic_spec()?, topic)?;
+        let Some(element_type) = &self.element_type else {
+            return Err(Error::invalid(format!(
+                "stream `{name}` has no element type, so nothing can be published to it"
+            )));
+        };
+        let value = match element_type.decode(RawPayload::Json(value)) {
+            Ok(value) => value,
+            Err(e) => {
+                self.count_malformed();
+                return Err(Error::invalid(format!(
+                    "stream `{name}`: the value does not match its element type: {e}"
+                )));
+            }
+        };
+        sink.deliver(Element {
+            value,
+            source: None,
+            topic: topic.clone(),
+        });
+        Ok(topic)
     }
 
     /// Set the status, and what the supervisor should do about it next.
@@ -531,11 +664,56 @@ impl RunningStream {
         }
     }
 
+    fn history(&self) -> std::sync::MutexGuard<'_, History> {
+        match self.history.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn with_row<T>(&self, f: impl FnOnce(&Stream) -> T) -> T {
         match self.row.read() {
             Ok(guard) => f(&guard),
             Err(poisoned) => f(&poisoned.into_inner()),
         }
+    }
+}
+
+/// The topic a server-side publish names, checked against the stream's
+/// [`TopicSpec`] and put in its canonical spelling.
+///
+/// A server-side publisher is trusted with *which* topic (§3 rule 8: it is
+/// admin-authored configuration, like an `insert_row`), so nothing here asks
+/// whether anybody may read it — only whether it is the kind of topic the
+/// stream has. A `user` topic is a user id in its hyphenated lowercase form,
+/// because that is the form a subscriber's own id is routed under, and an
+/// uppercase spelling of the same id would reach nobody.
+fn check_topic(stream: &str, spec: &TopicSpec, topic: Option<String>) -> Result<Option<String>> {
+    let topic = topic.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    match (spec, topic) {
+        (TopicSpec::Single, None) => Ok(None),
+        (TopicSpec::Single, Some(topic)) => Err(Error::invalid(format!(
+            "stream `{stream}` has no topics, so an element cannot be published on `{topic}`; \
+             publish without one"
+        ))),
+        (TopicSpec::User, Some(topic)) => match Uuid::parse_str(&topic) {
+            Ok(id) => Ok(Some(id.hyphenated().to_string())),
+            Err(_) => Err(Error::invalid(format!(
+                "stream `{stream}` has a topic per user, and `{topic}` is not a user id"
+            ))),
+        },
+        (TopicSpec::User, None) => Err(Error::invalid(format!(
+            "stream `{stream}` has a topic per user, so an element needs the user it is for — \
+             there was no user to publish to"
+        ))),
+        (TopicSpec::Row { .. }, Some(topic)) => Ok(Some(topic)),
+        (TopicSpec::Row { table }, None) => Err(Error::invalid(format!(
+            "stream `{stream}` has a topic per row of `{table}`, so an element needs the key of \
+             the row it is about"
+        ))),
+        (TopicSpec::PerElementRow { table }, _) => Err(Error::invalid(format!(
+            "stream `{stream}` carries the row changes of `{table}`, which only a write makes"
+        ))),
     }
 }
 
@@ -562,6 +740,7 @@ mod tests {
             Stream::new("boiler", "scripted"),
             None,
             Some(ElementType::text()),
+            Replay::Ring,
             StreamStatus::Starting,
             cap,
             ring,
@@ -571,6 +750,82 @@ mod tests {
 
     fn at(seconds: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_758_099_600 + seconds, 0).expect("a representable instant")
+    }
+
+    #[test]
+    fn a_retaining_stream_hands_out_the_latest_per_topic_with_the_ring() {
+        let stream = RunningStream::new(
+            Stream::new("job_status", "internal"),
+            None,
+            Some(ElementType::text()),
+            Replay::Latest {
+                ttl: Duration::from_secs(3600),
+                max_topics: 10,
+            },
+            StreamStatus::Starting,
+            16,
+            16,
+            0,
+        );
+        let now = Utc::now();
+        for (topic, value) in [("alice", "started"), ("bob", "started"), ("alice", "40%")] {
+            stream.publish(Element::new(json!(value)).topic(topic), now);
+        }
+        let feed = stream.subscribe_elements();
+        assert_eq!(feed.replay.len(), 3, "the ring still has everything");
+        let mut retained: Vec<(String, Json)> = feed
+            .retained
+            .into_iter()
+            .map(|e| (e.topic.unwrap(), e.value))
+            .collect();
+        retained.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            retained,
+            vec![
+                ("alice".to_owned(), json!("40%")),
+                ("bob".to_owned(), json!("started"))
+            ]
+        );
+        // A stream that does not retain hands out nothing of the kind.
+        assert!(running(16, 3, 0).subscribe_elements().retained.is_empty());
+    }
+
+    #[test]
+    fn a_server_side_topic_is_checked_against_the_streams_topic_kind() {
+        let row = TopicSpec::Row {
+            table: "boards".to_owned(),
+        };
+        assert_eq!(check_topic("s", &TopicSpec::Single, None).unwrap(), None);
+        assert!(check_topic("s", &TopicSpec::Single, Some("7".into())).is_err());
+        // Blank is none.
+        assert_eq!(
+            check_topic("s", &TopicSpec::Single, Some("  ".into())).unwrap(),
+            None
+        );
+        let id = "6F9619FF-8B86-D011-B42D-00CF4FC964FF";
+        assert_eq!(
+            check_topic("s", &TopicSpec::User, Some(id.into())).unwrap(),
+            Some("6f9619ff-8b86-d011-b42d-00cf4fc964ff".to_owned()),
+            "a user id is routed under its canonical spelling"
+        );
+        let missing = check_topic("job_status", &TopicSpec::User, None).unwrap_err();
+        assert!(missing.to_string().contains("no user"), "{missing}");
+        assert!(check_topic("s", &TopicSpec::User, Some("bob".into())).is_err());
+        assert_eq!(
+            check_topic("s", &row, Some("7".into())).unwrap(),
+            Some("7".to_owned())
+        );
+        assert!(check_topic("s", &row, None).is_err());
+        assert!(
+            check_topic(
+                "s",
+                &TopicSpec::PerElementRow {
+                    table: "cards".into()
+                },
+                Some("7".into())
+            )
+            .is_err()
+        );
     }
 
     #[test]

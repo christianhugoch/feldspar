@@ -43,6 +43,10 @@ mod python_fetch;
 mod python_files;
 
 #[cfg(feature = "python-host")]
+#[path = "python_live.rs"]
+mod python_live;
+
+#[cfg(feature = "python-host")]
 #[path = "python_modfn.rs"]
 mod python_modfn;
 

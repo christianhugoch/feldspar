@@ -21,10 +21,15 @@
 // The rendering follows the declared element type, which is what declaring one
 // is for: a table of the declared keys for `json`, a text tail for `text`, and
 // a hex head for `binary` — never bytes set in a body font.
+//
+// A stream with topics (TODO.md "Live updates" L2.9) — a user's id, a row's key
+// — gets a **topic** column and a box that narrows the tail to one topic. The
+// admin's socket watches every topic, which an application's page never does.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Alert from "react-bootstrap/Alert";
 import Button from "react-bootstrap/Button";
+import Form from "react-bootstrap/Form";
 import Table from "react-bootstrap/Table";
 
 import { api, errorMessage } from "../api";
@@ -40,15 +45,19 @@ import {
   elementTypeSummary,
   emptyObserve,
   extraKeys,
+  filterByTopic,
   formatCount,
   formatTime,
   hexHead,
   parseFrame,
+  readTopics,
   statusLabel,
   streamObserveUrl,
+  topicLabel,
   type ElementType,
   type Envelope,
   type ObserveState,
+  type TopicKind,
 } from "../streams";
 import { T, useT } from "../i18n";
 
@@ -57,6 +66,9 @@ export function StreamObserve({ streamId }: { streamId: string }) {
   const [state, setState] = useState<ObserveState>(emptyObserve());
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [topics, setTopics] = useState<{ kind: TopicKind; table?: string }>({ kind: "single" });
+  /** What the topic box narrows the tail to; blank is every topic. */
+  const [topicQuery, setTopicQuery] = useState("");
   const [paused, setPaused] = useState(false);
   /** Elements that arrived while paused — counted, because the flow did not
    * wait and saying nothing would be claiming it did. */
@@ -79,6 +91,7 @@ export function StreamObserve({ streamId }: { streamId: string }) {
         if (cancelled) return;
         setName(stream.name);
         setEnabled(stream.enabled);
+        setTopics(readTopics(stream.topics));
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -125,14 +138,21 @@ export function StreamObserve({ streamId }: { streamId: string }) {
 
   const badge = statusLabel(state.status, enabled);
   const notes = counterNotes(state.counters);
-  const tail = useMemo(() => {
+  const cleared = useMemo(() => {
     if (!clearMark) return state.tail;
     const cut = state.tail.indexOf(clearMark);
     return cut === -1 ? state.tail : state.tail.slice(0, cut);
   }, [state.tail, clearMark]);
-  /** Where the replay starts in the *whole* tail — the visible one is a prefix
-   * of it, so the index means the same thing in both. */
+  const tail = useMemo(() => filterByTopic(cleared, topicQuery), [cleared, topicQuery]);
+  /** Whether a row is history: the replay is the oldest `replayed` envelopes of
+   * the whole tail, which the filter keeps in order, so a row is history when
+   * it sits at or past the replay's start there. */
   const historyFrom = state.tail.length - state.replayed;
+  const isHistory = (envelope: Envelope) => state.tail.indexOf(envelope) >= historyFrom;
+  /** A column for the topic whenever the stream has topics, or an element
+   * carries one anyway. */
+  const showTopic = topics.kind !== "single" || state.tail.some((e) => e.topic !== undefined);
+  const heading = topicLabel(t, topics);
 
   return (
     <>
@@ -206,6 +226,18 @@ export function StreamObserve({ streamId }: { streamId: string }) {
           </Alert>
         )}
 
+        {showTopic && (
+          <Form.Group className="mb-3" style={{ maxWidth: "24rem" }} controlId="observe-topic">
+            <Form.Label>{heading}</Form.Label>
+            <Form.Control
+              type="search"
+              placeholder={t("Show one topic — part of a user id or row key")}
+              value={topicQuery}
+              onChange={(event) => setTopicQuery(event.target.value)}
+            />
+          </Form.Group>
+        )}
+
         {state.ready && tail.length === 0 && !state.error && (
           <Alert variant="info">
             <T text="Nothing yet. Elements appear here as they arrive; there is no history beyond what this server has seen since it started, because an element is not stored." />
@@ -217,7 +249,8 @@ export function StreamObserve({ streamId }: { streamId: string }) {
             <ElementTail
               tail={tail}
               type={state.elementType}
-              isHistory={(index) => index >= historyFrom}
+              isHistory={isHistory}
+              topicColumn={showTopic ? heading : null}
             />
           </div>
         )}
@@ -231,10 +264,13 @@ function ElementTail({
   tail,
   type,
   isHistory,
+  topicColumn,
 }: {
   tail: Envelope[];
   type: ElementType | null;
-  isHistory: (index: number) => boolean;
+  isHistory: (envelope: Envelope) => boolean;
+  /** The topic column's heading, or `null` for a stream without topics. */
+  topicColumn: string | null;
 }) {
   const columns = elementColumns(type);
   return (
@@ -242,6 +278,7 @@ function ElementTail({
       <thead>
         <tr>
           <th><T text="Received" /></th>
+          {topicColumn !== null && <th>{topicColumn}</th>}
           {type?.kind === "json" ? (
             columns.map((column) => <th key={column}>{column}</th>)
           ) : (
@@ -252,14 +289,17 @@ function ElementTail({
       </thead>
       <tbody>
         {tail.map((envelope, index) => (
-          <tr key={`${envelope.received_at}-${index}`} className={isHistory(index) ? "text-muted" : undefined}>
+          <tr key={`${envelope.received_at}-${index}`} className={isHistory(envelope) ? "text-muted" : undefined}>
             <td className="text-nowrap">
               {formatTime(envelope.received_at)}
               {/* The whole truth about what this row is (§9). */}
-              {isHistory(index) && (
+              {isHistory(envelope) && (
                 <div className="small"><T text="since this server started" /></div>
               )}
             </td>
+            {topicColumn !== null && (
+              <td className="small font-monospace text-break">{envelope.topic ?? "—"}</td>
+            )}
             <ValueCells envelope={envelope} type={type} columns={columns} />
             <td className="small font-monospace text-muted">
               {envelope.source === undefined ? "—" : cellText(envelope.source)}

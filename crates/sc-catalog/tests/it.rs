@@ -39,6 +39,8 @@ mod rls_policies;
 mod shared_tx;
 #[path = "sqlite_connections.rs"]
 mod sqlite_connections;
+#[path = "table_events.rs"]
+mod table_events;
 #[path = "table_meta_merge.rs"]
 mod table_meta_merge;
 #[path = "table_meta_store.rs"]

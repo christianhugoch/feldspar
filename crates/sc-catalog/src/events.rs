@@ -10,7 +10,7 @@
 //! what an observable write *is* ([`TableWrite`]) and the one trait a listener
 //! implements ([`TableEvents`]); `sc-action`'s dispatcher implements it, and a
 //! server installs that once at boot with
-//! [`Catalog::set_table_events`](crate::Catalog::set_table_events). The catalog
+//! [`Catalog::add_table_events`](crate::Catalog::add_table_events). The catalog
 //! knows **that** writes are observable; `sc-action` knows **what** observing
 //! means. Neither knows the other.
 //!
@@ -30,6 +30,12 @@ use crate::caller::CallerContext;
 use crate::catalog::Catalog;
 use crate::table::Table;
 use crate::tx::SharedTx;
+
+/// The key the trigger dispatcher is installed under
+/// ([`Catalog::add_table_events`](crate::Catalog::add_table_events)).
+pub const TRIGGER_EVENTS: &str = "triggers";
+/// The key the live hub's row-topic re-checks are installed under.
+pub const LIVE_EVENTS: &str = "live";
 
 /// Which of the three observable row operations happened.
 ///
@@ -66,9 +72,13 @@ impl std::fmt::Display for WriteOp {
 
 /// One write that has already happened, as a listener sees it.
 ///
+/// `Clone`, because the seam has more than one listener and each is handed its
+/// own copy.
+///
 /// Rows travel as **JSON**, not as `Value` maps: that is what an event carries to
 /// a formula, to an action's configuration and over the wire to a `fetch`, so
 /// converting once here beats converting at each of those.
+#[derive(Clone)]
 pub struct TableWrite<'a> {
     /// The table written to.
     pub table: &'a Table,
@@ -94,8 +104,10 @@ pub struct TableWrite<'a> {
     pub tx: Option<SharedTx>,
 }
 
-/// What it means to observe table writes. `sc-action`'s trigger dispatcher is the
-/// implementation; the catalog holds it as `dyn`.
+/// What it means to observe table writes. `sc-action`'s trigger dispatcher and
+/// `sc-live`'s hub are the implementations; the catalog holds a list of them as
+/// `dyn`, and a write goes to each one that [`observes`](TableEvents::observes)
+/// it.
 #[async_trait::async_trait]
 pub trait TableEvents: Send + Sync {
     /// Whether anything listens for `op` on `table`.

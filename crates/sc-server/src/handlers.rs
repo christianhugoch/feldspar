@@ -2942,10 +2942,18 @@ pub fn admin_handlers_with(
                     Some(_) => Some(Vec::new()),
                     None => None,
                 };
+                // The internal streams, for `publish`'s picker: streams are rows,
+                // so the declaration can only ask for them, and this is where it
+                // is answered — with an empty list on a server that has none,
+                // which is how the step palette learns `publish` has nothing
+                // to publish to yet.
+                let internal_streams = internal_stream_names(&catalog).await?;
                 let mut out = Vec::new();
                 for action in dispatcher.registry().all() {
-                    let spec =
-                        resolve_model_options(action.config_spec_for(&catalog, channel), &models);
+                    let spec = resolve_internal_streams(
+                        resolve_model_options(action.config_spec_for(&catalog, channel), &models),
+                        &internal_streams,
+                    );
                     out.push(json!({
                         "name": action.name(),
                         "description": say(action.description(), &ctx.locale),
@@ -4155,13 +4163,14 @@ pub fn admin_handlers_with(
                         "element_type_error": element_type_error,
                     }));
                 }
-                // An empty picker reads like a bug; the sentence reads like the
-                // decision it is.
-                let empty = providers.is_empty();
+                // A picker missing the one broker client the docs name reads
+                // like a bug; the sentence reads like the decision it is.
+                // (`internal` is always built in, so the picker is never
+                // empty — the notice is about what is not in it.)
                 Ok(HandlerResponse::ok(json!({
                     "providers": providers,
                     "builtins_compiled_out": !sc_stream::MQTT_COMPILED_IN,
-                    "notice": if empty && !sc_stream::MQTT_COMPILED_IN {
+                    "notice": if !sc_stream::MQTT_COMPILED_IN {
                         Json::String(sc_stream::BUILTINS_COMPILED_OUT.to_owned())
                     } else {
                         Json::Null
@@ -9917,6 +9926,39 @@ fn resolve_model_options(spec: Vec<FormField>, models: &Option<Vec<String>>) -> 
     spec.into_iter()
         .map(|field| match field.query() {
             Some(q) if q == sc_model::MODELS_QUERY => field.with_resolved_options(models.clone()),
+            _ => field,
+        })
+        .collect()
+}
+
+/// The names of the stored `internal` streams, in name order — what the
+/// `publish` action's stream picker offers.
+///
+/// A catalog with no `_fd_streams` table has none, which is what its absence
+/// means; asking the catalog first keeps a genuine database error an error.
+async fn internal_stream_names(catalog: &Catalog) -> Result<Vec<String>> {
+    if catalog.get(sc_stream::STREAMS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = sc_stream::list_streams(catalog)
+        .await?
+        .into_iter()
+        .filter(|stream| stream.provider == sc_stream::INTERNAL)
+        .map(|stream| stream.name)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Fill in the options of every field declaring
+/// [`INTERNAL_STREAMS_QUERY`](sc_core_actions::INTERNAL_STREAMS_QUERY) — the
+/// arrangement [`resolve_model_options`] has, for its reason.
+fn resolve_internal_streams(spec: Vec<FormField>, streams: &[String]) -> Vec<FormField> {
+    spec.into_iter()
+        .map(|field| match field.query() {
+            Some(q) if q == sc_core_actions::INTERNAL_STREAMS_QUERY => {
+                field.with_resolved_options(streams.to_vec())
+            }
             _ => field,
         })
         .collect()

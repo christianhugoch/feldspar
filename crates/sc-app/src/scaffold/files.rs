@@ -788,7 +788,9 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          - `{RUNTIME_LIVE_FILE}` — live updates: `useStream(live.<stream>, onElement)` \
          subscribes a component to a stream this application exposes, over one \
          socket per page that reconnects by itself, and returns its `status` \
-         (`connecting`, `open`, `reconnecting`). `live` is the client's \
+         (`connecting`, `open`, `reconnecting`); `useLatest(live.<stream>)` \
+         is the latest element, for a progress bar. A stream with a topic per \
+         row is `live.<stream>.topic(rowKey)`. `live` is the client's \
          accessors, present once the application exposes a stream.\n\
          - `{RUNTIME_SKILL_FILE}` — for a coding agent: the half of this \
          application that is **not** in this repository, and the administration \
@@ -1065,7 +1067,25 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          exposed, or the signed-in user is below its minimum role) or later \
          revokes it. Delivery is at-most-once: after a reconnect, anything built \
          from earlier elements may be stale, and the subscription's `resync` \
-         handler says so. Never open a `WebSocket` yourself — the socket \
+         handler says so.\n\
+         \n\
+         What a stream's elements are *about* decides how it is subscribed:\n\
+         \n\
+         - **One flow for everybody** (`live.boiler`): as above.\n\
+         - **A topic per user** (`live.job_status`): the same call — the server \
+         puts each subscriber on their own topic, so a page sees only its own \
+         user's toasts and progress. `useLatest(live.job_status)` is the latest \
+         element (or `undefined`), which is what a progress bar wants; a stream \
+         that keeps its last element sends it straight away, so a page reloaded \
+         mid-job shows the current progress.\n\
+         - **A topic per row** (`live.board_activity`): name the row, \
+         `useStream(live.board_activity.topic(boardId), onElement)`. The server \
+         lets the subscription in only if the signed-in user may read that row, \
+         and ends it (`revoked`) if they stop being able to.\n\
+         \n\
+         Elements are published by the server — a trigger's `publish` action, \
+         `live.publish(stream, topic, value)` in a trigger's code — never by \
+         this project. Never open a `WebSocket` yourself — the socket \
          authenticates with the user's session and refuses pages from any other \
          origin. Which streams are exposed is configuration in the server (see \
          the half of this application that is not in this project).\n\
@@ -2861,6 +2881,12 @@ th {
 /// a subscription tied to a component's lifetime, and its status as state.
 fn live_react_ts(streams: &[sc_api::StreamExport]) -> String {
     let mut out = String::from(GENERATED_HEADER);
+    out.push_str(LIVE_REACT_IMPORTS);
+    // `api` is imported only when it is used: a project compiled with
+    // `noUnusedLocals` must build whether or not it exposes a stream yet.
+    if !streams.is_empty() {
+        out.push_str("import { api } from \"./hooks\";\n");
+    }
     out.push_str(LIVE_REACT_TS);
     if !streams.is_empty() {
         out.push_str(
@@ -2871,12 +2897,14 @@ fn live_react_ts(streams: &[sc_api::StreamExport]) -> String {
     out
 }
 
-/// The body of `live-react.ts` that is the same in every application.
-const LIVE_REACT_TS: &str = r#"
+/// The imports every `live-react.ts` has.
+const LIVE_REACT_IMPORTS: &str = r#"
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { LiveConnection, LiveError, LiveHandlers, LiveStatus, LiveStream } from "./helper";
-import { api } from "./hooks";
+"#;
 
+/// The body of `live-react.ts` that is the same in every application.
+const LIVE_REACT_TS: &str = r#"
 /** Where a live connection is, as state: re-renders when it connects, drops or reconnects. */
 export function useLiveStatus(connection: LiveConnection): LiveStatus {
   return useSyncExternalStore(
@@ -2929,6 +2957,20 @@ export function useStream<E>(
   }, [stream]);
   const status = useLiveStatus(stream.connection);
   return { status, error };
+}
+
+/**
+ * The latest element of `stream` while this component is mounted, or
+ * `undefined` before the first one — what a progress bar or a status line
+ * wants. A stream that keeps its last element sends it on subscribing, so a
+ * page reloaded halfway through a job shows the current value at once.
+ * A reconnect keeps the value it has until a newer one arrives.
+ */
+export function useLatest<E>(stream: LiveStream<E>): E | undefined {
+  const [latest, setLatest] = useState<{ stream: LiveStream<E>; envelope: E } | undefined>(undefined);
+  useStream(stream, (envelope) => setLatest({ stream, envelope }));
+  // A value from the previous stream is not this one's.
+  return latest !== undefined && latest.stream === stream ? latest.envelope : undefined;
 }
 "#;
 
@@ -3703,6 +3745,10 @@ mod tests {
         let hooks = file(&without, "src/feldspar/live-react.ts");
         assert!(hooks.contains("DO NOT EDIT"), "{hooks}");
         assert!(hooks.contains("export function useStream<E>("), "{hooks}");
+        assert!(
+            hooks.contains("export function useLatest<E>(stream: LiveStream<E>): E | undefined"),
+            "{hooks}"
+        );
         assert!(hooks.contains("export function useLiveStatus("), "{hooks}");
         assert!(
             hooks.contains("return () => subscription.close();"),
@@ -3714,6 +3760,7 @@ mod tests {
             name: "boiler".to_owned(),
             path: "/api/live".to_owned(),
             value: sc_api::TypeSchema::text(),
+            topics: sc_api::StreamTopics::Single,
         }];
         let with = runtime_files(&ProjectContext {
             streams: &streams,

@@ -1,5 +1,5 @@
-//! The definition of done for live updates, part 1 (TODO.md L1.12):
-//! `docs/tutorial-live.md`, walked against a running server.
+//! The definition of done for live updates, parts 1 and 2 (TODO.md L1.12,
+//! L2.11): `docs/tutorial-live.md`, walked against a running server.
 //!
 //! Every step of the tutorial is here, in its order, with one substitution: the
 //! MQTT broker is the scripted provider registered under the name `mqtt`, so the
@@ -13,6 +13,11 @@
 //! TypeScript compiler and React's types are on this machine (`ui/admin`'s
 //! `node_modules`), and skipped with a message when they are not — the
 //! `typescript_typecheck` arrangement.
+//!
+//! Part 2 reads three things out of the document — the declared keys of step 1,
+//! the code step of step 2 and the component of step 3 — and runs the
+//! workflow step 2 draws, with one substitution: its two-second wait is a tenth
+//! of a second, because a test does not wait ten seconds for pretend work.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -46,6 +51,8 @@ const TODO_HOST: &str = "todo.example.com";
 const ADMIN: &str = "admin@example.com";
 const MEMBER: &str = "member@example.com";
 const VISITOR: &str = "visitor@example.com";
+/// Part 2's second Member, who must not see the first one's report.
+const COLLEAGUE: &str = "colleague@example.com";
 const PASSWORD: &str = "correct-horse";
 /// The tutorial's Member role.
 const ROLE_MEMBER: u8 = 40;
@@ -140,6 +147,7 @@ struct Tutorial {
     apps: Arc<sc_server::AppMounts>,
     addr: std::net::SocketAddr,
     project: PathBuf,
+    _engine: Arc<sc_workflow::WorkflowEngineTask>,
     _dir: TempDir,
     _db: TestDb,
 }
@@ -220,6 +228,7 @@ async fn assumed() -> Result<Tutorial> {
     create_user(&catalog, ADMIN, PASSWORD, ROLE_ADMIN).await?;
     create_user(&catalog, MEMBER, PASSWORD, ROLE_MEMBER).await?;
     create_user(&catalog, VISITOR, PASSWORD, ROLE_PUBLIC).await?;
+    create_user(&catalog, COLLEAGUE, PASSWORD, ROLE_MEMBER).await?;
 
     let agents = sc_server::install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
@@ -230,8 +239,11 @@ async fn assumed() -> Result<Tutorial> {
         &models,
     )
     .await?;
+    // `serve` starts the workflow engine; part 2's report is a workflow.
+    let (engine, _) = sc_server::start_workflow_engine(&catalog, &triggers);
     let mut registry = StreamRegistry::new();
     registry.register(Arc::new(boiler()) as Arc<dyn StreamProvider>)?;
+    registry.register(Arc::new(sc_stream::Internal) as Arc<dyn StreamProvider>)?;
     let streams = sc_server::install_streams_with(
         &catalog,
         &triggers,
@@ -283,6 +295,7 @@ async fn assumed() -> Result<Tutorial> {
         apps,
         addr,
         project: dir.0.join("todo"),
+        _engine: engine,
         _dir: dir,
         _db: db,
     };
@@ -558,5 +571,335 @@ async fn part_one_the_live_socket() -> Result<()> {
         matches!(&refused, tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == StatusCode::FORBIDDEN),
         "{refused:?}"
     );
+    Ok(())
+}
+
+// --- Part 2: notifications and progress from a workflow ---------------------
+
+/// The first ```{lang} block after `heading` in the tutorial.
+fn doc_block(heading: &str, lang: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let doc = std::fs::read_to_string(root.join("docs/tutorial-live.md")).unwrap();
+    let section = doc
+        .split_once(heading)
+        .unwrap_or_else(|| panic!("the tutorial has `{heading}`"))
+        .1;
+    let fence = format!("```{lang}\n");
+    let after = section
+        .split_once(&fence)
+        .unwrap_or_else(|| panic!("`{heading}` shows a {lang} block"))
+        .1;
+    // Indented inside a list item, as step 1's keys are.
+    let block = after.split_once("```").unwrap().0;
+    block
+        .lines()
+        .map(|line| line.strip_prefix("  ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The todo app with part 2's ticks: `job_status` and `long_report`.
+fn todo_app_part_two() -> Application {
+    todo_app()
+        .with_stream(StreamRef::new("job_status"))
+        .with_trigger(sc_app::TriggerRef::new("long_report"))
+}
+
+/// The workflow step 2 draws, the code step taken from the document.
+fn long_report_workflow(code: &str) -> Value {
+    let message = |text: &str| json!({ "message": format!("\"{text}\"") });
+    json!({
+        "start": "started",
+        "trace": true,
+        "steps": [
+            { "name": "started",
+              "kind": { "type": "action", "action": "publish",
+                        "configuration": { "stream": "job_status", "value": message("Report started") } },
+              "next": { "type": "step", "step": "count" } },
+            { "name": "count",
+              "kind": { "type": "set", "assignments": [{ "target": "steps", "formula": "[1, 2, 3, 4, 5]" }] },
+              "next": { "type": "step", "step": "each" } },
+            { "name": "each",
+              "kind": { "type": "for_each", "over": "context.steps", "var": "step", "body": "wait" },
+              "next": { "type": "step", "step": "done" } },
+            // The tutorial's 2000, a tenth of a second here.
+            { "name": "wait", "kind": { "type": "wait", "until": "100" },
+              "next": { "type": "step", "step": "progress" } },
+            { "name": "progress",
+              "kind": { "type": "action", "action": "run_js_code", "configuration": { "code": code } },
+              "next": { "type": "end" } },
+            { "name": "done",
+              "kind": { "type": "action", "action": "publish",
+                        "configuration": { "stream": "job_status", "value": message("Report ready") } },
+              "next": { "type": "end" } }
+        ]
+    })
+}
+
+/// Type-check step 3's component against the generated runtime, as step 2 of
+/// part 1 is.
+fn type_check_part_two(project: &Path) {
+    let admin_modules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/admin/node_modules");
+    let tsc = std::env::var("SC_TSC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| admin_modules.join(".bin/tsc"));
+    if !tsc.exists() || !admin_modules.join("@types/react").is_dir() {
+        eprintln!(
+            "skipping the type check of part 2: no tsc or React types (run `npm ci` in ui/admin)"
+        );
+        return;
+    }
+    let pages = project.join("src/pages");
+    std::fs::create_dir_all(&pages).unwrap();
+    std::fs::write(
+        pages.join("LongReport.tsx"),
+        doc_block("### Step 3 — Toasts and a progress bar", "tsx"),
+    )
+    .unwrap();
+    let modules = project.join("node_modules");
+    if !modules.exists() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&admin_modules, &modules).unwrap();
+    }
+    let output = std::process::Command::new(&tsc)
+        .current_dir(project)
+        .args([
+            "--noEmit",
+            "--strict",
+            "--noUnusedLocals",
+            "--skipLibCheck",
+            "--jsx",
+            "react-jsx",
+            "--target",
+            "es2020",
+            "--lib",
+            "es2020,dom",
+            "--module",
+            "esnext",
+            "--moduleResolution",
+            "bundler",
+            "src/pages/LongReport.tsx",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "the tutorial's part 2 component does not type-check against the generated runtime:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Read elements off `socket` for `sub` until `stop` says so, answering them.
+async fn elements_until(
+    socket: &mut Socket,
+    sub: &str,
+    mut stop: impl FnMut(&Value) -> bool,
+) -> Vec<Value> {
+    let mut seen = Vec::new();
+    loop {
+        let element = frame_for(socket, sub, "element").await;
+        let done = stop(&element);
+        seen.push(element);
+        if done {
+            return seen;
+        }
+    }
+}
+
+#[tokio::test]
+async fn part_two_notifications_and_progress() -> Result<()> {
+    let tutorial = assumed().await?;
+    let mut admin = tutorial.on(BASE_DOMAIN);
+    admin.login(ADMIN).await;
+    let member_id = sc_auth::load_user_by_email(&tutorial.catalog, MEMBER)
+        .await?
+        .unwrap()
+        .id;
+
+    // --- Step 1: an internal stream, one topic per user --------------------
+    let keys: Value = serde_json::from_str(&doc_block(
+        "### Step 1 — An internal stream, one topic per user",
+        "json",
+    ))
+    .expect("step 1's keys are JSON");
+    admin
+        .ok(
+            "POST",
+            "/api/streams",
+            Some(json!({
+                "name": "job_status", "provider": "internal", "description": "",
+                "min_role": ROLE_MEMBER,
+                "configuration": { "keys": keys, "topics": "user", "retain_last": true,
+                                   "retain_ttl_s": 3600 },
+            })),
+        )
+        .await;
+    let listed = admin.ok("GET", "/api/streams", None).await;
+    let stream = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "job_status")
+        .unwrap();
+    assert_eq!(stream["topics"], json!({ "kind": "user" }), "{stream}");
+
+    // --- Step 2: a workflow that reports as it goes -------------------------
+    let code = doc_block("### Step 2 — A workflow that reports as it goes", "js");
+    assert!(
+        code.contains("live.publish(\"job_status\", user.id"),
+        "{code}"
+    );
+    let created = admin
+        .ok(
+            "POST",
+            "/api/triggers",
+            Some(json!({
+                "name": "long_report", "description": "", "when": "none", "channel": null,
+                "only_if": null, "body": "workflow", "action": null, "configuration": null,
+                "min_role": ROLE_MEMBER, "enabled": true,
+            })),
+        )
+        .await;
+    let id = created["id"].as_str().unwrap();
+    let saved = admin
+        .ok(
+            "POST",
+            &format!("/api/workflows/{id}"),
+            Some(json!({ "workflow": long_report_workflow(&code), "description": "" })),
+        )
+        .await;
+    assert_eq!(saved["issues"], json!([]), "{saved}");
+
+    let app = todo_app_part_two();
+    sc_app::save_application(&tutorial.catalog, &app).await?;
+    sc_app::scaffold_app(&tutorial.catalog, &app, tutorial.apps.triggers()).await?;
+    tutorial.apps.remount(sc_server::MountedApp::new_with(
+        app.clone(),
+        Arc::new(CodeFramework::new("react", sc_app::AssetBundle::new())),
+        &tutorial.catalog,
+        tutorial.apps.evaluator(),
+        tutorial.apps.triggers(),
+    )?);
+
+    // --- Step 3: toasts and a progress bar -----------------------------------
+    let client = std::fs::read_to_string(tutorial.project.join("src/feldspar/client.ts")).unwrap();
+    assert!(client.contains("runLongReport("), "{client}");
+    assert!(client.contains("JobStatusEnvelope"), "{client}");
+    let live_react =
+        std::fs::read_to_string(tutorial.project.join("src/feldspar/live-react.ts")).unwrap();
+    assert!(
+        live_react.contains("export function useLatest<E>("),
+        "{live_react}"
+    );
+    type_check_part_two(&tutorial.project);
+
+    // --- Step 4: two people at once ------------------------------------------
+    let mut member = tutorial.on(TODO_HOST);
+    let member_session = member.login(MEMBER).await;
+    let colleague_session = tutorial.on(TODO_HOST).login(COLLEAGUE).await;
+    let mut page = tutorial.page(Some(&member_session)).await;
+    let mut colleague = tutorial.page(Some(&colleague_session)).await;
+    for socket in [&mut page, &mut colleague] {
+        send(
+            socket,
+            json!({ "type": "subscribe", "sub": "s1", "stream": "job_status" }),
+        )
+        .await;
+        let ready = frame_for(socket, "s1", "ready").await;
+        assert_eq!(ready["replayed"], json!(0), "{ready}");
+    }
+
+    let (status, body) = member
+        .send("POST", "/api/actions/long_report", Some(json!({})))
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    let seen = elements_until(&mut page, "s1", |element| {
+        element["envelope"]["value"]["message"] == "Report ready"
+    })
+    .await;
+    let messages: Vec<&str> = seen
+        .iter()
+        .map(|e| e["envelope"]["value"]["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Report started",
+            "Working",
+            "Working",
+            "Working",
+            "Working",
+            "Working",
+            "Report ready"
+        ]
+    );
+    let progress: Vec<Value> = seen
+        .iter()
+        .map(|e| e["envelope"]["value"]["progress"].clone())
+        .collect();
+    assert_eq!(
+        progress,
+        vec![
+            json!(null),
+            json!(0.2),
+            json!(0.4),
+            json!(0.6),
+            json!(0.8),
+            json!(1),
+            json!(null)
+        ]
+    );
+    for element in &seen {
+        assert_eq!(
+            element["envelope"]["topic"],
+            json!(member_id.hyphenated().to_string())
+        );
+    }
+    // The colleague's socket received nothing at all.
+    send(&mut colleague, json!({ "type": "ping" })).await;
+    loop {
+        let frame = next_frame(&mut colleague).await.unwrap();
+        assert_ne!(frame["type"], "element", "the colleague saw {frame}");
+        if frame["type"] == "pong" {
+            break;
+        }
+    }
+
+    // --- Step 5: reload halfway -----------------------------------------------
+    let (status, body) = member
+        .send("POST", "/api/actions/long_report", Some(json!({})))
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    elements_until(&mut page, "s1", |element| {
+        element["envelope"]["value"]["progress"] == json!(0.4)
+    })
+    .await;
+    let mut again = tutorial.page(Some(&member_session)).await;
+    send(
+        &mut again,
+        json!({ "type": "subscribe", "sub": "s1", "stream": "job_status" }),
+    )
+    .await;
+    let ready = frame_for(&mut again, "s1", "ready").await;
+    assert_eq!(
+        ready["replayed"],
+        json!(1),
+        "the latest, straight away: {ready}"
+    );
+    let latest = frame_for(&mut again, "s1", "element").await;
+    // The job's current progress, not a blank bar — or, if it finished in the
+    // meantime, the message that says so.
+    let current = &latest["envelope"]["value"];
+    assert!(
+        current["progress"].as_f64().is_some_and(|p| p >= 0.4)
+            || current["message"] == "Report ready",
+        "{latest}"
+    );
+    // …and it carries on from there.
+    elements_until(&mut again, "s1", |element| {
+        element["envelope"]["value"]["message"] == "Report ready"
+    })
+    .await;
     Ok(())
 }

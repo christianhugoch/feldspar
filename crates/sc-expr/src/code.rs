@@ -182,6 +182,16 @@ pub const DEFAULT_MAX_TRIGGER_RUNS: u32 = 20;
 /// what stops it and says so.
 pub const DEFAULT_MAX_MODULE_CALLS: u32 = 100;
 
+/// How many elements one run may publish with `live.publish` (TODO.md "Live
+/// updates" L2.8).
+///
+/// Its own budget, on the grounds every surface has its own. A publish is
+/// cheap — a non-blocking send — so the number is large: a progress bar moved
+/// once per row of a big import is the use, and what it bounds is a loop that
+/// publishes per iteration of something that never ends, inside the minute a
+/// body may run. The stream's own per-second cap still applies past it.
+pub const MAX_LIVE_PUBLISHES: u32 = 1_000;
+
 /// What one `fetch` gets when the body names no `timeout_ms` of its own.
 ///
 /// Always clamped to what is left of the run's wall clock, which is the bound
@@ -406,6 +416,55 @@ pub trait TriggerHost: Send + Sync {
     fn trigger_names(&self) -> Vec<String> {
         Vec::new()
     }
+}
+
+/// Live updates as a guest sees them: `live.publish(stream, topic, value)`
+/// (TODO.md "Live updates" §7, L2.8), and what the `publish` action calls.
+///
+/// A sixth host, beside `db`, `fetch`, `fs`, `trigger` and `modfn`, and unlike
+/// them **synchronous**: publishing is a non-blocking send onto a running
+/// stream (§14.3's rule that nobody may block a flow), so there is nothing for
+/// a body to await and nothing to time out. It is implemented by the server's
+/// live hub (`sc-live`) and installed on the catalog, which is how a code body,
+/// a Python body and an action all reach the same one without any of them
+/// naming the crate that implements it.
+///
+/// What crosses is plain values, so §15's other guest languages inherit it the
+/// way they inherit `db`. The implementation checks everything — that the
+/// stream exists here, is running, is one Saltcorn may publish to, that the
+/// topic is the kind it takes and that the value matches its element type —
+/// and an `Err` is thrown into the guest as an ordinary error a body can catch.
+///
+/// Server-side publishing is **trusted** (§3 rule 8): a body is admin-authored
+/// configuration, as an `insert_row` is, so it may publish to any topic. No
+/// caller's role is consulted here.
+pub trait LiveHost: Send + Sync {
+    /// How `stream` is split into topics — what the `publish` action needs to
+    /// default a `user` stream's topic to the event's user, and to refuse
+    /// saving a publish to a stream Saltcorn cannot publish to. An error for a
+    /// stream that does not exist here or is not an `internal` one.
+    fn topics(&self, stream: &str) -> Result<LiveTopics>;
+
+    /// Publish `value` on `topic` of `stream`; `topic` is `None` for a stream
+    /// without topics. Answers the topic as it was published (a user id in its
+    /// canonical spelling).
+    fn publish(&self, stream: &str, topic: Option<String>, value: Json) -> Result<Option<String>>;
+}
+
+/// How a stream Saltcorn publishes to is split into topics, as a publisher
+/// needs to know it ([`LiveHost::topics`]) — `sc-stream`'s `TopicSpec`, minus
+/// the kind nothing publishes to by hand, in a crate that cannot name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveTopics {
+    /// One topic: publish with none.
+    Single,
+    /// A topic per user id.
+    User,
+    /// A topic per row of `table`, named by the row's key.
+    Row {
+        /// The table whose rows the topics are.
+        table: String,
+    },
 }
 
 /// One argument of a module function, as v1 declared it.
@@ -812,6 +871,14 @@ pub struct CodeCall<'a> {
     ///
     /// Borrowed for the same reason `host` is, and bridged the same way.
     pub module_fns: Option<&'a dyn ModuleFnHost>,
+    /// Live updates, or `None` for a body that cannot publish — in which case
+    /// `live` is not bound at all, so naming it is a `ReferenceError` rather
+    /// than a call that fails.
+    ///
+    /// An `Arc` rather than a plain borrow, unlike the five above: publishing
+    /// is synchronous, so the op calls the host directly on the isolate's
+    /// thread rather than over the bridge, and what crosses there is `'static`.
+    pub live: Option<&'a Arc<dyn LiveHost>>,
     /// This server's tables as the guest sees them *without asking* — what v1's
     /// synchronous `Table.findOne` is answered from ([`SchemaSnapshot`]), or
     /// `None` where nobody supplied one.
@@ -859,6 +926,7 @@ impl Default for CodeCall<'_> {
             files: None,
             triggers: None,
             module_fns: None,
+            live: None,
             schema: None,
             console: None,
             timeout: None,
@@ -896,6 +964,8 @@ pub struct CodeHosts<'a> {
     pub triggers: Option<&'a dyn TriggerHost>,
     /// The functions its modules supply — `modfn`.
     pub module_fns: Option<&'a dyn ModuleFnHost>,
+    /// Live updates — `live`.
+    pub live: Option<&'a Arc<dyn LiveHost>>,
 }
 
 impl std::fmt::Debug for CodeHosts<'_> {
@@ -906,6 +976,7 @@ impl std::fmt::Debug for CodeHosts<'_> {
             .field("files", &self.files.is_some())
             .field("triggers", &self.triggers.is_some())
             .field("module_fns", &self.module_fns.is_some())
+            .field("live", &self.live.is_some())
             .finish()
     }
 }
@@ -920,6 +991,7 @@ impl<'a> CodeCall<'a> {
             files: self.files,
             triggers: self.triggers,
             module_fns: self.module_fns,
+            live: self.live,
         }
     }
 }
@@ -934,6 +1006,7 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("files", &self.files.is_some())
             .field("triggers", &self.triggers.is_some())
             .field("module_fns", &self.module_fns.is_some())
+            .field("live", &self.live.is_some())
             .field("schema", &self.schema.map(SchemaSnapshot::generation))
             .field("timeout", &self.timeout)
             .field("max_calls", &self.max_calls)
@@ -990,6 +1063,11 @@ pub(crate) const TRIGGER: &str = "trigger";
 /// supplies.
 #[cfg(feature = "eval")]
 pub(crate) const MODFN: &str = "modfn";
+
+/// The name live updates bind under (TODO.md "Live updates" L2.8), reserved
+/// when a live host is present for the reason [`DB`] is.
+#[cfg(feature = "eval")]
+pub(crate) const LIVE: &str = "live";
 
 /// The names Saltcorn 1's `Table` and `Field` classes bind under, reserved when
 /// the `db` host is present for the reason [`DB`] is (TODO "the v1 `Table` API"
@@ -2652,6 +2730,63 @@ pub(crate) const MODULE_FNS_PRELUDE: &str = r#"
 })();
 "#;
 
+/// `live` (TODO.md "Live updates" L2.8): one per run, over the run's token, with
+/// one method.
+///
+/// ```js
+/// live.publish("job_status", user.id, { message: "Started" });
+/// live.publish("announcements", null, { text: "Back at five" });
+/// live.publish("announcements", { text: "Back at five" });   // no topic
+/// ```
+///
+/// Synchronous, because a publish is a send that never waits — so a forgotten
+/// `await` costs nothing, and an `await` costs nothing either. A refusal (no
+/// such stream, a value that does not match, a stream not running) is thrown
+/// at the call, as an ordinary `Error` the body may catch.
+#[cfg(feature = "eval")]
+pub(crate) const LIVE_PRELUDE: &str = r#"
+(() => {
+  const fixed = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value: value, writable: false, configurable: false, enumerable: false,
+    });
+  fixed("__scMakeLive", (__scTok) => Object.freeze({
+    publish(stream, topic, value) {
+      if (typeof stream !== "string" || stream === "") {
+        throw new TypeError(
+          "live.publish() takes the stream's name first, as in " +
+          "live.publish(\"job_status\", user.id, { message: \"Done\" })"
+        );
+      }
+      // Two arguments: a stream without topics and its value.
+      if (arguments.length === 2) {
+        value = topic;
+        topic = null;
+      }
+      if (topic !== null && topic !== undefined &&
+          typeof topic !== "string" && typeof topic !== "number") {
+        throw new TypeError("a topic is a string, a number or null");
+      }
+      let request;
+      try {
+        request = JSON.stringify({
+          stream: stream,
+          topic: topic === undefined ? null : topic,
+          value: value === undefined ? null : value,
+        });
+      } catch (e) {
+        throw new TypeError(
+          "the value published to `" + stream + "` is not JSON: " + ((e && e.message) || e)
+        );
+      }
+      const reply = JSON.parse(__scLivePublish(__scTok, request));
+      if (reply.error !== undefined) throw new Error(reply.error);
+      return reply.ok;
+    },
+  }));
+})();
+"#;
+
 /// The **Saltcorn 1 `Table` and `Field`**, in JavaScript, over the plan seam
 /// (TODO "the v1 `Table` API" §1).
 ///
@@ -2751,6 +2886,7 @@ const SETUP: &str = r#"
   const disk = Deno.core.ops.op_sc_files;
   const runs = Deno.core.ops.op_sc_trigger;
   const mods = Deno.core.ops.op_sc_modfn;
+  const publish = Deno.core.ops.op_sc_live;
   const logline = Deno.core.ops.op_sc_log;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
@@ -2891,6 +3027,10 @@ const SETUP: &str = r#"
       else resolve(reply.ok);
     }, reject);
   }));
+  // One publish: synchronous, so no promise and no resumption mark — the
+  // answer is the op's return value. Kept here with the other ops, because
+  // `Deno` is not in scope for the preludes that run after this one.
+  fixed("__scLivePublish", (token, request) => publish(token, request));
   // And once more, in the module surface's words: `md_to_html` is synchronous
   // in v1 and a forgotten `await` would put `[object Promise]` in a column.
   const notAwaitedModFn = () =>
@@ -2964,11 +3104,11 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsV1, wantsConsole, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsLive, wantsV1, wantsConsole, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
-      wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsV1: wantsV1,
-      wantsConsole: wantsConsole,
+      wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsLive: wantsLive,
+      wantsV1: wantsV1, wantsConsole: wantsConsole,
     });
   });
   // The schema snapshot this isolate holds, keyed by the catalog generation it
@@ -3082,6 +3222,9 @@ const SETUP: &str = r#"
       // trigger names do: one compiled body serves every run, and installing or
       // configuring a module reloads the set between two of them.
       if (entry.wantsModFn) handles.push(__scMakeModFn(token, functions));
+      // `live` carries nothing per run but the token: the stream set is the
+      // server's, and every check is made where the publish lands.
+      if (entry.wantsLive) handles.push(__scMakeLive(token));
       // v1's `Table` and `Field`, minted per run like every other handle here
       // and from the same text a module's are (`V1_API_JS`). A run with a host
       // but no snapshot gets classes that say so by name: a `Table.findOne`
@@ -3177,6 +3320,10 @@ struct RunState {
     /// because what it bounds is a whole other run rather than one call.
     trigger_runs_left: u32,
     max_trigger_runs: u32,
+    /// Live updates, when this run may publish.
+    live: Option<Arc<dyn LiveHost>>,
+    /// The publish budget ([`MAX_LIVE_PUBLISHES`]).
+    publishes_left: u32,
     /// How long this run may execute JavaScript without yielding, before the
     /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
     /// A *fresh* window each time it resumes, not a budget it spends — the
@@ -3402,6 +3549,76 @@ async fn op_sc_modfn(
     serde_json::to_string(&reply).unwrap_or_else(|_| {
         r#"{"error":"the module function reply could not be encoded as JSON"}"#.to_owned()
     })
+}
+
+/// One **publish** (TODO.md "Live updates" L2.8): `live.publish(stream, topic,
+/// value)`.
+///
+/// **Synchronous**, unlike every other surface: a publish is a non-blocking send
+/// onto a running stream, so there is nothing to await and no clock to hand on.
+/// The host is called right here, on the isolate's thread. What is checked on
+/// this side is the run's own business — that it is still running, may
+/// publish, and has budget left; everything about the stream is the host's to
+/// check, and its refusal comes back as the error the guest throws.
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+fn op_sc_live(state: &mut OpState, #[string] token: &str, #[string] request: &str) -> String {
+    let reply = live_publish(state, token, request);
+    serde_json::to_string(&reply).unwrap_or_else(|_| {
+        r#"{"error":"the publish reply could not be encoded as JSON"}"#.to_owned()
+    })
+}
+
+#[cfg(feature = "eval")]
+fn live_publish(state: &mut OpState, token: &str, request: &str) -> Json {
+    let plan: Json = match serde_json::from_str(request) {
+        Ok(plan) => plan,
+        Err(e) => return refuse(format!("the publish request is not JSON: {e}")),
+    };
+    let host = {
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot publish to a stream");
+        };
+        let Some(run) = table.runs.get_mut(token) else {
+            return refuse("this publish belongs to a code run that has already finished");
+        };
+        if Instant::now() >= run.deadline {
+            let ms = run.timeout.as_millis();
+            return refuse(format!("this code exceeded its {ms} ms time limit"));
+        }
+        let Some(host) = run.live.clone() else {
+            return refuse("this code body cannot publish to a stream");
+        };
+        if run.publishes_left == 0 {
+            return refuse(format!(
+                "this code published more than {MAX_LIVE_PUBLISHES} elements in one run"
+            ));
+        }
+        run.publishes_left -= 1;
+        // A publish is seen by somebody's browser: re-running this body could
+        // no longer be said to repeat nothing.
+        run.retry = None;
+        host
+    };
+    let Some(stream) = plan.get("stream").and_then(Json::as_str) else {
+        return refuse("live.publish needs the stream's name");
+    };
+    let topic = match plan.get("topic") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(topic)) => Some(topic.clone()),
+        Some(Json::Number(n)) => Some(n.to_string()),
+        Some(other) => {
+            return refuse(format!(
+                "live.publish takes a topic that is a string or a number, not {other}"
+            ));
+        }
+    };
+    let value = plan.get("value").cloned().unwrap_or(Json::Null);
+    match host.publish(stream, topic, value) {
+        Ok(topic) => serde_json::json!({ "ok": topic }),
+        Err(e) => refuse(e.to_string()),
+    }
 }
 
 /// One **module function call** (§4a). [`trigger_call`]'s twin, and its own
@@ -3864,6 +4081,7 @@ deno_core::extension!(
         op_sc_files,
         op_sc_trigger,
         op_sc_modfn,
+        op_sc_live,
         op_sc_done,
         op_sc_fail,
         op_sc_mark,
@@ -4048,6 +4266,9 @@ struct CodeRun {
     /// before the job crosses, for [`CodeRun::file_stores`]' reason: the guest's
     /// `modfn.x` is a property access and cannot await an answer.
     module_functions: Vec<ModuleFunction>,
+    /// Live updates, when this run may publish — an `Arc` already, so it
+    /// crosses as it is.
+    live: Option<Arc<dyn LiveHost>>,
     /// The schema snapshot this run's `Table` is answered from, cloned off the
     /// call before the job crosses — sixteen bytes and a refcount, not a copy
     /// of the schema. `None` for a run nobody gave one to, whose guest then has
@@ -4455,6 +4676,7 @@ impl CodeRuntime {
                     trigger_names,
                     module_fns: mods,
                     module_functions,
+                    live: call.live.cloned(),
                     schema: call.schema.cloned(),
                     console: call.console.clone(),
                     timeout,
@@ -4665,6 +4887,10 @@ fn worker_thread(
     // The `modfn` factory, on the same terms as the four above it.
     if let Err(e) = runtime.execute_script("sc_module_fns.js", MODULE_FNS_PRELUDE) {
         debug_assert!(false, "the module functions prelude failed to compile: {e}");
+    }
+    // The `live` factory, on the same terms as the five above it.
+    if let Err(e) = runtime.execute_script("sc_live.js", LIVE_PRELUDE) {
+        debug_assert!(false, "the live prelude failed to compile: {e}");
     }
     // The v1 `Table` and `Field`, on the same terms as the five above them —
     // and the one prelude a module gets a copy of too, because a v1 plugin's
@@ -5186,6 +5412,8 @@ fn start_run(
                 module_fns: run.module_fns.clone(),
                 module_calls_left: run.max_module_calls,
                 max_module_calls: run.max_module_calls,
+                live: run.live.clone(),
+                publishes_left: MAX_LIVE_PUBLISHES,
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -5299,6 +5527,8 @@ struct RunScripts {
     wants_triggers: bool,
     /// Whether it takes `modfn`, on exactly the same terms.
     wants_module_fns: bool,
+    /// Whether it takes `live`, on exactly the same terms.
+    wants_live: bool,
     /// Whether it takes v1's `Table` and `Field` — the same condition
     /// `wants_db` is (§8), kept as a field of its own so that the parameter
     /// list and the isolate's definition record cannot drift apart if it ever
@@ -5364,6 +5594,11 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
                 "code binding `modfn` collides with the module functions bound in a code body",
             ));
         }
+        if call.live.is_some() && name == LIVE {
+            return Err(Error::msg(
+                "code binding `live` collides with live updates bound in a code body",
+            ));
+        }
         if call.host.is_some() && (name == V1_TABLE || name == V1_FIELD) {
             return Err(Error::msg(format!(
                 "code binding `{name}` collides with the Saltcorn 1 `{name}` class \
@@ -5382,6 +5617,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     let wants_files = call.files.is_some();
     let wants_triggers = call.triggers.is_some();
     let wants_module_fns = call.module_fns.is_some();
+    let wants_live = call.live.is_some();
     // The v1 classes ride on the `db` host and nothing else (§8): the metadata
     // half of them is answered from the snapshot, but every method with I/O
     // behind it is one plan sent as this run, and a body with no host has
@@ -5432,6 +5668,9 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     if wants_module_fns {
         names.push(MODFN);
     }
+    if wants_live {
+        names.push(LIVE);
+    }
     if wants_v1 {
         names.push(V1_TABLE);
         names.push(V1_FIELD);
@@ -5469,6 +5708,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_files,
         wants_triggers,
         wants_module_fns,
+        wants_live,
         wants_v1,
         wants_console,
     })
@@ -5740,6 +5980,7 @@ fn build_script(
         wants_files,
         wants_triggers,
         wants_module_fns,
+        wants_live,
         wants_v1,
         wants_console,
     } = scripts;
@@ -5762,7 +6003,7 @@ fn build_script(
     if !held {
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
-             {wants_triggers}, {wants_module_fns}, {wants_v1}, {wants_console}, \
+             {wants_triggers}, {wants_module_fns}, {wants_live}, {wants_v1}, {wants_console}, \
              {definition});\n"
         ));
     }
@@ -7648,6 +7889,7 @@ mod tests {
             trigger_names: Vec::new(),
             module_fns: None,
             module_functions: Vec::new(),
+            live: None,
             timeout: Duration::from_secs(1),
             max_calls: 10,
             max_fetches: 10,
@@ -9308,6 +9550,105 @@ mod tests {
         fn functions(&self) -> Vec<ModuleFunction> {
             self.functions.clone()
         }
+    }
+
+    // --- The sixth surface: live updates ------------------------------------
+
+    /// A live host that records what it was asked to publish, refusing a stream
+    /// called `stopped` the way the hub refuses one that is not running.
+    #[derive(Default)]
+    struct FakeLive {
+        published: Mutex<Vec<(String, Option<String>, Json)>>,
+    }
+
+    impl LiveHost for FakeLive {
+        fn topics(&self, _stream: &str) -> Result<LiveTopics> {
+            Ok(LiveTopics::Single)
+        }
+
+        fn publish(
+            &self,
+            stream: &str,
+            topic: Option<String>,
+            value: Json,
+        ) -> Result<Option<String>> {
+            if stream == "stopped" {
+                return Err(Error::invalid(
+                    "stream `stopped` is not running on this server",
+                ));
+            }
+            self.published
+                .lock()
+                .unwrap()
+                .push((stream.to_owned(), topic.clone(), value));
+            Ok(topic)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_loop_publishes_progress_in_order_and_a_refusal_is_catchable() {
+        let live = Arc::new(FakeLive::default());
+        let host: Arc<dyn LiveHost> = live.clone();
+        let rt = CodeRuntime::with_workers(1);
+        let out = rt
+            .run(CodeCall {
+                code: r#"for (let i = 1; i <= 10; i++) {
+                           live.publish("job_status", user.id, { message: "step", progress: i / 10 });
+                         }
+                         live.publish("announcements", { text: "no topic" });
+                         const numbered = live.publish("board_activity", 7, { n: 1 });
+                         let refused = null;
+                         try { live.publish("stopped", null, {}); } catch (e) { refused = e.message; }
+                         return { refused, numbered, kind: typeof live.publish };"#
+                    .to_owned(),
+                bindings: [("user".to_owned(), json!({ "id": "u-1" }))]
+                    .into_iter()
+                    .collect(),
+                live: Some(&host),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(out["kind"], json!("function"));
+        assert_eq!(
+            out["numbered"],
+            json!("7"),
+            "a number topic crosses as text"
+        );
+        assert!(
+            out["refused"].as_str().unwrap().contains("not running"),
+            "{out}"
+        );
+        let published = live.published.lock().unwrap().clone();
+        assert_eq!(published.len(), 12);
+        let progress: Vec<Json> = published[..10]
+            .iter()
+            .map(|(_, _, v)| v["progress"].clone())
+            .collect();
+        assert_eq!(progress[0], json!(0.1));
+        assert_eq!(progress[9], json!(1), "in the order they were published");
+        assert!(
+            published[..10]
+                .iter()
+                .all(|(s, t, _)| s == "job_status" && t.as_deref() == Some("u-1"))
+        );
+        assert_eq!(published[10].0, "announcements");
+        assert_eq!(published[10].1, None, "two arguments: no topic");
+        assert_eq!(published[10].2, json!({ "text": "no topic" }));
+    }
+
+    #[tokio::test]
+    async fn a_body_without_a_live_host_cannot_name_live() {
+        let rt = CodeRuntime::with_workers(1);
+        let error = rt
+            .run(CodeCall {
+                code: r#"live.publish("job_status", null, {});"#.to_owned(),
+                ..CodeCall::default()
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("live is not defined"), "{error}");
     }
 
     /// A call that can reach the module functions and nothing else.
