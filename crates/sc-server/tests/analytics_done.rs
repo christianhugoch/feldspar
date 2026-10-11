@@ -31,6 +31,48 @@
 //! drawn, **Open as model** as the explorer does it, and what uses a model
 //! listed for the delete warning. The real CmdStan half is
 //! `stan_models.rs`'s `radon_in_the_model_editor`, behind `#[ignore]`.
+//!
+//! **A4** (analytics TODO A4.7): the Report's Try it — an explorer and a
+//! report; the explorer's plot with its tests copied into the report as a
+//! drop copies it, and left alone when the explorer changes; a heading,
+//! Markdown, a page break and a model's coefficient table and residual plot
+//! as the model editor's cards make them, reordered; a row added to `houses`
+//! appearing in the report's plot but not in the fit's; the page set to A4
+//! landscape; a panel copied from one report into a second; and the usage
+//! index finding the reports for the delete warnings. The print dialog and
+//! the PDF are walked by hand; the pagination is `report/pages.test.ts`.
+//!
+//! **A5** (analytics TODO A5.15, needs PostGIS): the Map workspace's Try
+//! it — a GeoJSON import, the incidents in the explorer's map, count per
+//! region against point-in-polygon counts made here, the attribute table,
+//! a selection near a point saved as a dataset, a reference layer, the map
+//! in a report, and a vector tile.
+//!
+//! **A6** (analytics TODO A6.8, needs PostGIS): the Dashboard's Try it — a
+//! dashboard of a bar chart by category, the districts map, a line of
+//! incidents per day copied from a report, a stat card with its previous
+//! month and sparkline, and the per-district bars of a dataset made by the
+//! toolbox's Spatial join; arranged and resized; every tile drawn with the
+//! selections the browser would send (a bar clicked, a range brushed in
+//! milliseconds, a district clicked on either map layer, a drill-down) and
+//! its numbers checked against counts made here from each incident's point
+//! and the districts' outlines, across the incidents, the incidents with
+//! their district and the counts per district, with the sentences saying
+//! which filters did not reach a panel; a filter of the dashboard's own
+//! saved and cleared; and the dashboard reopened as it was left.
+//!
+//! **A9** (analytics TODO A9.6): applications with a restricted Analytics UI,
+//! on their own subdomains. A fixed application showing one dashboard of the
+//! admin's for `staff`: before `staff` may read `houses` its tiles say so;
+//! after, a `staff` user's shell is the dashboard alone, its tiles draw and
+//! filter, every change is refused, the admin's endpoints and the other
+//! datasets are not there, and a member and a visitor are kept out. A
+//! self-serve application over `houses` and `neighbourhoods`: the base picker,
+//! a dataset of the user's own explored, `incidents` refused as a base and
+//! `viewings` through a join, only the Data explorer, nothing of the other
+//! application, and sharing with another `staff` user. Then an ownership
+//! formula gives `staff` the newer houses only, and every count, box and test
+//! in both applications is of those rows, against the admin's 200.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -52,12 +94,23 @@ use tower::ServiceExt;
 
 struct Client {
     router: Router,
+    /// The host addressed, on a server with a base domain (A9's applications).
+    host: Option<String>,
     cookies: HashMap<String, String>,
 }
 
 impl Client {
-    async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    /// A request, answering the status, the content type and the body.
+    async fn raw(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String, Vec<u8>) {
         let mut builder = Request::builder().method(method).uri(path);
+        if let Some(host) = &self.host {
+            builder = builder.header(header::HOST, host);
+        }
         if !self.cookies.is_empty() {
             let jar = self
                 .cookies
@@ -81,6 +134,12 @@ impl Client {
         };
         let response = self.router.clone().oneshot(request).await.unwrap();
         let status = response.status();
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
         for raw in response.headers().get_all(header::SET_COOKIE) {
             if let Ok(text) = raw.to_str()
                 && let Some((name, value)) = text.split(';').next().unwrap_or("").split_once('=')
@@ -91,6 +150,11 @@ impl Client {
         let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
             .await
             .unwrap();
+        (status, content_type, bytes.to_vec())
+    }
+
+    async fn send(&mut self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let (status, _, bytes) = self.raw(method, path, body).await;
         let value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -138,12 +202,29 @@ impl Client {
 }
 
 async fn setup() -> sc_error::Result<(Client, TestDb)> {
-    let db = TestDb::new().await?;
+    setup_on(TestDb::new().await?).await
+}
+
+/// A server over `db`, after `feldspar demo analytics`, with the admin
+/// logged in. On a database with PostGIS the demo makes its map tables too.
+async fn setup_on(db: TestDb) -> sc_error::Result<(Client, TestDb)> {
+    serve(db, None, None).await
+}
+
+/// [`setup_on`]'s server, answering applications' subdomains of
+/// `base_domain` (the admin is then signed in there) and serving `bundle` as
+/// the Analytics UI's.
+async fn serve(
+    db: TestDb,
+    base_domain: Option<&str>,
+    bundle: Option<std::path::PathBuf>,
+) -> sc_error::Result<(Client, TestDb)> {
     let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
     let catalog = Arc::new(Catalog::init(driver as Arc<dyn DatabaseDriver>).await?);
     sc_auth::bootstrap(&catalog).await?;
     sc_catalog::bootstrap_table_meta(&catalog).await?;
     sc_catalog::bootstrap_field_meta(&catalog).await?;
+    sc_app::bootstrap(&catalog).await?;
     // `feldspar demo analytics`, as the Try it begins.
     sc_analytics::demo::demo_analytics(&catalog, false).await?;
     let agents = sc_server::install_agents(&catalog).await?;
@@ -155,18 +236,25 @@ async fn setup() -> sc_error::Result<(Client, TestDb)> {
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
+            .with_base_domain(base_domain.map(str::to_owned))
             .with_triggers(dispatcher)
-            .with_models(models),
+            .with_models(models)
+            .with_analytics_dir(bundle),
     );
+    let config = ServerConfig {
+        base_domain: base_domain.map(str::to_owned),
+        ..ServerConfig::default()
+    };
     let router = build_router_with_apps(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps.clone()),
         Arc::new(SessionStore::default()),
-        &ServerConfig::default(),
+        &config,
         apps,
     )?;
     let mut client = Client {
         router,
+        host: base_domain.map(str::to_owned),
         cookies: HashMap::new(),
     };
     client.send("GET", "/api/auth/status", None).await;
@@ -194,7 +282,8 @@ async fn the_try_it_of_milestone_a1() -> sc_error::Result<()> {
 
     // 1. The front page: only the demo's datasets (A2.15) and no workspaces
     // yet, and every kind of workspace listed with the milestone that brings
-    // it — every kind but A2's Data explorer, which is here now.
+    // it — every kind but those here now: the Data explorer, the Report and
+    // the Map.
     let listed = client.ok("GET", "/api/datasets", None).await;
     let mut names: Vec<&str> = listed
         .as_array()
@@ -211,7 +300,8 @@ async fn the_try_it_of_milestone_a1() -> sc_error::Result<()> {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|k| k["kind"] != "data_explorer")
+            .filter(|k| !["data_explorer", "report", "map", "dashboard"]
+                .contains(&k["kind"].as_str().unwrap_or("")))
             .all(|k| k["available"] == json!(false) && k["arrives_in"].is_string()),
         "{kinds}"
     );
@@ -1332,7 +1422,7 @@ async fn the_try_it_of_milestone_a3() -> sc_error::Result<()> {
         client
             .ok("GET", &format!("/api/models/{model}/usage"), None)
             .await,
-        json!({ "fields": [], "triggers": [] })
+        json!({ "fields": [], "triggers": [], "workspaces": [] })
     );
     client
         .ok(
@@ -1374,6 +1464,7 @@ async fn the_try_it_of_milestone_a3() -> sc_error::Result<()> {
                 "id": client.ok("GET", "/api/triggers", None).await[0]["id"],
                 "name": "nightly refit", "how": "fits",
             }],
+            "workspaces": [],
         })
     );
     // The clone is used by nothing.
@@ -1381,7 +1472,7 @@ async fn the_try_it_of_milestone_a3() -> sc_error::Result<()> {
         client
             .ok("GET", &format!("/api/models/{clone_id}/usage"), None)
             .await,
-        json!({ "fields": [], "triggers": [] })
+        json!({ "fields": [], "triggers": [], "workspaces": [] })
     );
     Ok(())
 }
@@ -1392,4 +1483,2031 @@ async fn view_state(client: &mut Client, model: &str) -> Value {
         .ok("GET", &format!("/api/models/{model}"), None)
         .await["view_state"]
         .clone()
+}
+
+// --- A4: reports, and drag and drop -----------------------------------------
+
+impl Client {
+    /// A new workspace of `kind`, answering its id.
+    async fn workspace(&mut self, name: &str, kind: &str) -> String {
+        let made = self
+            .ok(
+                "POST",
+                "/api/workspaces",
+                Some(json!({ "name": name, "kind": kind })),
+            )
+            .await;
+        made["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Save a workspace's state.
+    async fn save_state(&mut self, id: &str, state: &Value) {
+        self.ok(
+            "PUT",
+            &format!("/api/workspaces/{id}/state"),
+            Some(json!({ "state": state })),
+        )
+        .await;
+    }
+
+    /// A workspace's stored state.
+    async fn state_of(&mut self, id: &str) -> Value {
+        self.ok("GET", &format!("/api/workspaces/{id}"), None).await["state"].clone()
+    }
+
+    /// A panel drawn as a report draws it; a sentence instead is a failure.
+    async fn render(&mut self, panel: &Value) -> Value {
+        let drawn = self
+            .ok(
+                "POST",
+                "/api/panels/render",
+                Some(json!({ "panel": panel })),
+            )
+            .await;
+        assert!(drawn.get("error").is_none(), "{drawn}");
+        drawn
+    }
+}
+
+/// What a drop does with a dragged panel (`readPanelDrag`): the JSON as it
+/// was when the drag began, with an identity of its own.
+fn dropped(dragged: &Value) -> Value {
+    let mut copy = dragged.clone();
+    copy["id"] = json!(uuid::Uuid::new_v4().to_string());
+    copy
+}
+
+/// A report block holding `panel`.
+fn panel_block(panel: &Value) -> Value {
+    json!({ "id": panel["id"], "kind": "panel", "panel": panel })
+}
+
+/// The kinds of a report's blocks, in order.
+fn block_kinds(state: &Value) -> Vec<String> {
+    state["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["kind"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The `(name, kind, panels)` of a usage answer's workspaces.
+fn users(usage: &Value) -> Vec<(String, String, i64)> {
+    usage["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                w["name"].as_str().unwrap().to_owned(),
+                w["kind"].as_str().unwrap().to_owned(),
+                w["panels"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_try_it_of_milestone_a4() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+    let client = &mut client;
+    let houses = client.dataset_named("Houses").await;
+    let houses_rows = client
+        .ok("GET", "/api/tables/houses/rows?limit=500", None)
+        .await
+        .as_array()
+        .unwrap()
+        .len();
+
+    // 1. The Data explorer of A2 beside a new Report: both kinds are here.
+    let kinds = client.ok("GET", "/api/workspace-kinds", None).await;
+    for kind in ["data_explorer", "report"] {
+        let k = kinds
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["kind"] == json!(kind))
+            .unwrap();
+        assert_eq!(k["available"], json!(true), "{k}");
+    }
+    let explorer = client.workspace("Exploring houses", "data_explorer").await;
+    let assignment = json!({
+        "x": { "field": "area" }, "y": [{ "field": "price" }],
+        "color": { "field": "neighbourhood" },
+    });
+    client
+        .save_state(
+            &explorer,
+            &json!({ "dataset": houses, "assignment": assignment, "view": "plot" }),
+        )
+        .await;
+    let report = client.workspace("House prices report", "report").await;
+    assert_eq!(client.state_of(&report).await, json!({}));
+
+    // 2. The explorer's plot, with its tests, dragged into the report: the
+    //    drag carries the panel as it is, the drop keeps a copy.
+    let scatter = client
+        .suggest(json!({ "dataset": houses, "assignment": assignment }))
+        .await["spec"]
+        .clone();
+    let data = json!({ "kind": "dataset", "dataset": houses });
+    let dragged = json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "title": "price by area — Houses",
+        "kind": "test_result",
+        "content": {
+            "tests": { "data": data, "y": [{ "field": "price" }], "x": { "field": "area" } },
+            "plot": scatter,
+        },
+    });
+    let explorer_panel = dropped(&dragged);
+    assert_ne!(explorer_panel["id"], dragged["id"]);
+    client
+        .save_state(
+            &report,
+            &json!({ "blocks": [panel_block(&explorer_panel)] }),
+        )
+        .await;
+    // The plot in the explorer changes — a box plot now — and the report's
+    // copy does not.
+    let boxed = json!({ "x": { "field": "neighbourhood" }, "y": [{ "field": "price" }] });
+    client
+        .save_state(
+            &explorer,
+            &json!({ "dataset": houses, "assignment": boxed, "view": "plot" }),
+        )
+        .await;
+    let kept = client.state_of(&report).await;
+    assert_eq!(kept["blocks"][0]["panel"], explorer_panel);
+    let drawn = client.render(&explorer_panel).await;
+    assert_eq!(drawn["kind"], json!("test_result"));
+    assert_eq!(drawn["plot"]["layers"][0]["total"], json!(houses_rows));
+    assert_eq!(drawn["tests"]["design"], json!("two_numbers"));
+
+    // 3. A heading and Markdown above it, a page break; then a coefficient
+    //    table and a residual plot dragged from the model editor's output
+    //    cards (the table names the fit, the plot is its spec over the fit's
+    //    output data).
+    let sold = client
+        .dataset(json!({
+            "name": "Sold houses",
+            "base": { "kind": "table", "table": "houses" },
+            "operations": [
+                op("sold", "filter", json!({ "formula": "sold === true" })),
+                op("keep", "select", json!({ "columns": [
+                    { "column": "price" }, { "column": "area" }, { "column": "bedrooms" },
+                ] })),
+            ],
+        }))
+        .await;
+    let model = client
+        .ok(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name": "House prices",
+                "provider": "linear_regression",
+                "dataset": { "dataset_id": sold },
+                "configuration": { "label": "price" },
+            })),
+        )
+        .await;
+    let model = model["id"].as_str().unwrap().to_owned();
+    let fit = client.fit(&model).await;
+    let fit_id = fit["id"].as_str().unwrap().to_owned();
+    let outputs = client.outputs(&model, "").await;
+    let coefficients = dropped(&json!({
+        "id": "card-coefficients", "title": "Coefficients — House prices",
+        "kind": "fit_table", "content": { "fit": fit_id, "output": "coefficients" },
+    }));
+    let residuals = dropped(&json!({
+        "id": "card-residuals", "title": "Residuals against fitted values — House prices",
+        "kind": "plot", "content": { "spec": output_of(&outputs, "residuals_fitted")["spec"] },
+    }));
+    let heading = json!({ "id": "h1", "kind": "heading", "text": "House prices", "level": 1 });
+    let text = json!({ "id": "t1", "kind": "text",
+                       "markdown": "Prices rise with **area**; see `price_per_m2`." });
+    let page_break = json!({ "id": "pb", "kind": "page_break" });
+    let blocks = json!([
+        heading,
+        text,
+        panel_block(&explorer_panel),
+        page_break,
+        panel_block(&residuals),
+        panel_block(&coefficients),
+    ]);
+    client
+        .save_state(&report, &json!({ "blocks": blocks }))
+        .await;
+    // Reordered: the coefficient table above the residual plot.
+    let mut reordered = blocks.as_array().unwrap().clone();
+    reordered.swap(4, 5);
+    client
+        .save_state(&report, &json!({ "blocks": reordered }))
+        .await;
+    let state = client.state_of(&report).await;
+    assert_eq!(
+        block_kinds(&state),
+        ["heading", "text", "panel", "page_break", "panel", "panel"]
+    );
+    assert_eq!(state["blocks"][4]["panel"]["kind"], json!("fit_table"));
+    let table = client.render(&coefficients).await;
+    let terms: Vec<&str> = table["output"]["table"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str().unwrap())
+        .collect();
+    assert!(
+        terms.contains(&"area") && terms.contains(&"bedrooms"),
+        "{table}"
+    );
+    let fitted = client.render(&residuals).await;
+    let scored = fitted["plot"]["layers"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert!(scored > 0, "{fitted}");
+    // A report refuses a block it does not have, naming it.
+    let mut broken = reordered.clone();
+    broken.push(json!({ "id": "c", "kind": "chart" }));
+    let (status, err) = client
+        .send(
+            "PUT",
+            &format!("/api/workspaces/{report}/state"),
+            Some(json!({ "state": { "blocks": broken } })),
+        )
+        .await;
+    assert!(!status.is_success(), "{err}");
+    assert!(err.to_string().contains("not a kind of block"), "{err}");
+
+    // 4. A row added to `houses` in the admin is in the report's plot the
+    //    next time it is drawn: panels are live views of their datasets. The
+    //    residual plot is of the fit's scored rows, which a new row does not
+    //    change until the model is fitted again.
+    client
+        .ok(
+            "POST",
+            "/api/tables/houses/rows",
+            Some(json!({
+                "address": "1 New Street", "area": 95.0, "bedrooms": 3, "neighbourhood": 1,
+                "year_built": 2024, "sold": true, "price": 210000.0,
+            })),
+        )
+        .await;
+    let drawn = client.render(&explorer_panel).await;
+    assert_eq!(drawn["plot"]["layers"][0]["total"], json!(houses_rows + 1));
+    let fitted = client.render(&residuals).await;
+    assert_eq!(
+        fitted["plot"]["layers"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        scored
+    );
+
+    // 5. A4 landscape. (The PDF is the browser's print dialog, walked by hand;
+    //    the pagination is `report/pages.test.ts`.)
+    let page = json!({ "size": "A4", "orientation": "landscape" });
+    client
+        .save_state(&report, &json!({ "blocks": reordered, "page": page }))
+        .await;
+    let state = client.state_of(&report).await;
+    assert_eq!(state["page"], page);
+    let (status, _) = client
+        .send(
+            "PUT",
+            &format!("/api/workspaces/{report}/state"),
+            Some(json!({ "state": { "blocks": reordered, "page": { "size": "B5", "orientation": "portrait" } } })),
+        )
+        .await;
+    assert!(!status.is_success(), "a B5 page is refused");
+
+    // 6. The explorer's panel dragged from this report into a second one: a
+    //    copy with an identity of its own.
+    let second = client.workspace("Summary for the board", "report").await;
+    let again = dropped(&state["blocks"][2]["panel"]);
+    assert_ne!(again["id"], explorer_panel["id"]);
+    assert_eq!(again["content"], explorer_panel["content"]);
+    client
+        .save_state(
+            &second,
+            &json!({ "blocks": [panel_block(&again)], "page": { "size": "Letter", "orientation": "portrait" } }),
+        )
+        .await;
+
+    // 7. The delete warning for `Houses` lists both reports and the explorer;
+    //    that of the model's dataset lists only its model (the report reads
+    //    the fit, not the dataset); the model's lists the first report, whose
+    //    two panels show its fit.
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{houses}/usage"), None)
+        .await;
+    let mut found = users(&usage);
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ("Exploring houses".to_owned(), "data_explorer".to_owned(), 0),
+            ("House prices report".to_owned(), "report".to_owned(), 1),
+            ("Summary for the board".to_owned(), "report".to_owned(), 1),
+        ],
+        "{usage}"
+    );
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{sold}/usage"), None)
+        .await;
+    assert_eq!(usage["models"][0]["id"], json!(model), "{usage}");
+    assert_eq!(usage["workspaces"], json!([]), "{usage}");
+    let usage = client
+        .ok("GET", &format!("/api/models/{model}/usage"), None)
+        .await;
+    assert_eq!(
+        users(&usage),
+        vec![("House prices report".to_owned(), "report".to_owned(), 2)],
+        "{usage}"
+    );
+
+    // Reopened, the report is as it was left.
+    assert_eq!(client.state_of(&report).await, state);
+    Ok(())
+}
+
+// --- A5: maps ----------------------------------------------------------------
+
+/// The tutorial's file (part 5, step 1): four police stations in the demo's
+/// city.
+const POLICE_STATIONS: &[u8] =
+    include_bytes!("../../../docs/tutorial-data/police-stations.geojson");
+
+/// A GeoJSON point's longitude and latitude.
+fn lon_lat(point: &Value) -> (f64, f64) {
+    assert_eq!(point["type"], "Point", "{point}");
+    let c = &point["coordinates"];
+    (c[0].as_f64().unwrap(), c[1].as_f64().unwrap())
+}
+
+/// A polygon's outer ring.
+fn ring(polygon: &Value) -> Vec<(f64, f64)> {
+    assert_eq!(polygon["type"], "Polygon", "{polygon}");
+    polygon["coordinates"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+        .collect()
+}
+
+/// Whether `(x, y)` is inside a closed ring, by the even–odd rule — in the
+/// plane of longitude and latitude, as `ST_Within` over a geometry decides.
+fn inside(ring: &[(f64, f64)], (x, y): (f64, f64)) -> bool {
+    let mut odd = false;
+    for k in 1..ring.len() {
+        let ((x1, y1), (x2, y2)) = (ring[k - 1], ring[k]);
+        if (y1 > y) != (y2 > y) && x < x1 + (y - y1) * (x2 - x1) / (y2 - y1) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// The great-circle distance in metres on the mean Earth sphere: within half
+/// a per cent of the spheroid's that `Geo.distance` measures.
+fn haversine((lon1, lat1): (f64, f64), (lon2, lat2): (f64, f64)) -> f64 {
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let a = ((p2 - p1) / 2.0).sin().powi(2)
+        + p1.cos() * p2.cos() * ((lon2 - lon1).to_radians() / 2.0).sin().powi(2);
+    2.0 * 6_371_008.8 * a.sqrt().asin()
+}
+
+/// The features of a GeoJSON layer as `(id, properties, geometry)`.
+fn features(drawn_layer: &Value) -> Vec<(i64, Value, Value)> {
+    assert_eq!(drawn_layer["data"]["delivery"], "geojson", "{drawn_layer}");
+    drawn_layer["data"]["data"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["id"].as_i64().unwrap(),
+                f["properties"].clone(),
+                f["geometry"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// A query-string component, every byte but a letter or digit escaped.
+fn encode_component(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// The `(x, y)` of the Web Mercator tile at `zoom` holding `(lon, lat)`.
+fn tile_of((lon, lat): (f64, f64), zoom: u32) -> (u32, u32) {
+    let n = f64::from(1u32 << zoom);
+    let lat = lat.to_radians();
+    let x = ((lon + 180.0) / 360.0 * n).floor();
+    let y = ((1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0 * n).floor();
+    (x as u32, y as u32)
+}
+
+impl Client {
+    /// A map spec drawn; a layer refused is a failure here.
+    async fn draw_map(&mut self, spec: &Value) -> Value {
+        let drawn = self
+            .ok("POST", "/api/maps/render", Some(json!({ "spec": spec })))
+            .await;
+        for layer in drawn["layers"].as_array().unwrap() {
+            assert_ne!(layer["data"]["delivery"], "none", "{layer}");
+        }
+        drawn
+    }
+}
+
+#[tokio::test]
+async fn the_try_it_of_milestone_a5() -> sc_error::Result<()> {
+    let Some(db) = TestDb::with_postgis().await? else {
+        return Ok(());
+    };
+    let (mut client, _db) = setup_on(db).await?;
+    let client = &mut client;
+    let [west, south, east, north] = sc_analytics::demo::DEMO_EXTENT;
+    let in_city =
+        |(lon, lat): (f64, f64)| (west..=east).contains(&lon) && (south..=north).contains(&lat);
+
+    // 1. A GeoJSON file imported as a new table; its rows are a map layer.
+    use base64::Engine as _;
+    let (status, imported) = client
+        .send(
+            "POST",
+            "/api/tables/geo",
+            Some(json!({
+                "name": "police_stations", "file_name": "police-stations.geojson",
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(POLICE_STATIONS),
+            })),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {imported}");
+    let stations = client
+        .ok(
+            "POST",
+            "/api/datasets",
+            Some(json!({ "name": "Police stations",
+                         "base": { "kind": "table", "table": "police_stations" } })),
+        )
+        .await["dataset"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let suggested = client
+        .ok(
+            "POST",
+            "/api/maps/suggest",
+            Some(json!({ "dataset": stations, "assignment": { "label": { "field": "name" } } })),
+        )
+        .await;
+    let drawn = client.draw_map(&suggested["spec"]).await;
+    let stations_drawn = features(&drawn["layers"][0]);
+    assert_eq!(stations_drawn.len(), 4);
+    assert_eq!(drawn["layers"][0]["data"]["geometry"], json!(["point"]));
+    let (_, central, at) = &stations_drawn[0];
+    assert_eq!(central["name"], "Central", "{central}");
+    assert_eq!(central["officers"], 64);
+    assert_eq!(lon_lat(at), (4.8512, 45.7486));
+
+    // 2. The incidents in the explorer's map, coloured by category.
+    let incidents = client.dataset_named("Incidents").await;
+    let districts = client.dataset_named("Districts").await;
+    let explorer = client
+        .workspace("Exploring incidents", "data_explorer")
+        .await;
+    let assignment = json!({ "color": { "field": "category" } });
+    client
+        .save_state(
+            &explorer,
+            &json!({ "dataset": incidents, "assignment": assignment, "view": "map" }),
+        )
+        .await;
+    let suggested = client
+        .ok(
+            "POST",
+            "/api/maps/suggest",
+            Some(json!({ "dataset": incidents, "assignment": assignment })),
+        )
+        .await;
+    assert_eq!(
+        suggested["sources"][0]["source"],
+        json!({ "kind": "column", "column": "location" })
+    );
+    let drawn = client.draw_map(&suggested["spec"]).await;
+    let layer = &drawn["layers"][0];
+    assert_eq!(layer["data"]["count"], 2400, "{}", layer["data"]["count"]);
+    assert_eq!(
+        layer["domains"]["color"]["values"],
+        json!([
+            "antisocial behaviour",
+            "burglary",
+            "theft",
+            "vandalism",
+            "vehicle crime"
+        ])
+    );
+    let points: Vec<(i64, (f64, f64))> = features(layer)
+        .iter()
+        .map(|(id, _, g)| (*id, lon_lat(g)))
+        .collect();
+    assert!(points.iter().all(|(_, p)| in_city(*p)));
+
+    // 3. Open in map: a Map workspace whose first layer is the explorer's.
+    let map = client.workspace("Incidents map", "map").await;
+    let mut incidents_layer = suggested["spec"]["layers"][0].clone();
+    incidents_layer["id"] = json!("incidents");
+    incidents_layer["name"] = json!("Incidents");
+    client
+        .save_state(
+            &map,
+            &json!({ "layers": [incidents_layer], "reference": [] }),
+        )
+        .await;
+
+    // 4. Aggregate → Count per region with the districts: a dataset of a
+    //    Spatial join and an Aggregate, every district with its count.
+    let districts_layer = json!({ "id": "districts", "name": "Districts", "dataset": districts,
+                                  "geometry": { "kind": "column", "column": "outline" } });
+    let outlines: Vec<(i64, Vec<(f64, f64)>)> = features(
+        &client
+            .draw_map(&json!({ "layers": [districts_layer] }))
+            .await["layers"][0],
+    )
+    .iter()
+    .map(|(id, _, g)| (*id, ring(g)))
+    .collect();
+    assert_eq!(outlines.len(), sc_analytics::demo::DEMO_DISTRICTS);
+    let mut expected: BTreeMap<i64, i64> = outlines.iter().map(|(id, _)| (*id, 0)).collect();
+    for (_, p) in &points {
+        let homes: Vec<i64> = outlines
+            .iter()
+            .filter(|(_, r)| inside(r, *p))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(homes.len(), 1, "{p:?} is in {homes:?}");
+        *expected.get_mut(&homes[0]).unwrap() += 1;
+    }
+    let (status, run) = client
+        .send(
+            "POST",
+            "/api/maps/tools/run",
+            Some(json!({ "tool": "count_per_region",
+                         "params": { "layer": incidents_layer, "regions": districts_layer } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{run}");
+    assert_eq!(run["dataset"]["name"], "Incidents per Districts");
+    let kinds: Vec<&str> = run["dataset"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["spatial_join", "aggregate", "complete"]);
+    let (names, rows, total) = client.stage(&run["dataset"], kinds.len()).await;
+    assert_eq!(total, 12);
+    let counted: BTreeMap<i64, i64> = rows
+        .iter()
+        .map(|r| (r[0].as_i64().unwrap(), r[1].as_i64().unwrap()))
+        .collect();
+    assert_eq!(counted, expected, "{names:?}");
+    // The new dataset is a global one, and opens in the Dataset editor.
+    let listed = client.ok("GET", "/api/datasets", None).await;
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["name"] == "Incidents per Districts"),
+        "{listed}"
+    );
+    // Graduated colours in five natural-breaks classes: Jenks over the counts.
+    let mut per_district = run["layer"].clone();
+    per_district["id"] = json!("per-district");
+    per_district["style"] =
+        json!({ "kind": "graduated", "method": "natural_breaks", "classes": 5 });
+    let layers = json!([districts_layer, incidents_layer, per_district]);
+    let drawn = client.draw_map(&json!({ "layers": layers })).await;
+    let classes: Vec<f64> = drawn["layers"][2]["classes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no classes: {}", drawn["layers"][2]))
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let mut counts: Vec<f64> = expected.values().map(|c| *c as f64).collect();
+    counts.sort_by(f64::total_cmp);
+    assert_eq!(
+        classes,
+        sc_analytics::classify::breaks(
+            &counts,
+            5,
+            sc_analytics::classify::Classification::NaturalBreaks
+        )
+    );
+    assert_eq!(classes.len(), 6);
+    assert_eq!((classes[0], classes[5]), (counts[0], counts[11]));
+
+    // 5. The attribute table sorted by count: the top three districts first,
+    //    selected — the selection is the workspace's. An aggregate's rows
+    //    have no key, so the server answers them in the dataset's order and
+    //    the table sorts them (`sortRows`); each row's id is its place.
+    let table = client
+        .ok(
+            "POST",
+            "/api/layers/rows",
+            Some(json!({ "layer": per_district,
+                         "sort": { "formula": names[1], "descending": true } })),
+        )
+        .await;
+    assert_eq!(
+        (table["keyed"].clone(), table["sorted"].clone()),
+        (json!(false), json!(false))
+    );
+    let mut sorted: Vec<(i64, i64, i64)> = table["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(table["ids"].as_array().unwrap())
+        .map(|(r, id)| {
+            (
+                id.as_i64().unwrap(),
+                r[0].as_i64().unwrap(),
+                r[1].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.2));
+    let top3: Vec<i64> = sorted.iter().take(3).map(|(id, _, _)| *id).collect();
+    let mut busiest: Vec<(i64, i64)> = expected.iter().map(|(d, c)| (*d, *c)).collect();
+    busiest.sort_by_key(|r| std::cmp::Reverse(r.1));
+    let top_districts: Vec<i64> = sorted.iter().take(3).map(|(_, d, _)| *d).collect();
+    assert_eq!(
+        top_districts,
+        busiest.iter().take(3).map(|(d, _)| *d).collect::<Vec<_>>()
+    );
+    client
+        .save_state(
+            &map,
+            &json!({ "layers": layers, "reference": [],
+                     "selection": { "layer": "per-district", "ids": top3 },
+                     "active": "per-district" }),
+        )
+        .await;
+
+    // 6. The incidents within 1 km of a point in the busiest district, saved
+    //    as a dataset.
+    let ring_of = &outlines
+        .iter()
+        .find(|(id, _)| *id == top_districts[0])
+        .unwrap()
+        .1;
+    let corners = &ring_of[..ring_of.len() - 1];
+    let centre = (
+        corners.iter().map(|p| p.0).sum::<f64>() / corners.len() as f64,
+        corners.iter().map(|p| p.1).sum::<f64>() / corners.len() as f64,
+    );
+    let found = client
+        .ok(
+            "POST",
+            "/api/layers/select",
+            Some(json!({ "layer": incidents_layer,
+                         "by": { "by": "near_point", "longitude": centre.0,
+                                 "latitude": centre.1, "distance": 1000 } })),
+        )
+        .await;
+    let near: Vec<i64> = found["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert!(near.len() > 20, "{} incidents near {centre:?}", near.len());
+    for (id, p) in &points {
+        let d = haversine(centre, *p);
+        if near.contains(id) {
+            assert!(d < 1005.0, "incident {id} is {d} m away and selected");
+        } else {
+            assert!(d > 995.0, "incident {id} is {d} m away and not selected");
+        }
+    }
+    let (status, saved) = client
+        .send(
+            "POST",
+            "/api/layers/selection",
+            Some(
+                json!({ "layer": incidents_layer, "name": "Incidents near the busiest district",
+                         "condition": found["condition"] }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(
+        saved["dataset"]["base"],
+        json!({ "kind": "dataset", "dataset": incidents })
+    );
+    let upto = saved["dataset"]["operations"].as_array().unwrap().len();
+    let (_, _, total) = client.stage(&saved["dataset"], upto).await;
+    assert_eq!(total, near.len() as i64);
+
+    // 7. A reference layer from a tile service, and the layers' opacity.
+    let mut layers = layers.clone();
+    layers[0]["opacity"] = json!(0.5);
+    let reference = json!([{ "id": "osm", "name": "OpenStreetMap", "kind": "tiles",
+                             "url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                             "opacity": 0.6 }]);
+    let view = json!({ "center": [4.85, 45.75], "zoom": 12 });
+    let state = json!({ "layers": layers, "reference": reference, "view": view,
+                        "selection": { "layer": "per-district", "ids": top3 } });
+    client.save_state(&map, &state).await;
+    let kept = client.state_of(&map).await;
+    assert_eq!(kept["reference"][0]["opacity"], json!(0.6));
+    assert_eq!(kept["layers"][0]["opacity"], json!(0.5));
+    let (status, refused) = client
+        .send(
+            "PUT",
+            &format!("/api/workspaces/{map}/state"),
+            Some(json!({ "state": { "layers": layers, "reference": [{
+                "id": "bad", "name": "Bad", "kind": "tiles", "url": "https://example.com/tiles.png",
+                "opacity": 1 }] } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // 8. The whole map dragged into a report, drawn as the report draws it.
+    let report = client.workspace("Incidents report", "report").await;
+    let panel = json!({
+        "id": uuid::Uuid::new_v4().to_string(), "kind": "map", "title": "Incidents map",
+        "content": { "spec": { "layers": layers, "reference": reference, "view": view } },
+    });
+    client
+        .save_state(&report, &json!({ "blocks": [panel_block(&panel)] }))
+        .await;
+    let rendered = client.render(&panel).await;
+    assert_eq!(rendered["kind"], "map");
+    assert_eq!(rendered["map"]["layers"].as_array().unwrap().len(), 3);
+    assert_eq!(rendered["map"]["layers"][2]["classes"], json!(classes));
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{incidents}/usage"), None)
+        .await;
+    let mut using = users(&usage);
+    using.sort();
+    assert_eq!(
+        using,
+        [
+            (
+                "Exploring incidents".to_owned(),
+                "data_explorer".to_owned(),
+                0
+            ),
+            ("Incidents map".to_owned(), "map".to_owned(), 1),
+            ("Incidents report".to_owned(), "report".to_owned(), 1),
+        ]
+    );
+
+    // A vector tile of the incidents: the city's tile at zoom 12 has them,
+    // a tile of the open ocean has none.
+    let tile_layer = json!({ "dataset": incidents,
+                             "geometry": { "kind": "column", "column": "location" },
+                             "properties": ["category"] });
+    let query = encode_component(&tile_layer.to_string());
+    let (x, y) = tile_of(centre, 12);
+    let (status, content_type, bytes) = client
+        .raw(
+            "GET",
+            &format!("/api/layers/tiles/12/{x}/{y}?layer={query}"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(content_type, "application/vnd.mapbox-vector-tile");
+    assert!(
+        bytes.windows(8).any(|w| w == b"features"),
+        "the tile names its layer"
+    );
+    assert!(
+        bytes.windows(8).any(|w| w == b"burglary"),
+        "the tile has incidents"
+    );
+    let (status, _, empty) = client
+        .raw(
+            "GET",
+            &format!("/api/layers/tiles/12/0/2048?layer={query}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!empty.windows(8).any(|w| w == b"burglary"));
+    Ok(())
+}
+
+// --- A6: dashboards ----------------------------------------------------------
+
+/// An incident of the demo, with the district it lies in, worked out here.
+struct Incident {
+    category: String,
+    month: (i32, u32),
+    day: chrono::NaiveDate,
+    district: i64,
+}
+
+impl Client {
+    /// Every row of a stored dataset, each by column name.
+    async fn every_row(&mut self, dataset: &str) -> Vec<BTreeMap<String, Value>> {
+        let def = self
+            .ok("GET", &format!("/api/datasets/{dataset}"), None)
+            .await["dataset"]
+            .clone();
+        let mut out = Vec::new();
+        loop {
+            let page = self
+                .ok(
+                    "POST",
+                    "/api/datasets/stage",
+                    Some(json!({ "dataset": def, "offset": out.len(), "limit": 1000 })),
+                )
+                .await;
+            let names: Vec<String> = page["columns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap().to_owned())
+                .collect();
+            let rows = page["rows"].as_array().unwrap();
+            for row in rows {
+                out.push(
+                    names
+                        .iter()
+                        .cloned()
+                        .zip(row.as_array().unwrap().iter().cloned())
+                        .collect(),
+                );
+            }
+            if rows.is_empty() || out.len() as i64 >= page["total"].as_i64().unwrap() {
+                return out;
+            }
+        }
+    }
+
+    /// A tile's panel drawn with the conditions the dashboard gives it
+    /// (`conditionsFor`); a sentence instead is a failure.
+    async fn render_in(&mut self, panel: &Value, conditions: &[&Value]) -> Value {
+        let drawn = self
+            .ok(
+                "POST",
+                "/api/panels/render",
+                Some(json!({ "panel": panel, "filters": conditions })),
+            )
+            .await;
+        assert!(drawn.get("error").is_none(), "{drawn}");
+        drawn
+    }
+}
+
+/// A panel as a drop makes it.
+fn panel_of(title: &str, kind: &str, content: Value) -> Value {
+    json!({ "id": uuid::Uuid::new_v4().to_string(), "title": title, "kind": kind,
+            "content": content })
+}
+
+/// A tile of a dashboard.
+fn tile(id: &str, panel: &Value, [x, y, w, h]: [u32; 4]) -> Value {
+    json!({ "id": id, "panel": panel, "x": x, "y": y, "w": w, "h": h })
+}
+
+/// What a drawn panel says condition `id` did to `dataset`: the column it
+/// filtered, or the sentence saying why it filtered none.
+fn reached(drawn: &Value, id: &str, dataset: &str) -> Result<String, String> {
+    let applied = drawn["filters"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no filters in {drawn}"))
+        .iter()
+        .find(|a| a["id"] == id && a["dataset"] == dataset)
+        .unwrap_or_else(|| panic!("nothing about `{id}` on {dataset} in {}", drawn["filters"]));
+    match applied["column"].as_str() {
+        Some(column) => Ok(column.to_owned()),
+        None => Err(applied["skipped"].as_str().unwrap().to_owned()),
+    }
+}
+
+/// A count plot's bars: each value of X and its count. A key's values are
+/// written as text, as the browser labels them.
+fn bars(drawn: &Value) -> BTreeMap<String, i64> {
+    let layer = &drawn["plot"]["layers"][0];
+    layer["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no rows in {drawn}"))
+        .iter()
+        .map(|row| {
+            let x = cell(layer, row, "x");
+            let x = x.as_str().map_or_else(|| x.to_string(), str::to_owned);
+            (x, cell(layer, row, "y").as_i64().unwrap())
+        })
+        .collect()
+}
+
+/// How many of `incidents` there are of each value `key` gives them.
+fn tally<K: Ord>(
+    incidents: &[Incident],
+    keep: impl Fn(&Incident) -> bool,
+    key: impl Fn(&Incident) -> K,
+) -> BTreeMap<K, i64> {
+    let mut out = BTreeMap::new();
+    for incident in incidents.iter().filter(|i| keep(i)) {
+        *out.entry(key(incident)).or_insert(0) += 1;
+    }
+    out
+}
+
+/// The month before `(year, month)`.
+fn month_before((year, month): (i32, u32)) -> (i32, u32) {
+    if month == 1 {
+        (year - 1, 12)
+    } else {
+        (year, month - 1)
+    }
+}
+
+/// Milliseconds since 1970 at `hour` on a day: what a time axis brushes in.
+fn millis(day: &str, hour: u32) -> i64 {
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .unwrap()
+        .and_hms_opt(hour, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
+}
+
+/// What a card says: its value, the value it is compared with, and its
+/// sparkline's `(first day, value)`s.
+fn card_numbers(drawn: &Value) -> (f64, f64, Vec<(String, f64)>) {
+    let card = &drawn["card"];
+    assert!(card.get("error").is_none(), "{card}");
+    let spark = card["sparkline"]
+        .as_array()
+        .map(|points| {
+            points
+                .iter()
+                .map(|p| {
+                    (
+                        p["start"].as_str().unwrap().to_owned(),
+                        p["value"].as_f64().unwrap(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        card["value"].as_f64().unwrap(),
+        card["comparison"]["value"].as_f64().unwrap_or(f64::NAN),
+        spark,
+    )
+}
+
+/// The `(first day, count)` of the twelve months ending with `last`, oldest
+/// first, counting `incidents` that `keep` keeps.
+fn months(
+    incidents: &[Incident],
+    last: (i32, u32),
+    keep: impl Fn(&Incident) -> bool,
+) -> Vec<(String, f64)> {
+    let counted = tally(incidents, keep, |i| i.month);
+    let mut at = last;
+    let mut out = Vec::new();
+    for _ in 0..12 {
+        out.push((
+            format!("{:04}-{:02}-01", at.0, at.1),
+            *counted.get(&at).unwrap_or(&0) as f64,
+        ));
+        at = month_before(at);
+    }
+    out.reverse();
+    out
+}
+
+#[tokio::test]
+async fn the_try_it_of_milestone_a6() -> sc_error::Result<()> {
+    let Some(db) = TestDb::with_postgis().await? else {
+        return Ok(());
+    };
+    let (mut client, _db) = setup_on(db).await?;
+    let client = &mut client;
+    let incidents = client.dataset_named("Incidents").await;
+    let districts = client.dataset_named("Districts").await;
+
+    // The rows the counts below are made from: each incident's category and
+    // date from its dataset, and its district by testing its point against
+    // every district's outline here, not by the database.
+    let incidents_layer = json!({ "id": "incidents", "name": "Incidents", "dataset": incidents,
+                                  "geometry": { "kind": "column", "column": "location" } });
+    let districts_layer = json!({ "id": "districts", "name": "Districts", "dataset": districts,
+                                  "geometry": { "kind": "column", "column": "outline" } });
+    let drawn = client
+        .draw_map(&json!({ "layers": [districts_layer, incidents_layer] }))
+        .await;
+    let outlines: Vec<(i64, Vec<(f64, f64)>)> = features(&drawn["layers"][0])
+        .iter()
+        .map(|(id, _, g)| (*id, ring(g)))
+        .collect();
+    let at: HashMap<i64, (f64, f64)> = features(&drawn["layers"][1])
+        .iter()
+        .map(|(id, _, g)| (*id, lon_lat(g)))
+        .collect();
+    let all: Vec<Incident> = client
+        .every_row(&incidents)
+        .await
+        .iter()
+        .map(|row| {
+            let id = row["id"].as_i64().unwrap();
+            let day = chrono::NaiveDate::parse_from_str(
+                &row["reported_on"].as_str().unwrap()[..10],
+                "%Y-%m-%d",
+            )
+            .unwrap();
+            let homes: Vec<i64> = outlines
+                .iter()
+                .filter(|(_, r)| inside(r, at[&id]))
+                .map(|(d, _)| *d)
+                .collect();
+            assert_eq!(homes.len(), 1, "incident {id} is in {homes:?}");
+            use chrono::Datelike as _;
+            Incident {
+                category: row["category"].as_str().unwrap().to_owned(),
+                month: (day.year(), day.month()),
+                day,
+                district: homes[0],
+            }
+        })
+        .collect();
+    assert_eq!(all.len(), sc_analytics::demo::DEMO_INCIDENTS);
+    let latest = all.iter().map(|i| i.month).max().unwrap();
+
+    // The datasets the dashboard's other panels read, made by the map's
+    // toolbox: the incidents counted per district (A5's count per region),
+    // and each incident with the district it is in (Overlay → Spatial join),
+    // which brings the district's key across as a foreign key, `id_right`.
+    let tool = |tool: &str, params: Value| json!({ "tool": tool, "params": params });
+    let (status, per_region) = client
+        .send(
+            "POST",
+            "/api/maps/tools/run",
+            Some(tool(
+                "count_per_region",
+                json!({ "layer": incidents_layer, "regions": districts_layer }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{per_region}");
+    let per_district = per_region["dataset"]["id"].as_str().unwrap().to_owned();
+    let mut per_district_layer = per_region["layer"].clone();
+    per_district_layer["id"] = json!("per-district");
+    per_district_layer["style"] =
+        json!({ "kind": "graduated", "method": "natural_breaks", "classes": 5 });
+    let (status, joined) = client
+        .send(
+            "POST",
+            "/api/maps/tools/run",
+            Some(tool(
+                "spatial_join",
+                json!({ "layer": incidents_layer, "with": districts_layer }),
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{joined}");
+    assert_eq!(joined["dataset"]["name"], "Incidents with Districts");
+    let with_district = joined["dataset"]["id"].as_str().unwrap().to_owned();
+    //    In the Dataset editor, a Select columns keeps the incident's columns
+    //    and the district's key, renamed: still a foreign key.
+    let mut def = joined["dataset"].clone();
+    let keep = |c: &str| json!({ "column": c });
+    def["operations"].as_array_mut().unwrap().push(op(
+        "tidy",
+        "select",
+        json!({ "columns": [keep("id"), keep("category"), keep("reported_on"), keep("location"),
+                            { "column": "id_right", "rename": "district" }] }),
+    ));
+    let report = client.save(&with_district, &def).await;
+    for checked in report["operations"].as_array().unwrap() {
+        assert_eq!(checked["status"], "ok", "{report}");
+    }
+    assert_eq!(
+        report["operations"][1]["shape"]["columns"][4]["key"],
+        json!({ "table": "districts", "field": "id" })
+    );
+    let (names, _, _) = client.stage(&def, 2).await;
+    assert_eq!(
+        names,
+        ["id", "category", "reported_on", "location", "district"]
+    );
+
+    // 1. A dashboard, and what is dragged into it: a bar chart of incidents
+    //    by category from the explorer, the districts map of A5, and a plot
+    //    from a report — the incidents per day, put in a report first.
+    let kinds = client.ok("GET", "/api/workspace-kinds", None).await;
+    let kind = kinds
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kind"] == "dashboard")
+        .unwrap();
+    assert_eq!(kind["available"], json!(true), "{kind}");
+    let dashboard = client.workspace("Incidents dashboard", "dashboard").await;
+    let data = |dataset: &str| json!({ "kind": "dataset", "dataset": dataset });
+    let count_by = |dataset: &str, mark: &str, field: &str| {
+        json!({ "data": data(dataset), "layers": [{ "mark": mark, "stat": { "kind": "count" },
+                "encoding": { "x": { "field": field } } }] })
+    };
+    let by_category = panel_of(
+        "Incidents by category",
+        "plot",
+        json!({ "spec": count_by(&incidents, "bar", "category") }),
+    );
+    let map = panel_of(
+        "Incidents map",
+        "map",
+        json!({ "spec": { "layers": [districts_layer, incidents_layer, per_district_layer] } }),
+    );
+    let report = client.workspace("Incidents report", "report").await;
+    let per_day = panel_of(
+        "Incidents per day",
+        "plot",
+        json!({ "spec": count_by(&incidents, "line", "reported_on") }),
+    );
+    client
+        .save_state(&report, &json!({ "blocks": [panel_block(&per_day)] }))
+        .await;
+    let per_day = dropped(&client.state_of(&report).await["blocks"][0]["panel"]);
+    let in_district = panel_of(
+        "Incidents per district",
+        "plot",
+        json!({ "spec": count_by(&with_district, "bar", "district") }),
+    );
+
+    // 2. A stat card: the number of incidents this month (the latest month
+    //    with any), against the month before, with a year's sparkline. A
+    //    second card sums the per-district counts.
+    let card = panel_of(
+        "Incidents",
+        "stat_card",
+        json!({ "dataset": incidents, "value": { "function": "count" },
+                "time": { "column": "reported_on", "period": "month", "anchor": "latest" },
+                "comparison": "previous_period", "sparkline": true, "periods": 12 }),
+    );
+    let counted = panel_of(
+        "Incidents counted per district",
+        "stat_card",
+        json!({ "dataset": per_district, "value": { "function": "sum", "column": "count" } }),
+    );
+    let drawn = client.render_in(&card, &[]).await;
+    let (value, previous, spark) = card_numbers(&drawn);
+    let in_month = |m: (i32, u32)| all.iter().filter(|i| i.month == m).count() as f64;
+    assert_eq!(value, in_month(latest), "{drawn}");
+    assert_eq!(previous, in_month(month_before(latest)), "{drawn}");
+    assert_eq!(spark, months(&all, latest, |_| true));
+    let drawn = client.render_in(&counted, &[]).await;
+    assert_eq!(drawn["card"]["value"], json!(all.len() as f64), "{drawn}");
+
+    // 3. The tiles arranged and resized. Two tiles on one cell are refused.
+    let mut tiles = vec![
+        tile("card", &card, [0, 0, 3, 2]),
+        tile("counted", &counted, [0, 2, 3, 2]),
+        tile("bars", &by_category, [3, 0, 4, 5]),
+        tile("line", &per_day, [7, 0, 5, 5]),
+        tile("map", &map, [0, 5, 6, 6]),
+        tile("in-district", &in_district, [6, 5, 6, 6]),
+    ];
+    client
+        .save_state(&dashboard, &json!({ "tiles": tiles }))
+        .await;
+    // The line chart moved below the rest and widened to the whole grid; the
+    // bar chart takes its width.
+    tiles[3] = tile("line", &per_day, [0, 11, 12, 4]);
+    tiles[2] = tile("bars", &by_category, [3, 0, 9, 5]);
+    client
+        .save_state(&dashboard, &json!({ "tiles": tiles }))
+        .await;
+    let state = client.state_of(&dashboard).await;
+    assert_eq!(state["tiles"][3]["w"], json!(12));
+    assert_eq!(state["tiles"][2]["w"], json!(9));
+    let mut piled = tiles.clone();
+    piled[1] = tile("counted", &counted, [2, 1, 3, 2]);
+    let (status, refused) = client
+        .send(
+            "PUT",
+            &format!("/api/workspaces/{dashboard}/state"),
+            Some(json!({ "state": { "tiles": piled } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused
+            .to_string()
+            .contains("tiles 1 and 2 of the dashboard overlap"),
+        "{refused}"
+    );
+
+    // 4. A click on the burglary bar selects it: every tile but the bar
+    //    chart is drawn with it.
+    let burglary = json!({ "id": "sel:bars:category", "dataset": incidents,
+                           "column": "category", "values": ["burglary"] });
+    let is_burglary = |i: &Incident| i.category == "burglary";
+    let burglaries = all.iter().filter(|i| is_burglary(i)).count() as i64;
+    //    The map's incidents layer shows the burglaries alone. The districts
+    //    and the counts per district are not incidents, and say so.
+    let drawn = client.render_in(&map, &[&burglary]).await;
+    assert_eq!(
+        drawn["map"]["layers"][1]["data"]["count"],
+        json!(burglaries)
+    );
+    assert_eq!(drawn["map"]["layers"][0]["data"]["count"], json!(12));
+    assert_eq!(
+        reached(&drawn, "sel:bars:category", &incidents),
+        Ok("category".to_owned())
+    );
+    let why = reached(&drawn, "sel:bars:category", &districts).unwrap_err();
+    assert!(
+        why.contains("`category` is a column of `Incidents`"),
+        "{why}"
+    );
+    //    The card counts this month's burglaries, and its sparkline them.
+    let drawn = client.render_in(&card, &[&burglary]).await;
+    let (value, previous, spark) = card_numbers(&drawn);
+    let last_burglary = all
+        .iter()
+        .filter(|i| is_burglary(i))
+        .map(|i| i.month)
+        .max()
+        .unwrap();
+    let burgled = |m: (i32, u32)| {
+        all.iter()
+            .filter(|i| is_burglary(i) && i.month == m)
+            .count() as f64
+    };
+    assert_eq!(value, burgled(last_burglary));
+    assert_eq!(previous, burgled(month_before(last_burglary)));
+    assert_eq!(spark, months(&all, last_burglary, is_burglary));
+    //    The line chart's days add up to the burglaries.
+    let drawn = client.render_in(&per_day, &[&burglary]).await;
+    assert_eq!(bars(&drawn).values().sum::<i64>(), burglaries);
+
+    //    A range brushed on the line chart's time axis, in milliseconds as
+    //    ECharts gives it: March to May. With the burglary bar still
+    //    selected, every tile filters to both — the bar chart, whose own
+    //    selection is not applied to it, to the brushed range alone.
+    let spring = json!({ "id": "sel:line:reported_on", "dataset": incidents,
+                         "column": "reported_on",
+                         "range": { "min": millis("2025-03-01", 0),
+                                    "max": millis("2025-05-31", 12) } });
+    let in_spring = |i: &Incident| {
+        let day = i.day.format("%Y-%m-%d").to_string();
+        ("2025-03-01".."2025-06-01").contains(&day.as_str())
+    };
+    let drawn = client.render_in(&by_category, &[&spring]).await;
+    assert_eq!(bars(&drawn), tally(&all, in_spring, |i| i.category.clone()));
+    let drawn = client.render_in(&card, &[&burglary, &spring]).await;
+    let (value, previous, spark) = card_numbers(&drawn);
+    let spring_burglary = |i: &Incident| is_burglary(i) && in_spring(i);
+    let may = tally(&all, spring_burglary, |i| i.month);
+    assert_eq!(value, may[&(2025, 5)] as f64);
+    assert_eq!(previous, may[&(2025, 4)] as f64);
+    assert_eq!(spark, months(&all, (2025, 5), spring_burglary));
+    let drawn = client.render_in(&map, &[&burglary, &spring]).await;
+    assert_eq!(
+        drawn["map"]["layers"][1]["data"]["count"],
+        json!(may.values().sum::<i64>())
+    );
+    //    The filter bar: the burglary kept as a filter of the dashboard's own,
+    //    saved with it, then cleared — every tile shows everything again.
+    let kept = json!({ "id": "f:burglary", "dataset": incidents,
+                       "column": "category", "values": ["burglary"] });
+    client
+        .save_state(
+            &dashboard,
+            &json!({ "tiles": tiles, "filters": [kept], "refresh": 300 }),
+        )
+        .await;
+    let state = client.state_of(&dashboard).await;
+    assert_eq!(state["filters"], json!([kept]));
+    let drawn = client.render_in(&by_category, &[&kept]).await;
+    assert_eq!(
+        bars(&drawn),
+        BTreeMap::from([("burglary".to_owned(), burglaries)])
+    );
+    client
+        .save_state(
+            &dashboard,
+            &json!({ "tiles": tiles, "filters": [], "refresh": 300 }),
+        )
+        .await;
+    let drawn = client.render_in(&by_category, &[]).await;
+    assert_eq!(bars(&drawn), tally(&all, |_| true, |i| i.category.clone()));
+    assert!(drawn.get("filters").is_none_or(Value::is_null), "{drawn}");
+
+    // 5. A district clicked on the map's per-district layer, found by its key
+    //    (`featurePicks`). It filters the panels on the two other datasets
+    //    with a foreign key to `districts`: the incidents with their district
+    //    and the counts per district. The incidents themselves have none, and
+    //    the card on them says so.
+    let busiest = *tally(&all, |_| true, |i| i.district)
+        .iter()
+        .max_by_key(|(_, n)| **n)
+        .unwrap()
+        .0;
+    let in_busiest = |i: &Incident| i.district == busiest;
+    let picked = json!({ "id": "sel:map:district", "dataset": per_district,
+                         "column": "district", "values": [busiest] });
+    let drawn = client.render_in(&in_district, &[&picked]).await;
+    assert_eq!(
+        reached(&drawn, "sel:map:district", &with_district),
+        Ok("district".to_owned())
+    );
+    let busiest_count = all.iter().filter(|i| in_busiest(i)).count() as i64;
+    assert_eq!(
+        bars(&drawn),
+        BTreeMap::from([(busiest.to_string(), busiest_count)])
+    );
+    let drawn = client.render_in(&counted, &[&picked]).await;
+    assert_eq!(
+        reached(&drawn, "sel:map:district", &per_district),
+        Ok("district".to_owned())
+    );
+    assert_eq!(drawn["card"]["value"], json!(busiest_count as f64));
+    let drawn = client.render_in(&card, &[&picked]).await;
+    assert_eq!(
+        reached(&drawn, "sel:map:district", &incidents),
+        Err("`Incidents` has no column that refers to `districts`".to_owned())
+    );
+    assert_eq!(card_numbers(&drawn).0, in_month(latest));
+    //    Clicked on the districts layer instead — a table's rows, picked by
+    //    their key, with no column — it reaches the same panels.
+    let row = json!({ "id": "sel:map:*", "dataset": districts, "values": [busiest] });
+    let drawn = client.render_in(&in_district, &[&row]).await;
+    assert_eq!(
+        bars(&drawn),
+        BTreeMap::from([(busiest.to_string(), busiest_count)])
+    );
+    let drawn = client.render_in(&counted, &[&row]).await;
+    assert_eq!(drawn["card"]["value"], json!(busiest_count as f64));
+    //    The burglary bar does not reach the incidents with their district,
+    //    though they have a `category` too: a condition crosses to another
+    //    dataset only through a key to a table both refer to, and says so.
+    let both = [&picked, &burglary];
+    let drawn = client.render_in(&in_district, &both).await;
+    assert_eq!(
+        reached(&drawn, "sel:bars:category", &with_district),
+        Err(
+            "`category` is a column of `Incidents`, and neither refers to the rows of a table \
+             that `Incidents with Districts` refers to"
+                .to_owned()
+        )
+    );
+
+    // 6. A drill path district → category on the per-district bar chart.
+    //    Clicking the busiest district shows its categories (`drilledPanel`:
+    //    the next column on X, filtered by `drillConditions` to the value
+    //    clicked); the breadcrumb goes back to every district.
+    let drill = json!({ "channel": "x", "path": ["district", "category"] });
+    let mut drilled_tile = tile("in-district", &in_district, [6, 5, 6, 6]);
+    drilled_tile["drill"] = drill.clone();
+    tiles[5] = drilled_tile;
+    client
+        .save_state(&dashboard, &json!({ "tiles": tiles, "refresh": 300 }))
+        .await;
+    let mut categories = in_district.clone();
+    categories["content"]["spec"]["layers"][0]["encoding"]["x"] = json!({ "field": "category" });
+    let down = json!({ "id": "drill:in-district:0", "dataset": with_district,
+                       "column": "district", "values": [busiest] });
+    let drawn = client.render_in(&categories, &[&down]).await;
+    assert_eq!(
+        bars(&drawn),
+        tally(&all, in_busiest, |i| i.category.clone())
+    );
+    let drawn = client.render_in(&in_district, &[]).await;
+    assert_eq!(
+        bars(&drawn),
+        tally(&all, |_| true, |i| i.district.to_string())
+    );
+    //    A path of one column is no path.
+    let mut short = tiles.clone();
+    short[5]["drill"] = json!({ "channel": "x", "path": ["district"] });
+    let (status, refused) = client
+        .send(
+            "PUT",
+            &format!("/api/workspaces/{dashboard}/state"),
+            Some(json!({ "state": { "tiles": short } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Reopened, the dashboard is as it was left; selections are not saved.
+    let state = client.state_of(&dashboard).await;
+    assert_eq!(state["tiles"], json!(tiles));
+    assert_eq!(state["refresh"], json!(300));
+    assert!(state.get("selections").is_none(), "{state}");
+    // The delete warning for the incidents lists the dashboard, the map
+    // panel's three layers and the plots and card on them.
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{incidents}/usage"), None)
+        .await;
+    let using = users(&usage);
+    assert!(
+        using.contains(&("Incidents dashboard".to_owned(), "dashboard".to_owned(), 4)),
+        "{usage}"
+    );
+    Ok(())
+}
+
+/// The base domain A9's applications are subdomains of.
+const BASE_DOMAIN: &str = "example.com";
+
+impl Client {
+    /// A client of the same server addressing `host`, signed in as nobody.
+    fn on_host(&self, host: &str) -> Client {
+        Client {
+            router: self.router.clone(),
+            host: Some(host.to_owned()),
+            cookies: HashMap::new(),
+        }
+    }
+
+    /// Sign in as `email` on this client's host, as the shell's form does.
+    async fn sign_in(&mut self, email: &str) {
+        self.send("GET", "/api/auth/status", None).await;
+        self.ok(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": email, "password": "hunter2pass" })),
+        )
+        .await;
+    }
+
+    /// A refusal: its status and the whole answer, which holds its sentence.
+    async fn refused(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, String) {
+        let (status, value) = self.send(method, path, body).await;
+        assert!(
+            status.is_client_error(),
+            "{:?} {method} {path}: {status} {value}",
+            self.host
+        );
+        (status, value.to_string())
+    }
+
+    /// The names of what a list endpoint answers.
+    async fn names(&mut self, path: &str) -> Vec<String> {
+        let listed = self.ok("GET", path, None).await;
+        let mut names: Vec<String> = listed
+            .as_array()
+            .unwrap_or_else(|| panic!("{path}: {listed}"))
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// A table's read access: `min_role_read`, and the ownership formula that
+    /// grants rows below it.
+    async fn table_readable(&mut self, table: &str, min_role_read: u8, formula: &str) {
+        self.ok(
+            "PUT",
+            &format!("/api/tables/{table}"),
+            Some(json!({
+                "label": "", "description": "",
+                "min_role_read": min_role_read, "min_role_write": 1,
+                "ownership_formula": formula, "rls_enabled": false,
+            })),
+        )
+        .await;
+    }
+}
+
+/// A demo house, as the admin reads it.
+struct House {
+    neighbourhood: i64,
+    year_built: i64,
+    sold: bool,
+}
+
+/// The houses per neighbourhood, keyed as a count plot's bars are.
+fn per_neighbourhood<'a>(houses: impl Iterator<Item = &'a House>) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for house in houses {
+        *out.entry(house.neighbourhood.to_string()).or_insert(0) += 1;
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_try_it_of_milestone_a9() -> sc_error::Result<()> {
+    // A stand-in for the built Analytics UI: an application serves it at `/`.
+    let bundle = std::env::temp_dir().join(format!("sc-analytics-a9-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(bundle.join("assets")).unwrap();
+    std::fs::write(
+        bundle.join("index.html"),
+        "<!doctype html><div id=\"root\"></div>",
+    )
+    .unwrap();
+    let (mut admin, _db) = serve(
+        TestDb::new().await?,
+        Some(BASE_DOMAIN),
+        Some(bundle.clone()),
+    )
+    .await?;
+    let admin = &mut admin;
+
+    // The role `staff`, two staff users and a member, who is below it.
+    for (role, name) in [(40, "staff"), (80, "member")] {
+        admin
+            .ok(
+                "POST",
+                "/api/roles",
+                Some(json!({ "role": role, "name": name, "description": "" })),
+            )
+            .await;
+    }
+    for (email, role) in [
+        ("sam@example.com", 40),
+        ("lee@example.com", 40),
+        ("pat@example.com", 80),
+    ] {
+        admin
+            .ok(
+                "POST",
+                "/api/users",
+                Some(json!({ "email": email, "password": "hunter2pass", "role": role })),
+            )
+            .await;
+    }
+
+    // Every house as the admin reads it: what the counts below are made from.
+    let houses = admin.dataset_named("Houses").await;
+    let measurements = admin.dataset_named("Measurements").await;
+    let all: Vec<House> = admin
+        .every_row(&houses)
+        .await
+        .iter()
+        .map(|row| House {
+            neighbourhood: row["neighbourhood"].as_i64().unwrap(),
+            year_built: row["year_built"].as_i64().unwrap(),
+            sold: row["sold"].as_bool().unwrap(),
+        })
+        .collect();
+    assert_eq!(all.len(), sc_analytics::demo::DEMO_HOUSES);
+    let newer = |h: &&House| h.year_built >= 1990;
+
+    // The admin's dashboard on the demo's `Houses`: a card counting them, the
+    // houses per neighbourhood, and the prices by neighbourhood as a box plot.
+    // (The tutorial uses part 6's dashboard; it needs PostGIS, and nothing
+    // here does.)
+    let data = json!({ "kind": "dataset", "dataset": houses });
+    let card = panel_of(
+        "Houses",
+        "stat_card",
+        json!({ "dataset": houses, "value": { "function": "count" } }),
+    );
+    let bars_panel = panel_of(
+        "Houses per neighbourhood",
+        "plot",
+        json!({ "spec": { "data": data, "layers": [{ "mark": "bar", "stat": { "kind": "count" },
+                          "encoding": { "x": { "field": "neighbourhood" } } }] } }),
+    );
+    let boxed = json!({ "x": { "field": "neighbourhood" }, "y": [{ "field": "price" }] });
+    let suggested = admin
+        .suggest(json!({ "dataset": houses, "assignment": boxed }))
+        .await;
+    let box_panel = panel_of("Prices", "plot", json!({ "spec": suggested["spec"] }));
+    let tests_of = json!({ "data": data, "y": [{ "field": "price" }],
+                           "x": { "field": "neighbourhood" } });
+    let dashboard = admin.workspace("Houses dashboard", "dashboard").await;
+    admin
+        .save_state(
+            &dashboard,
+            &json!({ "tiles": [
+                tile("card", &card, [0, 0, 3, 2]),
+                tile("bars", &bars_panel, [3, 0, 5, 5]),
+                tile("box", &box_panel, [8, 0, 4, 5]),
+            ] }),
+        )
+        .await;
+
+    // 1. The fixed application, showing only the dashboard, for `staff`.
+    let application = |subdomain: &str, config: Value, tables: &[&str]| {
+        json!({
+            "name": format!("{subdomain} insights"), "description": "",
+            "subdomain": subdomain,
+            "framework": { "name": "analytics", "config": config },
+            "extra_frameworks": [], "tables": tables, "file_stores": [], "triggers": [],
+            "apis": [], "static_dirs": [], "attributes": {}
+        })
+    };
+    let fixed = admin
+        .ok(
+            "POST",
+            "/api/applications",
+            Some(application(
+                "board",
+                json!({ "mode": "fixed", "min_role": 40, "workspaces": ["Houses dashboard"] }),
+                &[],
+            )),
+        )
+        .await;
+    assert_eq!(fixed["mounted"], json!(true), "{fixed}");
+    // `staff` may not read `houses` yet: the dashboard is there, and says so.
+    let mut sam = admin.on_host("board.example.com");
+    sam.sign_in("sam@example.com").await;
+    let (_, why) = sam
+        .send("POST", "/api/panels/render", Some(json!({ "panel": card })))
+        .await;
+    assert!(
+        why.to_string().contains("you may not read `houses`"),
+        "{why}"
+    );
+    admin.table_readable("houses", 40, "").await;
+
+    // 2. Sam, a `staff` user, at the application's address. The page is the
+    //    Analytics UI's; the shell is the dashboard alone.
+    let (status, _, body) = sam.raw("GET", "/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("id=\"root\""));
+    let shell = sam.ok("GET", "/api/analytics/shell", None).await;
+    let app = &shell["application"];
+    assert_eq!(app["mode"], json!("fixed"), "{shell}");
+    assert_eq!(
+        app["workspaces"],
+        json!([{ "id": dashboard, "name": "Houses dashboard", "kind": "dashboard" }])
+    );
+    assert_eq!(app["dataset_editor"], json!(false));
+    assert_eq!(app["create_workspaces"], json!(false));
+    // No workspace list beyond it, no other dataset, no table to build on.
+    let listed = sam.ok("GET", "/api/workspaces", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["may_change"], json!(false), "{listed}");
+    assert_eq!(sam.names("/api/datasets").await, ["Houses"]);
+    assert!(sam.names("/api/datasets/tables").await.is_empty());
+    let kinds = sam.ok("GET", "/api/workspace-kinds", None).await;
+    assert_eq!(kinds.as_array().unwrap().len(), 1, "{kinds}");
+    assert_eq!(kinds[0]["kind"], json!("dashboard"));
+    // No admin links: the admin's endpoints are not there to call.
+    for path in [
+        "/api/models",
+        "/api/tables",
+        "/api/users",
+        "/api/applications",
+    ] {
+        let (code, _) = sam.refused("GET", path, None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{path}");
+    }
+    let (code, _) = sam
+        .refused("GET", &format!("/api/datasets/{measurements}"), None)
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    // Interactive: every tile draws all 200 houses, and a click on a bar
+    // filters the card.
+    let tiles = sam.state_of(&dashboard).await["tiles"].clone();
+    let panel_at = |id: &str| -> Value {
+        tiles
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == id)
+            .unwrap()["panel"]
+            .clone()
+    };
+    let (value, _, _) = card_numbers(&sam.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, all.len() as f64);
+    assert_eq!(
+        bars(&sam.render_in(&panel_at("bars"), &[]).await),
+        per_neighbourhood(all.iter())
+    );
+    let clicked = json!({ "id": "sel:bars:neighbourhood", "dataset": houses,
+                          "column": "neighbourhood", "values": [2] });
+    let (value, _, _) = card_numbers(&sam.render_in(&panel_at("card"), &[&clicked]).await);
+    assert_eq!(
+        value,
+        all.iter().filter(|h| h.neighbourhood == 2).count() as f64
+    );
+    let answer = sam.tests(tests_of.clone()).await;
+    assert_eq!(
+        answer["sections"][0]["n"],
+        json!(all.iter().filter(|h| h.sold).count())
+    );
+    // Nothing of it is Sam's to change, and nothing new is made.
+    for (method, path, body) in [
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}/state"),
+            json!({ "state": { "tiles": [] } }),
+        ),
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}"),
+            json!({ "name": "Mine" }),
+        ),
+        (
+            "PUT",
+            format!("/api/workspaces/{dashboard}/share"),
+            json!({ "share_role": 80 }),
+        ),
+        (
+            "DELETE",
+            format!("/api/workspaces/{dashboard}"),
+            Value::Null,
+        ),
+        (
+            "POST",
+            "/api/workspaces".to_owned(),
+            json!({ "name": "New", "kind": "dashboard" }),
+        ),
+        (
+            "POST",
+            "/api/datasets".to_owned(),
+            json!({ "name": "Mine", "base": { "kind": "table", "table": "houses" },
+                    "operations": [] }),
+        ),
+        (
+            "PUT",
+            format!("/api/datasets/{houses}/share"),
+            json!({ "share_role": 80 }),
+        ),
+    ] {
+        let body = (!body.is_null()).then_some(body);
+        let (code, why) = sam.refused(method, &path, body).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED, "{method} {path}: {why}");
+    }
+    assert_eq!(
+        admin.state_of(&dashboard).await["tiles"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    // A member is below the application's floor; a visitor is asked to sign in.
+    let mut pat = admin.on_host("board.example.com");
+    pat.sign_in("pat@example.com").await;
+    let (code, _) = pat.refused("GET", "/api/workspaces", None).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let mut visitor = admin.on_host("board.example.com");
+    let status = visitor.ok("GET", "/api/auth/status", None).await;
+    assert_eq!(status["current_user"], Value::Null, "{status}");
+    let (code, _) = visitor.refused("GET", "/api/workspaces", None).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+
+    // 3. The self-serve application: `houses` and `neighbourhoods`, the
+    //    Dataset editor on, the Data explorer.
+    admin.table_readable("neighbourhoods", 40, "").await;
+    let serve_app = admin
+        .ok(
+            "POST",
+            "/api/applications",
+            Some(application(
+                "explore",
+                json!({ "mode": "self_serve", "min_role": 40, "dataset_editor": true,
+                        "workspace_kinds": ["data_explorer"], "create_workspaces": true }),
+                &["houses", "neighbourhoods"],
+            )),
+        )
+        .await;
+    let explore_id = serve_app["id"].as_str().unwrap().to_owned();
+    let mut sam = admin.on_host("explore.example.com");
+    sam.sign_in("sam@example.com").await;
+    let shell = sam.ok("GET", "/api/analytics/shell", None).await;
+    let app = &shell["application"];
+    assert_eq!(app["mode"], json!("self_serve"), "{shell}");
+    assert_eq!(app["dataset_editor"], json!(true));
+    assert_eq!(app["workspace_kinds"], json!(["data_explorer"]));
+    assert_eq!(app["workspaces"], json!([]));
+
+    // 4. A dataset on `houses`, explored. The demo's datasets are the
+    //    admin's, not shared: Sam's list starts empty.
+    assert!(sam.names("/api/datasets").await.is_empty());
+    assert_eq!(
+        sam.names("/api/datasets/tables").await,
+        ["houses", "neighbourhoods"]
+    );
+    let made = sam
+        .ok(
+            "POST",
+            "/api/datasets",
+            Some(json!({
+                "name": "My houses", "base": { "kind": "table", "table": "houses" },
+                "operations": [op("hood", "calculated",
+                                  json!({ "name": "hood", "formula": "neighbourhoodⱵname" }))],
+            })),
+        )
+        .await;
+    let mine = made["dataset"]["id"].as_str().unwrap().to_owned();
+    let mine_def = made["dataset"].clone();
+    let (names, rows, total) = sam.stage(&mine_def, 1).await;
+    assert_eq!(total, all.len() as i64);
+    let hood = names.iter().position(|n| n == "hood").unwrap();
+    assert!(
+        rows.iter().all(|r| r[hood].is_string()),
+        "a neighbourhood's name each"
+    );
+    let my_data = json!({ "kind": "dataset", "dataset": mine });
+    let my_bars = json!({ "data": my_data, "layers": [{ "mark": "bar",
+                          "stat": { "kind": "count" },
+                          "encoding": { "x": { "field": "neighbourhood" } } }] });
+    let explorer = sam.workspace("Exploring my houses", "data_explorer").await;
+    sam.save_state(&explorer, &json!({ "dataset": mine, "spec": my_bars }))
+        .await;
+    let drawn = sam
+        .ok(
+            "POST",
+            "/api/panels/render",
+            Some(json!({ "panel":
+            panel_of("Mine per neighbourhood", "plot", json!({ "spec": my_bars })) })),
+        )
+        .await;
+    assert_eq!(bars(&drawn), per_neighbourhood(all.iter()));
+    let my_tests = json!({ "data": my_data, "y": [{ "field": "price" }],
+                           "x": { "field": "neighbourhood" } });
+    assert_eq!(
+        sam.tests(my_tests.clone()).await["sections"][0]["n"],
+        json!(all.iter().filter(|h| h.sold).count())
+    );
+    // `incidents` is not offered as a base, and asking for it is refused:
+    // saved, unsaved, or reached by a join.
+    let on = |table: &str| {
+        json!({ "name": "Elsewhere", "base": { "kind": "table", "table": table },
+                "operations": [] })
+    };
+    let (_, why) = sam
+        .refused("POST", "/api/datasets", Some(on("incidents")))
+        .await;
+    assert!(
+        why.contains("`incidents` is not one of the tables"),
+        "{why}"
+    );
+    let (_, why) = sam
+        .refused(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": on("incidents") })),
+        )
+        .await;
+    assert!(
+        why.contains("`incidents` is not one of the tables"),
+        "{why}"
+    );
+    let mut joined = mine_def.clone();
+    joined["operations"].as_array_mut().unwrap().push(op(
+        "viewed",
+        "join",
+        json!({
+            "with": { "kind": "table", "table": "viewings" },
+            "kind": "left", "on": [{ "left": "id", "right": "house" }],
+        }),
+    ));
+    let (_, why) = sam
+        .refused(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": joined })),
+        )
+        .await;
+    assert!(why.contains("`viewings` is not one of the tables"), "{why}");
+    // Only the Data explorer: a dashboard is not made here, and the fixed
+    // application's dashboard and datasets are not here at all.
+    let (code, why) = sam
+        .refused(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Board", "kind": "dashboard" })),
+        )
+        .await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED, "{why}");
+    let listed = sam.ok("GET", "/api/workspaces", None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["application"], json!(explore_id));
+    for path in [
+        format!("/api/workspaces/{dashboard}"),
+        format!("/api/datasets/{houses}"),
+    ] {
+        let (code, _) = sam.refused("GET", &path, None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{path}");
+    }
+    // Nor is Sam's dataset seen on the fixed application's host.
+    let mut sam_on_board = admin.on_host("board.example.com");
+    sam_on_board.sign_in("sam@example.com").await;
+    let (code, _) = sam_on_board
+        .refused("GET", &format!("/api/datasets/{mine}"), None)
+        .await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    // Another `staff` user sees Sam's dataset once it is shared, and does not
+    // change it.
+    let mut lee = admin.on_host("explore.example.com");
+    lee.sign_in("lee@example.com").await;
+    assert!(lee.names("/api/datasets").await.is_empty());
+    sam.ok(
+        "PUT",
+        &format!("/api/datasets/{mine}/share"),
+        Some(json!({ "share_role": 40 })),
+    )
+    .await;
+    assert_eq!(lee.names("/api/datasets").await, ["My houses"]);
+    let (_, why) = lee
+        .refused(
+            "PUT",
+            &format!("/api/datasets/{mine}"),
+            Some(mine_def.clone()),
+        )
+        .await;
+    assert!(why.contains("not yours to change"), "{why}");
+
+    // 5. `staff` reads only the newer houses: `houses` back to the admin's,
+    //    and an ownership formula granting the rest. Sam's plots and tests in
+    //    both applications include those rows only; the admin's all of them.
+    admin
+        .table_readable("houses", 1, "user && year_built >= 1990")
+        .await;
+    let theirs: Vec<&House> = all.iter().filter(newer).collect();
+    assert!(
+        !theirs.is_empty() && theirs.len() < all.len(),
+        "{}",
+        theirs.len()
+    );
+    let sold_of_theirs = theirs.iter().filter(|h| h.sold).count();
+    //    Self-serve.
+    let (_, _, total) = sam.stage(&mine_def, 1).await;
+    assert_eq!(total, theirs.len() as i64);
+    let drawn = sam
+        .ok(
+            "POST",
+            "/api/plots/render",
+            Some(json!({ "spec": my_bars })),
+        )
+        .await;
+    let counted: i64 = drawn["layers"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| cell(&drawn["layers"][0], r, "y").as_i64().unwrap())
+        .sum();
+    assert_eq!(counted, theirs.len() as i64, "{drawn}");
+    assert_eq!(
+        sam.tests(my_tests.clone()).await["sections"][0]["n"],
+        json!(sold_of_theirs)
+    );
+    assert_eq!(
+        lee.ok(
+            "POST",
+            "/api/datasets/stage",
+            Some(json!({ "dataset": mine_def, "limit": 1 }))
+        )
+        .await["total"],
+        json!(theirs.len())
+    );
+    //    Fixed.
+    let (value, _, _) = card_numbers(&sam_on_board.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, theirs.len() as f64);
+    assert_eq!(
+        bars(&sam_on_board.render_in(&panel_at("bars"), &[]).await),
+        per_neighbourhood(theirs.iter().copied())
+    );
+    let drawn = sam_on_board.render_in(&panel_at("box"), &[]).await;
+    let layer = &drawn["plot"]["layers"][0];
+    let boxed_n: i64 = layer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| cell(layer, r, "n").as_i64().unwrap())
+        .sum();
+    assert_eq!(boxed_n, sold_of_theirs as i64, "{drawn}");
+    assert_eq!(
+        sam_on_board.tests(tests_of.clone()).await["sections"][0]["n"],
+        json!(sold_of_theirs)
+    );
+    //    The admin, on the admin host, still reads every house of both.
+    let (value, _, _) = card_numbers(&admin.render_in(&panel_at("card"), &[]).await);
+    assert_eq!(value, all.len() as f64);
+    let (_, _, total) = admin.stage(&mine_def, 1).await;
+    assert_eq!(total, all.len() as i64);
+
+    std::fs::remove_dir_all(bundle).ok();
+    Ok(())
 }

@@ -1725,3 +1725,17 @@ div.navbar-brand>a:hover {
 .scm-branch {
   max-width: 24rem;
 }
+
+/* A scrollable modal only scrolls when `.modal-body` is a flex child of
+ * `.modal-content`, which Tabler makes a column with a bounded height. Dialogs
+ * that submit wrap header, body and footer in a `<form>`, and that form is a
+ * plain block in between: it grows to fit its content, `.modal-content` clips
+ * it (`overflow: hidden`), and the bottom of a long form is unreachable — the
+ * automated backup dialog was the one that showed it. Making the form the
+ * flex column instead hands the bounded height on to the body. */
+.modal-dialog-scrollable .modal-content > form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}

@@ -112,6 +112,20 @@ const TEST_EMAIL_HTML: &str = "<p>This is a test message from Saltcorn.</p><p>If
 /// CRUD handlers still work, and a build simply mounts an app no subdomain routes
 /// to until a `--base-domain` is configured.
 pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerRegistry {
+    admin_handlers_with(
+        catalog,
+        apps,
+        Arc::new(crate::public_datasets::HttpFetch::new()),
+    )
+}
+
+/// [`admin_handlers`], with the public datasets' files downloaded by `fetch`
+/// rather than over HTTPS — what a test serves fixture files through.
+pub fn admin_handlers_with(
+    catalog: Arc<Catalog>,
+    apps: Arc<AppMounts>,
+    fetch: Arc<dyn sc_api::public_datasets::Fetch>,
+) -> HandlerRegistry {
     // A schema change re-projects the API providers of every mounted app
     // exposing that table, live (Phase 7's seam). This used to be a
     // `refresh_table` call inside each handler that changed a schema, which
@@ -181,7 +195,15 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
             let catalog = catalog.clone();
             async move {
                 let (email, password) = credentials(&ctx.body)?;
-                match authenticate_admin(&catalog, &email, &password).await? {
+                // The admin host signs in admins. An Analytics application
+                // (analytics TODO A9.3) signs in anybody whose password is
+                // right, on its own host: its role floor is what decides what
+                // they reach, and it is applied to every call after this one.
+                let user = match ctx.analytics_app {
+                    Some(_) => sc_auth::authenticate(&catalog, &email, &password).await?,
+                    None => authenticate_admin(&catalog, &email, &password).await?,
+                };
+                match user {
                     Some(user) => {
                         let body = user_summary_json(&user);
                         Ok(HandlerResponse::start_session(user, body))
@@ -280,6 +302,40 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(json!({
                     "table": table_json(&catalog, &table, rls, &ctx.locale),
                     "inserted": outcome.inserted,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
+    reg.register("createTableFromGeoFile", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use base64::Engine as _;
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let file_name = non_empty_str_field(obj, "file_name")?.to_owned();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(str_field(obj, "content_base64")?.trim())
+                    .map_err(|e| Error::invalid(format!("`content_base64` is not base64 ({e})")))?;
+                let layer = optional_str(obj, "layer");
+                let (table, outcome) = sc_api::geo_import::create_table_from_geo_file(
+                    &catalog,
+                    &name,
+                    &optional_str(obj, "database"),
+                    &file_name,
+                    &bytes,
+                    Some(layer.trim()).filter(|l| !l.is_empty()),
+                    Some(&admin_caller(ctx.user.as_ref())),
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(json!({
+                    "table": table_json(&catalog, &table, rls, &ctx.locale),
+                    "inserted": outcome.inserted,
+                    "warnings": outcome.warnings,
                 }))
                 .with_status(201))
             }
@@ -1428,10 +1484,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         move |_ctx| {
             let catalog = catalog.clone();
             async move {
+                let default = default_provider_id(&catalog).await?;
                 let out: Vec<Json> = list_llm_providers(&catalog)
                     .await?
                     .iter()
-                    .map(llm_provider_json)
+                    .map(|def| llm_provider_json(&catalog, def, default))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -1450,7 +1507,11 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // for a form that was never given one.
                 let def = llm_provider_from_body(LlmProviderDefId::new(), &ctx.body)?;
                 save_llm_provider(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(llm_provider_json(&def)).with_status(201))
+                let default = default_provider_id(&catalog).await?;
+                Ok(
+                    HandlerResponse::ok(llm_provider_json(&catalog, &def, default))
+                        .with_status(201),
+                )
             }
         }
     });
@@ -1475,7 +1536,29 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 def.config =
                     unredacted_provider_config(&def.backend, &existing.config, &def.config);
                 save_llm_provider(&catalog, &def).await?;
-                Ok(HandlerResponse::ok(llm_provider_json(&def)))
+                let default = default_provider_id(&catalog).await?;
+                Ok(HandlerResponse::ok(llm_provider_json(
+                    &catalog, &def, default,
+                )))
+            }
+        }
+    });
+
+    reg.register("setDefaultLlmProvider", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_llm_provider_id(ctx.path_param("id")?)?;
+                sc_llm::set_default_llm_provider(&catalog, Some(id)).await?;
+                let def = load_llm_provider(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no LLM provider with id {id:?}")))?;
+                Ok(HandlerResponse::ok(llm_provider_json(
+                    &catalog,
+                    &def,
+                    Some(id),
+                )))
             }
         }
     });
@@ -1703,6 +1786,23 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                     None => None,
                 };
                 let provider = match &stored {
+                    // The configuration file's provider is tested exactly as it
+                    // is, and only with its own models. Merging the form's
+                    // settings over it would let an admin who cannot see its key
+                    // send it to a `base_url` of their choosing.
+                    Some(stored) if sc_llm::is_host_llm_provider(&catalog, stored.id) => {
+                        if sc_llm::load_llm_model_by_name(&catalog, stored, &name)
+                            .await?
+                            .is_none()
+                        {
+                            return Err(Error::invalid(format!(
+                                "LLM provider `{}` is set by the server's configuration \
+                                 file, which does not list a model `{name}`",
+                                stored.name
+                            )));
+                        }
+                        stored.clone()
+                    }
                     Some(stored) => LlmProviderDef {
                         config: unredacted_provider_config(&backend, &stored.config, &submitted),
                         ..LlmProviderDef::new(&stored.name, &backend).id(stored.id)
@@ -3410,9 +3510,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let model = sc_model::load_model(&catalog, id)
                     .await?
                     .ok_or_else(|| Error::not_found(format!("no model with id {id}")))?;
-                Ok(HandlerResponse::ok(
-                    model_usage(&catalog, &model.name).await?,
-                ))
+                Ok(HandlerResponse::ok(model_usage(&catalog, &model).await?))
             }
         }
     });
@@ -4246,8 +4344,10 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     reg.register("updateSettings", {
         let catalog = catalog.clone();
+        let apps = apps.clone();
         move |ctx| {
             let catalog = catalog.clone();
+            let apps = apps.clone();
             async move {
                 let submitted = match ctx.body.get("values") {
                     Some(Json::Object(values)) => values.clone(),
@@ -4262,7 +4362,17 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 let spec = sc_config::config_spec();
                 // The secret the form sent back untouched is the sentinel it was
                 // shown, not the key: restore what is stored.
-                let values = sc_types::merge_secrets(&spec, &stored, &submitted);
+                let mut values = sc_types::merge_secrets(&spec, &stored, &submitted);
+                // The admin subdomain is stored as the router reads it — one
+                // lower-cased label, or nothing — so what the screen shows after
+                // the save is the host the admin UI is now on.
+                if let Some(Json::String(raw)) = values.get(sc_config::ADMIN_SUBDOMAIN) {
+                    let normalised = sc_config::check_admin_subdomain(raw)?;
+                    values.insert(
+                        sc_config::ADMIN_SUBDOMAIN.to_owned(),
+                        normalised.map_or(Json::Null, Json::String),
+                    );
+                }
 
                 // What the settings *mean together* is checked before anything
                 // is written: `custom` with no certificate, or a certificate its
@@ -4294,8 +4404,27 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // tag that is not a language tag is refused here, where the
                 // admin can see which box they typed it into (§16.1).
                 let localisation = sc_config::localisation_settings_from(&merged)?;
+                // The Maps section's, on the same footing: a base map URL is a
+                // host the Analytics UI's policy will name, so one that is not
+                // an http or https origin is refused here (analytics A5.6).
+                sc_config::map_settings_from(&merged)?;
+                // Where the admin UI is served: a move is checked against what
+                // is served there before anything is written, because the
+                // router would otherwise have to choose between the admin UI
+                // and an application on one host.
+                let admin_subdomain = sc_config::admin_subdomain_from(&merged)?;
+                let moving = admin_subdomain != apps.admin().subdomain();
+                if moving {
+                    check_admin_move(&catalog, &apps, admin_subdomain.as_deref()).await?;
+                }
 
                 sc_config::set_config_many(&catalog, &values).await?;
+                // The admin UI moves now, and the new name's certificate is
+                // ordered now: the screen that saved this is about to wait for
+                // it (`getAdminAddress`) and then follow it there.
+                if moving {
+                    apps.set_admin_subdomain(admin_subdomain);
+                }
                 // The two switches this process runs under move **now**, not at
                 // the next restart: an admin ticks "Log SQL" precisely because
                 // something is happening in the server they are looking at, and
@@ -4308,6 +4437,45 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 Ok(HandlerResponse::ok(
                     settings_json(&catalog, &ctx.locale).await?,
                 ))
+            }
+        }
+    });
+
+    // Where the admin UI is served, and whether a browser can follow it there
+    // yet (Settings → Development → Admin subdomain). Polled by the dialog a
+    // move opens: the certificate for a new name is a minute of ACME traffic
+    // away, and the admin is not let go to an address that would refuse them.
+    reg.register("getAdminAddress", {
+        let apps = apps.clone();
+        move |_ctx| {
+            let apps = apps.clone();
+            async move { Ok(HandlerResponse::ok(admin_address_json(&apps))) }
+        }
+    });
+
+    // A single-use token that gives the signed-in admin a session on the admin
+    // UI's current host. The session cookie is host-only, so without this
+    // following a move would mean logging in again (`crate::admin_host`).
+    reg.register("createAdminHandoff", {
+        let apps = apps.clone();
+        move |ctx| {
+            let apps = apps.clone();
+            async move {
+                let user = ctx
+                    .user
+                    .clone()
+                    .ok_or_else(|| Error::invalid("there is no session to hand off"))?;
+                let host = apps.admin_host().ok_or_else(|| {
+                    Error::invalid(
+                        "this server has no base domain, so the admin UI has no address to \
+                         move to",
+                    )
+                })?;
+                let token = apps.admin().mint_handoff(user, host.clone());
+                Ok(HandlerResponse::ok(json!({
+                    "host": host,
+                    "path": format!("{}?token={token}", crate::admin_host::HANDOFF_ROUTE),
+                })))
             }
         }
     });
@@ -4539,6 +4707,122 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
         }
     });
 
+    // --- automated backups --------------------------------------------------
+    // The schedules are a list in `_fd_config`; what each last did is a second
+    // key only the backup scheduler writes (`crate::backup::schedule`), merged in
+    // here so the card can say when each last ran and whether it failed.
+    //
+    // A destination's secrets (an SFTP password, an S3 secret key) go out as
+    // the mask and come back as it when unchanged (`keep_secrets`). Saving
+    // reaches the destination (`check`), which for SFTP is also when the
+    // server's host key is learnt and recorded.
+
+    reg.register("listBackupSchedules", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{load_schedules, load_statuses, schedule_json};
+                let schedules = load_schedules(&catalog).await?;
+                let statuses = load_statuses(&catalog).await?;
+                let available = crate::backup::available(&catalog).await?;
+                let list: Vec<Json> = schedules
+                    .iter()
+                    .map(|s| schedule_json(s, statuses.get(&s.id), &available))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(list)))
+            }
+        }
+    });
+
+    reg.register("createBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{
+                    BackupSchedule, check_unique, include_from_body, load_schedules,
+                    save_schedules, schedule_json,
+                };
+                let body = require_object(&ctx.body)?;
+                let available = crate::backup::available(&catalog).await?;
+                let include = include_from_body(body, &available, None)?;
+                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
+                schedule.destination = schedule.destination.keep_secrets(None)?;
+                let mut schedules = load_schedules(&catalog).await?;
+                check_unique(&schedule, &schedules)?;
+                schedule.destination.check().await?;
+                schedules.push(schedule.clone());
+                save_schedules(&catalog, &schedules).await?;
+                Ok(HandlerResponse::ok(schedule_json(
+                    &schedule, None, &available,
+                )))
+            }
+        }
+    });
+
+    reg.register("updateBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{
+                    BackupSchedule, check_unique, include_from_body, load_schedules, load_statuses,
+                    save_schedules, schedule_json,
+                };
+                let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
+                let body = require_object(&ctx.body)?;
+                let available = crate::backup::available(&catalog).await?;
+                let mut schedules = load_schedules(&catalog).await?;
+                let Some(index) = schedules.iter().position(|s| s.id == id) else {
+                    return Err(Error::not_found(format!(
+                        "no automated backup with id {id}"
+                    )));
+                };
+                let previous = &schedules[index];
+                // The previous exclusions are an input, so one naming a table
+                // that is not here today survives the edit.
+                let include = include_from_body(body, &available, Some(&previous.include))?;
+                let mut schedule = BackupSchedule::from_body(id, body, include)?;
+                schedule.destination = schedule
+                    .destination
+                    .keep_secrets(Some(&previous.destination))?;
+                check_unique(&schedule, &schedules)?;
+                schedule.destination.check().await?;
+                schedules[index] = schedule.clone();
+                save_schedules(&catalog, &schedules).await?;
+                let statuses = load_statuses(&catalog).await?;
+                Ok(HandlerResponse::ok(schedule_json(
+                    &schedule,
+                    statuses.get(&id),
+                    &available,
+                )))
+            }
+        }
+    });
+
+    reg.register("deleteBackupSchedule", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                use crate::backup::schedule::{load_schedules, save_schedules};
+                let id = parse_uuid(ctx.path_param("id")?, "backup schedule")?;
+                let mut schedules = load_schedules(&catalog).await?;
+                let before = schedules.len();
+                schedules.retain(|s| s.id != id);
+                let deleted = schedules.len() != before;
+                if deleted {
+                    save_schedules(&catalog, &schedules).await?;
+                }
+                // The backups already written stay where they are: deleting a
+                // schedule stops new ones, it does not take the old ones with it.
+                // (Its stored credentials do go, with the schedule.)
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
     // --- clear all ----------------------------------------------------------
 
     reg.register("getClearAllPreview", {
@@ -4729,6 +5013,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // the result columns the database reported rather than the empty
                 // list the caller sent.
                 let mut created = application_from_body(AppId::new(), &ctx.body)?;
+                check_app_subdomain(&apps, &created.subdomain)?;
                 framable_by_the_admin(&mut created, &ctx.body, &apps);
                 // A store setting that asked for a new local store gets one
                 // before the application is validated, since validation checks
@@ -4808,6 +5093,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
                 // The id is the path's, not the body's — the row's identity is not
                 // something a payload gets to reassign.
                 let mut updated = application_from_body(id, &ctx.body)?;
+                check_app_subdomain(&apps, &updated.subdomain)?;
                 merge_framework_secrets(&stored, &mut updated);
                 framable_by_the_admin(&mut updated, &ctx.body, &apps);
                 let app = save_application(&catalog, &updated).await?;
@@ -6391,6 +6677,7 @@ pub fn admin_handlers(catalog: Arc<Catalog>, apps: Arc<AppMounts>) -> HandlerReg
 
     // --- the Analytics UI (analytics TODO A1.13) -----------------------------
     crate::analytics::register(&mut reg, catalog.clone());
+    crate::public_datasets::register(&mut reg, catalog.clone(), fetch);
 
     reg
 }
@@ -6983,14 +7270,12 @@ async fn create_builder_agent(
     }
 
     // An agent needs a provider that is connected, and a framework cannot know
-    // which one a deployment has. The first by name is a choice, not a
-    // preference — the admin can change it on the agent — but a deployment with
-    // none is a thing to say out loud rather than a silently agent-less
-    // application.
-    let provider = list_llm_providers(catalog)
+    // which one a deployment has: it gets the installation's default (the
+    // admin's pick, else the configuration file's, else the first by name), and
+    // the admin can change it on the agent. A deployment with none is a thing to
+    // say out loud rather than a silently agent-less application.
+    let provider = sc_llm::default_llm_provider(catalog)
         .await?
-        .into_iter()
-        .next()
         .ok_or_else(|| {
             Error::config(format!(
                 "no LLM provider is connected, so the `{}` agent that builds this \
@@ -7104,6 +7389,76 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
 /// **Only when the caller stated no `csp` of its own.** A policy someone wrote
 /// out is theirs: an admin who writes `frame-ancestors 'none'` has said what
 /// they mean, and a restore is replaying a policy that was already decided.
+/// Refuse a subdomain the router would give to the admin UI rather than to the
+/// application: the admin UI's own, and `@` (the base domain) while the admin
+/// UI is still there.
+fn check_app_subdomain(apps: &AppMounts, subdomain: &str) -> Result<()> {
+    let subdomain = subdomain.trim();
+    let admin = apps.admin().subdomain();
+    if subdomain == sc_config::ROOT_SUBDOMAIN && admin.is_none() {
+        return Err(Error::invalid(
+            "`@` serves the application on the base domain, which is where the admin UI is: \
+             move the admin UI to a subdomain of its own first (Settings → Development → \
+             Admin subdomain)",
+        ));
+    }
+    if admin.as_deref() == Some(subdomain) {
+        return Err(Error::invalid(format!(
+            "`{subdomain}` is where the admin UI is served (Settings → Development → Admin \
+             subdomain); choose another subdomain"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse moving the admin UI to `to` (`None`: back to the base domain) when
+/// an application is served there, or when there is no base domain to be a
+/// subdomain of.
+async fn check_admin_move(catalog: &Catalog, apps: &AppMounts, to: Option<&str>) -> Result<()> {
+    if to.is_some() && apps.base_domain().is_none() {
+        return Err(Error::invalid(
+            "this server has no base domain (`--base-domain`), so the admin UI has nothing to \
+             be a subdomain of",
+        ));
+    }
+    let wanted = to.unwrap_or(sc_config::ROOT_SUBDOMAIN);
+    if let Some(app) = list_applications(catalog)
+        .await?
+        .into_iter()
+        .find(|app| app.subdomain.trim() == wanted)
+    {
+        return Err(Error::invalid(match to {
+            Some(subdomain) => format!(
+                "the application `{}` is served on `{subdomain}`; choose another admin subdomain",
+                app.name
+            ),
+            None => format!(
+                "the application `{}` is served on the base domain (`@`); give it a subdomain \
+                 before moving the admin UI back there",
+                app.name
+            ),
+        }));
+    }
+    Ok(())
+}
+
+/// Where the admin UI is served and whether its certificate is ready: the body
+/// of `getAdminAddress`.
+fn admin_address_json(apps: &AppMounts) -> Json {
+    let host = apps.admin_host();
+    let certificate = host.as_deref().map(|host| apps.certificate_status(host));
+    json!({
+        "base_domain": apps.base_domain(),
+        "admin_subdomain": apps.admin().subdomain(),
+        "admin_host": host,
+        "ready": certificate.as_ref().is_none_or(|status| status.is_ready()),
+        "certificate": certificate.map(|status| json!({
+            "state": status.state,
+            "message": status.message,
+        })),
+    })
+}
+
 fn framable_by_the_admin(app: &mut Application, body: &Json, apps: &AppMounts) {
     let stated = body
         .get("csp")
@@ -7980,14 +8335,30 @@ fn parse_file_store_id(raw: &str) -> Result<FileStoreDefId> {
 /// **The redaction is here and nowhere else.** Every response that carries a
 /// provider goes through this function, so an endpoint added later cannot
 /// accidentally return a key: it would have to build the JSON by hand to do so.
-fn llm_provider_json(def: &LlmProviderDef) -> Json {
+///
+/// `default` is the installation's default provider's id
+/// ([`default_provider_id`]), passed in so a listing asks once.
+fn llm_provider_json(
+    catalog: &Catalog,
+    def: &LlmProviderDef,
+    default: Option<LlmProviderDefId>,
+) -> Json {
     json!({
         "id": def.id.0,
         "name": def.name,
         "description": def.description,
         "backend": def.backend,
         "config": Json::Object(redacted_provider_config(&def.backend, &def.config)),
+        "from_config_file": sc_llm::is_host_llm_provider(catalog, def.id),
+        "is_default": default == Some(def.id),
     })
+}
+
+/// The id of the installation's default LLM provider, if there is a provider.
+async fn default_provider_id(catalog: &Catalog) -> Result<Option<LlmProviderDefId>> {
+    Ok(sc_llm::default_llm_provider(catalog)
+        .await?
+        .map(|def| def.id))
 }
 
 /// An LLM provider for a **backup**: the `createLlmProvider` shape with the
@@ -9415,7 +9786,13 @@ async fn settings_json(catalog: &Catalog, locale: &Locale) -> Result<Json> {
         &sc_config::config_spec(),
         &sc_config::all_config(catalog).await?,
     );
-    Ok(json!({ "sections": sections, "values": Json::Object(values) }))
+    Ok(json!({
+        "sections": sections,
+        "values": Json::Object(values),
+        // The keys this host's `feldspar.toml` pins (§13.5): shown read-only,
+        // because a save cannot change them.
+        "host_keys": sc_config::host_config_keys(catalog),
+    }))
 }
 
 /// One [`sc_python::PythonStatus`] as the API returns it.
@@ -9486,11 +9863,11 @@ async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::B
 /// What a downloaded backup is called: the date and time it was taken, to the
 /// second, so a directory of them sorts chronologically and two taken the same
 /// afternoon do not overwrite each other.
+///
+/// The same name an automated backup is written under, so a directory can hold
+/// both and the automated backups' pruning treats them alike.
 fn backup_filename() -> String {
-    format!(
-        "feldspar-backup-{}.zip",
-        chrono::Utc::now().format("%Y-%m-%d-%H%M%S")
-    )
+    crate::backup::schedule::backup_file_name(chrono::Utc::now())
 }
 
 /// A [`FormField`] as the API returns it (matching `form_field_schema`): enough
@@ -9856,8 +10233,10 @@ pub(crate) async fn dataset_shape(
 /// still find. A trigger, or a step of a workflow's current version, **fits**
 /// it when it is a `fit_model` naming it, and otherwise **names** it when its
 /// configuration mentions `predict("name")` or `models.get("name")` — a stored
-/// calculation's `update_rows`, a code body.
-async fn model_usage(catalog: &Catalog, name: &str) -> Result<Json> {
+/// calculation's `update_rows`, a code body. A workspace **shows** it when one
+/// of its panels reads one of the model's fits (the usage index, A4.2).
+async fn model_usage(catalog: &Catalog, model: &sc_model::Model) -> Result<Json> {
+    let name = model.name.as_str();
     let quoted = serde_json::to_string(name).unwrap_or_default();
     let mentions = |text: &str| {
         [
@@ -9928,7 +10307,14 @@ async fn model_usage(catalog: &Catalog, name: &str) -> Result<Json> {
             triggers.push(json!({ "id": trigger.id.0, "name": trigger.name, "how": how }));
         }
     }
-    Ok(json!({ "fields": fields, "triggers": triggers }))
+    let fits = sc_model::list_model_instances(catalog, model.id)
+        .await?
+        .into_iter()
+        .map(|i| i.id.0);
+    let workspaces = sc_analytics::panel::UsageIndex::build(catalog)
+        .await?
+        .fits(fits);
+    Ok(json!({ "fields": fields, "triggers": triggers, "workspaces": workspaces }))
 }
 
 /// Whether any string inside `value` satisfies `test` — a code body, a

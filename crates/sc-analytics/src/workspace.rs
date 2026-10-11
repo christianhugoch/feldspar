@@ -1,13 +1,17 @@
-//! Workspaces (analytics TODO A1.12, A1.21, A3.0): the six kinds of the goals
+//! Workspaces (analytics TODO A1.12, A1.21, A3.0, A4.2, A5.8, A6.1): the six kinds of the goals
 //! document, and the `_fd_workspaces` table that keeps each one's state.
 //!
 //! A workspace is a name, a kind and a **state** — JSON owned by the kind's
-//! screen, restored when the workspace is opened again. This crate does not
-//! look inside the state: an explorer's (A2) is its drop zones, a map's (A5)
+//! screen, restored when the workspace is opened again. This crate does not,
+//! on the whole, look inside the state: an explorer's (A2) is its drop zones, a map's (A5)
 //! its layers, and neither is the other's business. The Dataset editor and
 //! the model editor are not workspaces: datasets and models are listed beside
 //! the workspaces and each opens in its editor on its own, since a workspace
 //! that only pointed at one would have no state of its own.
+//!
+//! The one thing this crate does read in a state is where a kind keeps its
+//! panels ([`crate::panel`]): a state whose panels do not read is refused, and
+//! the usage index finds what a workspace's panels read.
 //!
 //! The store keeps a workspace of any kind. Whether a kind can be created yet
 //! is [`WorkspaceKind::check_available`]'s question, which the API asks, so
@@ -15,6 +19,7 @@
 
 use chrono::{DateTime, Utc};
 use sc_catalog::{Catalog, DataField, Table};
+use sc_dataset::Sharing;
 use sc_db::Row;
 use sc_error::{Error, Result};
 use sc_query::{
@@ -99,13 +104,15 @@ impl WorkspaceKind {
     }
 
     /// The milestone that brings it, when it is not here yet (`None` when it
-    /// is): the Analytics UI plan's A4–A9. The notebook is not scheduled.
+    /// is): the Analytics UI plan's A7–A9. The notebook is not scheduled. The
+    /// report arrived with A4.3, as the first place panels are dropped, and
+    /// the map with A5.8, the dashboard with A6.1.
     pub fn arrives_in(self) -> Option<&'static str> {
         match self {
-            WorkspaceKind::DataExplorer => None,
-            WorkspaceKind::Report => Some("A4"),
-            WorkspaceKind::Map => Some("A5"),
-            WorkspaceKind::Dashboard => Some("A6"),
+            WorkspaceKind::DataExplorer
+            | WorkspaceKind::Report
+            | WorkspaceKind::Map
+            | WorkspaceKind::Dashboard => None,
             WorkspaceKind::Simulation => Some("A7"),
             WorkspaceKind::Notebook => Some("a later milestone"),
         }
@@ -164,8 +171,16 @@ pub struct Workspace {
     pub kind: WorkspaceKind,
     /// The kind's own state, restored when it is opened; `{}` for a new one.
     pub state: Json,
-    /// Who created it.
+    /// Who created it, and so owns it (A9.1).
     pub created_by: Option<Uuid>,
+    /// The least privileged role it is shared with (A9.1); `None` for nobody
+    /// but its owner.
+    #[serde(default)]
+    pub share_role: Option<u8>,
+    /// The application it belongs to (A9.3); `None` for the unrestricted
+    /// Analytics UI's.
+    #[serde(default)]
+    pub application: Option<Uuid>,
     /// When it was last changed, its state included.
     pub updated_at: DateTime<Utc>,
 }
@@ -183,7 +198,24 @@ impl Workspace {
             kind,
             state: Json::Object(serde_json::Map::new()),
             created_by,
+            share_role: None,
+            application: None,
             updated_at: Utc::now(),
+        }
+    }
+
+    /// The same workspace, belonging to the application `app`.
+    #[must_use]
+    pub fn in_application(mut self, app: Uuid) -> Workspace {
+        self.application = Some(app);
+        self
+    }
+
+    /// Who owns it and whom it is shared with.
+    pub fn sharing(&self) -> Sharing {
+        Sharing {
+            owner: self.created_by,
+            share_role: self.share_role,
         }
     }
 }
@@ -194,6 +226,8 @@ const COL_KIND: &str = "kind";
 const COL_STATE: &str = "state";
 const COL_CREATED_BY: &str = "created_by";
 const COL_UPDATED_AT: &str = "updated_at";
+const COL_SHARE_ROLE: &str = "share_role";
+const COL_APPLICATION: &str = "application";
 
 fn workspace_fields() -> Vec<DataField> {
     vec![
@@ -205,6 +239,9 @@ fn workspace_fields() -> Vec<DataField> {
         DataField::plain(COL_STATE, TypeRef::Basic(BasicType::Json)).required(),
         DataField::plain(COL_CREATED_BY, TypeRef::Basic(BasicType::Uuid)),
         DataField::plain(COL_UPDATED_AT, TypeRef::Basic(BasicType::Timestamp)).required(),
+        // A9: nullable, so the bootstrap adds them to a table with rows.
+        DataField::plain(COL_SHARE_ROLE, TypeRef::Basic(BasicType::Int)),
+        DataField::plain(COL_APPLICATION, TypeRef::Basic(BasicType::Uuid)),
     ]
 }
 
@@ -228,6 +265,8 @@ pub async fn create_workspace(catalog: &Catalog, workspace: &Workspace) -> Resul
             COL_KIND,
             COL_STATE,
             COL_CREATED_BY,
+            COL_SHARE_ROLE,
+            COL_APPLICATION,
             COL_UPDATED_AT,
         ]
         .iter()
@@ -239,6 +278,8 @@ pub async fn create_workspace(catalog: &Catalog, workspace: &Workspace) -> Resul
             Expr::lit(workspace.kind.as_str()),
             Expr::Lit(Value::Json(workspace.state.clone())),
             Expr::Lit(workspace.created_by.map_or(Value::Null, Value::Uuid)),
+            Expr::Lit(share_role_value(workspace.share_role)),
+            Expr::Lit(workspace.application.map_or(Value::Null, Value::Uuid)),
             Expr::Lit(Value::Timestamp(Utc::now())),
         ],
     );
@@ -259,6 +300,34 @@ pub async fn rename_workspace(catalog: &Catalog, id: WorkspaceId, name: &str) ->
     require_workspace(catalog, id).await
 }
 
+/// Share a workspace with a role, or with nobody but its owner (A9.1).
+pub async fn share_workspace(
+    catalog: &Catalog,
+    id: WorkspaceId,
+    share_role: Option<u8>,
+) -> Result<Workspace> {
+    let workspace = require_workspace(catalog, id).await?;
+    Sharing {
+        share_role,
+        ..workspace.sharing()
+    }
+    .check()?;
+    update(
+        catalog,
+        id,
+        vec![Assignment::new(
+            COL_SHARE_ROLE,
+            Expr::Lit(share_role_value(share_role)),
+        )],
+    )
+    .await?;
+    require_workspace(catalog, id).await
+}
+
+fn share_role_value(role: Option<u8>) -> Value {
+    role.map_or(Value::Null, |r| Value::Int(i64::from(r)))
+}
+
 /// Replace a workspace's state — what its screen does, debounced, as it
 /// changes.
 pub async fn save_workspace_state(
@@ -269,7 +338,8 @@ pub async fn save_workspace_state(
     if !state.is_object() {
         return Err(Error::invalid("a workspace's state is a JSON object"));
     }
-    require_workspace(catalog, id).await?;
+    let workspace = require_workspace(catalog, id).await?;
+    crate::panel::check_state(workspace.kind, &state)?;
     update(
         catalog,
         id,
@@ -377,12 +447,24 @@ fn from_row(row: &Row) -> Result<Workspace> {
         Some(Value::Timestamp(t)) => *t,
         other => return Err(bad(COL_UPDATED_AT, other)),
     };
+    let share_role = match row.get(COL_SHARE_ROLE) {
+        Some(Value::Int(n)) => u8::try_from(*n).ok(),
+        Some(Value::Null) | None => None,
+        other => return Err(bad(COL_SHARE_ROLE, other)),
+    };
+    let application = match row.get(COL_APPLICATION) {
+        Some(Value::Uuid(u)) => Some(*u),
+        Some(Value::Null) | None => None,
+        other => return Err(bad(COL_APPLICATION, other)),
+    };
     Ok(Workspace {
         id,
         name,
         kind,
         state,
         created_by,
+        share_role,
+        application,
         updated_at,
     })
 }
@@ -411,7 +493,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_six_kinds_parse_and_only_the_data_explorer_is_here() {
+    fn all_six_kinds_parse_and_the_explorer_report_map_and_dashboard_are_here() {
         for kind in WorkspaceKind::ALL {
             assert_eq!(WorkspaceKind::parse(kind.as_str()).expect("parses"), kind);
         }
@@ -419,11 +501,22 @@ mod tests {
             .into_iter()
             .filter(|k| k.is_available())
             .collect();
-        assert_eq!(here, vec![WorkspaceKind::DataExplorer]);
+        assert_eq!(
+            here,
+            vec![
+                WorkspaceKind::DataExplorer,
+                WorkspaceKind::Report,
+                WorkspaceKind::Map,
+                WorkspaceKind::Dashboard
+            ]
+        );
         WorkspaceKind::DataExplorer.check_available().expect("A2");
-        assert_eq!(WorkspaceKind::Map.arrives_in(), Some("A5"));
-        let err = WorkspaceKind::Report.check_available().expect_err("A4");
-        assert!(err.to_string().contains("milestone A4"), "{err}");
+        WorkspaceKind::Report.check_available().expect("A4");
+        WorkspaceKind::Map.check_available().expect("A5");
+        WorkspaceKind::Dashboard.check_available().expect("A6");
+        assert_eq!(WorkspaceKind::Simulation.arrives_in(), Some("A7"));
+        let err = WorkspaceKind::Simulation.check_available().expect_err("A7");
+        assert!(err.to_string().contains("milestone A7"), "{err}");
         // The Dataset editor and the model editor are not kinds of workspace.
         assert!(WorkspaceKind::parse("dataset_editor").is_err());
         assert!(WorkspaceKind::parse("model_fit").is_err());

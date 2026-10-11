@@ -7,6 +7,10 @@
 // `SettingsFields`. Every setting is optional, and blank means the built-in
 // default — which is why each row shows what its settings *resolve to*, so the
 // admin can see the default they are leaving in place.
+//
+// A provider the server's configuration file supplies lists its models
+// `readOnly`: the file says which models it may be used with, so there is
+// nothing to add, change or delete here — only to test.
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -46,12 +50,15 @@ export function LlmModels({
   providerId,
   backend,
   providerConfig,
+  readOnly = false,
 }: {
   providerId: string;
   backend: string;
   /** The provider's config as the form holds it, sentinel included — what a
    * test sends, so an unsaved change to the key or URL is what is tested. */
   providerConfig: Record<string, unknown>;
+  /** The models come from the configuration file: test them, change nothing. */
+  readOnly?: boolean;
 }) {
   const { t } = useT();
   const [models, setModels] = useState<ModelItem[] | null>(null);
@@ -207,30 +214,32 @@ export function LlmModels({
     <Card className="mb-3">
       <Card.Header className="d-flex align-items-center">
         <Card.Title className="mb-0"><T text="Models" /></Card.Title>
-        <div className="ms-auto btn-list">
-          <Button
-            size="sm"
-            variant="outline-secondary"
-            disabled={fetching}
-            onClick={() => void fetchModels()}
-          >
-            {fetching ? "Fetching…" : "Fetch models"}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() =>
-              setEditing({
-                id: null,
-                name: "",
-                description: "",
-                isDefault: (models ?? []).length === 0,
-                config: {},
-              })
-            }
-          >
-            <T text="Add model" />
-          </Button>
-        </div>
+        {!readOnly && (
+          <div className="ms-auto btn-list">
+            <Button
+              size="sm"
+              variant="outline-secondary"
+              disabled={fetching}
+              onClick={() => void fetchModels()}
+            >
+              {fetching ? "Fetching…" : "Fetch models"}
+            </Button>
+            <Button
+              size="sm"
+              onClick={() =>
+                setEditing({
+                  id: null,
+                  name: "",
+                  description: "",
+                  isDefault: (models ?? []).length === 0,
+                  config: {},
+                })
+              }
+            >
+              <T text="Add model" />
+            </Button>
+          </div>
+        )}
       </Card.Header>
       <Card.Body>
         {error && (
@@ -313,7 +322,7 @@ export function LlmModels({
                     </td>
                     <td className="text-end">
                       <div className="btn-list flex-nowrap justify-content-end">
-                        {!m.is_default && (
+                        {!m.is_default && !readOnly && (
                           <Button
                             size="sm"
                             variant="outline-secondary"
@@ -330,24 +339,28 @@ export function LlmModels({
                         >
                           {testing === m.id ? "Testing…" : "Test"}
                         </Button>
-                        <Button
-                          size="sm"
-                          variant="outline-secondary"
-                          onClick={() =>
-                            setEditing({
-                              id: m.id,
-                              name: m.name,
-                              description: m.description,
-                              isDefault: m.is_default,
-                              config: readConfig(m.config),
-                            })
-                          }
-                        >
-                          <T text="Edit" />
-                        </Button>
-                        <Button size="sm" variant="outline-danger" onClick={() => void remove(m)}>
-                          <T text="Delete" />
-                        </Button>
+                        {!readOnly && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline-secondary"
+                              onClick={() =>
+                                setEditing({
+                                  id: m.id,
+                                  name: m.name,
+                                  description: m.description,
+                                  isDefault: m.is_default,
+                                  config: readConfig(m.config),
+                                })
+                              }
+                            >
+                              <T text="Edit" />
+                            </Button>
+                            <Button size="sm" variant="outline-danger" onClick={() => void remove(m)}>
+                              <T text="Delete" />
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

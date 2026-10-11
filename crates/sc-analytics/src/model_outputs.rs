@@ -102,6 +102,26 @@ pub async fn render_outputs(
     Ok(out)
 }
 
+/// The output of `instance` called `name`, drawn whether it is optional or
+/// not; `None` when the fit recorded no such output. What a panel copied from
+/// the model editor (A4.3) shows.
+pub async fn render_one_output(
+    catalog: &Catalog,
+    instance: &ModelInstance,
+    name: &str,
+) -> Result<Option<OutputView>> {
+    let Some(decl) = sc_model::instance_outputs(instance)?
+        .into_iter()
+        .find(|d| d.name == name)
+    else {
+        return Ok(None);
+    };
+    let include = BTreeSet::from([decl.name.clone()]);
+    render_output(catalog, instance, &decl, &include)
+        .await
+        .map(Some)
+}
+
 async fn render_output(
     catalog: &Catalog,
     instance: &ModelInstance,
@@ -140,7 +160,10 @@ async fn render_output(
             match output_spec(instance.id, data, spec) {
                 Ok(spec) => {
                     if !decl.optional || include.contains(&decl.name) {
-                        view.plot = Some(render_plot(catalog, &spec).await?);
+                        // A model's outputs are the admin's (A9.1): the model
+                        // editor is only in the unrestricted Analytics UI.
+                        let admin = sc_dataset::Caller::admin();
+                        view.plot = Some(render_plot(catalog, &admin, &spec).await?);
                     }
                     view.spec = Some(spec);
                 }

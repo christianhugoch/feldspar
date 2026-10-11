@@ -105,7 +105,7 @@ pub(crate) fn rewrite_select(s: &mut Select, f: &mut dyn FnMut(&Expr) -> Option<
 
 fn rewrite_source(src: &mut Source, f: &mut dyn FnMut(&Expr) -> Option<Expr>) {
     match src {
-        Source::Subquery { query, .. } => rewrite_select(query, f),
+        Source::Subquery { query, .. } | Source::Lateral { query, .. } => rewrite_select(query, f),
         Source::UnionAll { parts, .. } => {
             for p in parts {
                 rewrite_select(p, f);
@@ -131,6 +131,17 @@ pub(crate) fn columns_of(e: &Expr, alias: &str) -> BTreeSet<String> {
         None
     });
     out
+}
+
+/// Whether `e` holds a literal (a bound placeholder) anywhere inside it.
+pub(crate) fn has_literal(e: &Expr) -> bool {
+    let mut found = false;
+    let mut copy = e.clone();
+    rewrite(&mut copy, &mut |node| {
+        found |= matches!(node, Expr::Lit(_) | Expr::Param(_));
+        None
+    });
+    found
 }
 
 /// `e` with every column of `alias` replaced by what `lookup` says it is.

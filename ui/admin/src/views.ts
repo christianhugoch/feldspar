@@ -14,6 +14,7 @@
 // - **A view whose pattern this server does not have** is shown with that fact
 //   attached rather than as an ordinary row: it is a view that will not render.
 
+import { appUrl } from "./adminAddress";
 import type {
   CreateViewRequest,
   ListApplicationsResponse,
@@ -102,10 +103,9 @@ export function nameParam(name: string): string {
   return encodeURIComponent(name);
 }
 
-/** The app's own origin: `<subdomain>.<the admin's host>`, the admin running on
- * the base domain. */
+/** The app's own origin: `<subdomain>.<base domain>` ({@link appUrl}). */
 export function appOrigin(subdomain: string, here: Here): string {
-  return `${here.protocol}//${subdomain}.${here.host}`;
+  return appUrl(subdomain, here);
 }
 
 /** Where a view is served on its application's subdomain. */

@@ -41,6 +41,9 @@ sc-files.workspace = true
 sc-llm.workspace = true
 # `_fd_agents` and `_fd_runs`, bootstrapped beside the other metadata tables.
 sc-agent.workspace = true
+# The trigger dispatcher `serve` starts its schedulers with, named in the
+# service set `serve` and `restore` share.
+sc-action.workspace = true
 # The Analytics UI's tables and the demo data (analytics TODO A1).
 sc-dataset.workspace = true
 sc-analytics.workspace = true
@@ -95,6 +98,9 @@ async-trait.workspace = true
 # `feldspar cmdstan status | install`: finding CmdStan on this machine, and
 # downloading and building one (TODO "Bayesian models with Stan" §20).
 sc-stan.workspace = true
+
+# `add-user` / `modify-user` turn terminal echo off while a password is typed.
+libc.workspace = true
 
 [dev-dependencies]
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the eval

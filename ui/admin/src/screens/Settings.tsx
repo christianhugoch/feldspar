@@ -37,6 +37,7 @@ import Button from "react-bootstrap/Button";
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "../api";
+import { adminMoved } from "../adminAddress";
 import type { GetSettingsResponse } from "../client";
 import { AlertBody, PageBody, PageHeader } from "../layout";
 import { mcpEnabled } from "../mcpTokens";
@@ -47,6 +48,7 @@ import {
   readConfig,
   type FieldSpec,
 } from "../settings";
+import { AdminMove } from "./AdminMove";
 import { BackupTab } from "./BackupTab";
 import { ClearAllPanel } from "./ClearAll";
 import { McpTokensPanel } from "./McpTokens";
@@ -133,10 +135,15 @@ export function Settings() {
   // the MCP token panel offers to mint against a route that is either served or
   // not — and a ticked-but-unsaved checkbox is neither.
   const [stored, setStored] = useState<Record<string, string>>({});
+  // The keys this host's `feldspar.toml` pins: shown, never editable.
+  const [hostKeys, setHostKeys] = useState<string[]>([]);
   const [tab, setTab] = useState<SettingsTab>(BACKUP_TAB);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Whether the last save moved the admin UI to another host, which opens the
+  // dialog that waits for the new address and then goes there.
+  const [moving, setMoving] = useState(false);
 
   /** Take a settings response as the screen's state. */
   const adopt = (response: GetSettingsResponse, opening: boolean) => {
@@ -144,6 +151,7 @@ export function Settings() {
     setSections(response.sections);
     setValues(initialValues(allFields(response.sections), config));
     setStored(config);
+    setHostKeys(response.host_keys);
     if (opening) setTab(initialTab(response.sections));
   };
 
@@ -166,10 +174,13 @@ export function Settings() {
     try {
       // The response is what was *stored*, not what was sent: a cleared box
       // comes back as the declared default, and a secret as the sentinel.
-      adopt(
-        await api.updateSettings({ values: settingsPayload(allFields(sections), values) }),
-        false,
-      );
+      const response = await api.updateSettings({
+        values: settingsPayload(allFields(sections), values),
+      });
+      // Compared as stored, before and after: the server has already moved the
+      // admin UI by the time this answer arrives.
+      if (adminMoved(stored, readConfig(response.values))) setMoving(true);
+      adopt(response, false);
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the settings.");
@@ -238,6 +249,7 @@ export function Settings() {
               <SectionCard
                 section={section}
                 values={values}
+                hostKeys={hostKeys}
                 onChange={(name, v) => setValues((current) => ({ ...current, [name]: v }))}
               />
               <div className="btn-list">
@@ -258,6 +270,7 @@ export function Settings() {
         <TabPanel id={BACKUP_TAB} showing={tab}>
           <BackupTab />
         </TabPanel>
+        {moving && <AdminMove onClose={() => setMoving(false)} />}
       </PageBody>
     </>
   );
@@ -285,12 +298,18 @@ function TabPanel({
 function SectionCard({
   section,
   values,
+  hostKeys,
   onChange,
 }: {
   section: Section;
   values: Record<string, string>;
+  hostKeys: string[];
   onChange: (name: string, value: string) => void;
 }) {
+  const { t } = useT();
+  const pinned = t(
+    "Set in this server's feldspar.toml, which wins over this screen. Change it there and restart the server.",
+  );
   return (
     <div className="card mb-4">
       <div className="card-header">
@@ -307,6 +326,7 @@ function SectionCard({
               value={values[field.name] ?? ""}
               onChange={(v) => onChange(field.name, v)}
               idPrefix={`setting-${section.name}`}
+              pinned={hostKeys.includes(field.name) ? pinned : undefined}
             />
             {/* The help sits under the control rather than in the label:
                 these are sentences, and a label is a name. */}

@@ -52,6 +52,10 @@ async fn run(args: &[String]) -> Result<()> {
         Some("set-cfg") => set_cfg_command(&args[1..]).await,
         Some("auth") => auth_command(&args[1..]).await,
         Some("mcp-token") => mcp_token_command(&args[1..]).await,
+        Some("add-user") => add_user_command(&args[1..]).await,
+        Some("modify-user") => modify_user_command(&args[1..]).await,
+        Some("backup") => backup_command(&args[1..]).await,
+        Some("restore") => restore_command(&args[1..]).await,
         Some("app") => app_command(&args[1..]).await,
         Some("agent") => agent_command(&args[1..]).await,
         Some("i18n") => i18n_command(&args[1..]).await,
@@ -217,12 +221,125 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // must not silently shadow a configured store of the same name.
     connect_file_stores(&catalog, &file_store_specs)?;
 
+    let Services {
+        apps,
+        triggers,
+        view_services,
+    } = install_services(&catalog, &config, &service).await?;
+
     // Bring the applications up. `--base-domain` is what makes them addressable
     // (an app is served at `<subdomain>.<base-domain>`), so mounting is gated on
     // it: without a base domain no request could ever reach an app, and mounting
     // one would make the router refuse to build. With one, every stored app is
     // built and mounted now — a build that fails is logged and skipped, never
     // fatal (§13.2), and can be fixed and rebuilt without a restart.
+    // Where the admin UI is served (Settings → Development). Before the mounts
+    // and the certificate's names, which both read it. Without a base domain
+    // there is no subdomain to move to, so a stored one is reported and left
+    // unused rather than stopping the boot.
+    match sc_config::admin_subdomain(&catalog).await {
+        Ok(Some(subdomain)) if config.base_domain.is_some() => {
+            apps.set_admin_subdomain(Some(subdomain));
+        }
+        Ok(Some(subdomain)) => eprintln!(
+            "feldspar: the admin subdomain `{subdomain}` is ignored: there is no --base-domain \
+             for it to be a subdomain of"
+        ),
+        Ok(None) => {}
+        Err(e) => eprintln!("feldspar: the admin subdomain is ignored: {e}"),
+    }
+
+    service.notify_status("mounting applications");
+    if config.base_domain.is_some() {
+        mount_all(&apps).await;
+        // A coding run's `check` mounts its green builds as previews beside the
+        // live mounts (TODO §7b). Without a base domain a preview has no host.
+        view_services.set_previews(apps.clone());
+    }
+
+    // The certificate's names, now that the mounts are known: the base domain,
+    // every mounted application's subdomain (and the admin UI's, if it has
+    // moved to one), and whatever else the admin listed
+    // (§13.5). The three are kept apart rather than flattened because the middle
+    // one is live — an application created while the server runs adds a name, and
+    // `serve` hands the mount registry the certificate so that becomes a new
+    // order rather than something a restart fixes. A settings mistake stops the
+    // boot rather than quietly serving plain HTTP: an admin who configured TLS
+    // and got HTTP would not find out from the server.
+    config.tls = sc_server::TlsSettings::from_ssl(
+        &ssl,
+        config.https_port,
+        sc_server::TlsNames::new(
+            config.base_domain.clone(),
+            apps.certificate_subdomains(),
+            ssl.extra_domains.clone(),
+        ),
+        Some(sc_config::AcmeCache::new(catalog.clone())),
+    )?;
+
+    // Everything is up — catalog, file stores, applications, triggers — and the
+    // listener has not been announced yet, which is exactly what the `startup`
+    // event means.
+    service.notify_status("running startup triggers");
+    sc_server::fire_startup(&catalog, &triggers).await;
+
+    // The clock's turn: from here a periodic trigger fires on its own schedule,
+    // and one whose run was missed while the process was down catches up — once —
+    // on the first tick. Held for the lifetime of `serve`; the task ends with the
+    // process.
+    let (_scheduler, _scheduler_task) = sc_server::start_scheduler(&catalog, &triggers);
+
+    // And the workflow engine's (§10.3): from here a trigger whose body is a
+    // workflow starts a durable run, a suspended run's timer fires, and a run a
+    // crashed node was holding is picked up when its lease runs out. Started
+    // here and nowhere else, for the reason the scheduler is.
+    let (_workflows, _workflow_task) = sc_server::start_workflow_engine(&catalog, &triggers);
+
+    // And the automated backups' (Settings → Backup): each schedule writes a
+    // backup to its directory when it is due, and prunes the old ones.
+    let (_backups, _backup_task) = sc_server::start_backup_scheduler(&catalog);
+
+    // Sessions are rows, not process memory (§7.2), which is what lets a second
+    // application server exist: put two of these behind a load balancer and a
+    // session minted by either is a session both honour. Each keeps its own
+    // bounded cache in front of the table, so the common case is still a map
+    // lookup.
+    let sessions = Arc::new(SessionStore::database(catalog.clone()));
+    if config.tls.enabled() && config.tls.redirect_http() {
+        eprintln!(
+            "feldspar: listening on http://{} (redirecting to HTTPS)",
+            config.addr
+        );
+    } else {
+        eprintln!("feldspar: listening on http://{}", config.addr);
+    }
+    let handlers = admin_handlers(catalog, apps.clone());
+    serve(config, admin_endpoints(), handlers, sessions, apps).await
+}
+
+/// What [`install_services`] assembles: the mount registry with every service
+/// an application, a trigger or a restore reaches through it, and the two
+/// pieces `serve` goes on to start things with.
+struct Services {
+    apps: Arc<AppMounts>,
+    triggers: Arc<sc_action::TriggerDispatcher>,
+    view_services: Arc<sc_agent::ViewServices>,
+}
+
+/// The agents, models, triggers, modules and streams over `catalog`, and the
+/// mount registry that carries them — everything `serve` brings up between
+/// connecting the database and mounting the applications.
+///
+/// One function rather than a copy in each caller, because `restore` needs the
+/// same set: a backup reinstalls modules, saves agents and triggers through
+/// their registries and builds the applications it restores, and a restore from
+/// a terminal that assembled less than the server does would skip what the
+/// restore dialog does not.
+async fn install_services(
+    catalog: &Arc<sc_catalog::Catalog>,
+    config: &ServerConfig,
+    service: &ServiceManager,
+) -> Result<Services> {
     // The JS engine ownership formulas evaluate on (§7.3): one isolate for the
     // whole server, shared by every mounted app's providers — and by the trigger
     // dispatcher, whose `only_if` formulas and action configuration are the same
@@ -230,7 +347,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // `run_js_code` body runs on, which is what `--code-workers` and
     // `--code-max-inflight` size (§10.1) — built on first use, so a deployment
     // with no code bodies pays for neither.
-    let evaluator = sc_server::js_evaluator(&config);
+    let evaluator = sc_server::js_evaluator(config);
 
     // Agents: the built-in trait set and the two tables an agent and its runs
     // live in (§11.2). A stored agent that does not validate is reported and
@@ -250,7 +367,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
         Err(reason) => eprintln!("feldspar: view_app is unavailable: {reason}"),
     }
     let agents =
-        sc_server::install_agents_on(&catalog, sc_agent::HostCapabilities { browser }).await?;
+        sc_server::install_agents_on(catalog, sc_agent::HostCapabilities { browser }).await?;
 
     // Models: the two tables a model and its fits live in, and the reap of any
     // fit that was running when this process last stopped (§8). A fit's registry
@@ -261,7 +378,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // action set below: `fit_model` needs both, so the models come up before
     // the triggers do.
     let models =
-        sc_server::install_models_with(&catalog, config.model_max_rows, &config.stan).await?;
+        sc_server::install_models_with(catalog, config.model_max_rows, &config.stan).await?;
     // Which CmdStan Stan models will use, and how many chains may run at once
     // — or why there is none — said once, as the browser is (Stan TODO §20).
     let stan = models.stan();
@@ -296,9 +413,9 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // Built once and held: the dispatcher takes it as an adapter, and the mount
     // registry takes the runtime itself, because the diagnostics screen asks it
     // questions the adapter trait does not carry (phase 4.2).
-    let python = sc_server::python_adapter(&config);
+    let python = sc_server::python_adapter(config);
     let triggers = sc_server::install_triggers_with_adapters(
-        &catalog,
+        catalog,
         evaluator.clone(),
         &agents,
         &models,
@@ -314,7 +431,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // never a reason not to boot.
     service.notify_status("loading modules");
     let modules = sc_server::ModuleServices::install(
-        &catalog,
+        catalog,
         &triggers,
         &agents,
         &models,
@@ -346,7 +463,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     // what makes installing a stream provider a thing that takes effect without
     // a restart.
     let streams = sc_server::install_streams_with(
-        &catalog,
+        catalog,
         &triggers,
         modules.stream_registry(),
         config.streams,
@@ -354,8 +471,7 @@ async fn serve_command(args: &[String]) -> Result<()> {
     .await?;
     modules.set_streams(streams.clone());
 
-    service.notify_status("mounting applications");
-    // Held past `with_agents`, for installing the previewer below.
+    // Held past `with_agents`, for the caller's previewer.
     let view_services = agents.registry().view_services().clone();
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
@@ -368,68 +484,14 @@ async fn serve_command(args: &[String]) -> Result<()> {
             .with_streams(streams)
             .with_modules(modules)
             .with_python(python)
-            .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone()),
+            .with_saltcorn_ui_dir(config.saltcorn_ui_dir.clone())
+            .with_analytics_dir(config.analytics_dir.clone()),
     );
-    if config.base_domain.is_some() {
-        mount_all(&apps).await;
-        // A coding run's `check` mounts its green builds as previews beside the
-        // live mounts (TODO §7b). Without a base domain a preview has no host.
-        view_services.set_previews(apps.clone());
-    }
-
-    // The certificate's names, now that the mounts are known: the base domain,
-    // every mounted application's subdomain, and whatever else the admin listed
-    // (§13.5). The three are kept apart rather than flattened because the middle
-    // one is live — an application created while the server runs adds a name, and
-    // `serve` hands the mount registry the certificate so that becomes a new
-    // order rather than something a restart fixes. A settings mistake stops the
-    // boot rather than quietly serving plain HTTP: an admin who configured TLS
-    // and got HTTP would not find out from the server.
-    config.tls = sc_server::TlsSettings::from_ssl(
-        &ssl,
-        config.https_port,
-        sc_server::TlsNames::new(
-            config.base_domain.clone(),
-            apps.subdomains(),
-            ssl.extra_domains.clone(),
-        ),
-        Some(sc_config::AcmeCache::new(catalog.clone())),
-    )?;
-
-    // Everything is up — catalog, file stores, applications, triggers — and the
-    // listener has not been announced yet, which is exactly what the `startup`
-    // event means.
-    service.notify_status("running startup triggers");
-    sc_server::fire_startup(&catalog, &triggers).await;
-
-    // The clock's turn: from here a periodic trigger fires on its own schedule,
-    // and one whose run was missed while the process was down catches up — once —
-    // on the first tick. Held for the lifetime of `serve`; the task ends with the
-    // process.
-    let (_scheduler, _scheduler_task) = sc_server::start_scheduler(&catalog, &triggers);
-
-    // And the workflow engine's (§10.3): from here a trigger whose body is a
-    // workflow starts a durable run, a suspended run's timer fires, and a run a
-    // crashed node was holding is picked up when its lease runs out. Started
-    // here and nowhere else, for the reason the scheduler is.
-    let (_workflows, _workflow_task) = sc_server::start_workflow_engine(&catalog, &triggers);
-
-    // Sessions are rows, not process memory (§7.2), which is what lets a second
-    // application server exist: put two of these behind a load balancer and a
-    // session minted by either is a session both honour. Each keeps its own
-    // bounded cache in front of the table, so the common case is still a map
-    // lookup.
-    let sessions = Arc::new(SessionStore::database(catalog.clone()));
-    if config.tls.enabled() && config.tls.redirect_http() {
-        eprintln!(
-            "feldspar: listening on http://{} (redirecting to HTTPS)",
-            config.addr
-        );
-    } else {
-        eprintln!("feldspar: listening on http://{}", config.addr);
-    }
-    let handlers = admin_handlers(catalog, apps.clone());
-    serve(config, admin_endpoints(), handlers, sessions, apps).await
+    Ok(Services {
+        apps,
+        triggers,
+        view_services,
+    })
 }
 
 /// Take `flag`'s value out of `args`, returning it and what remains.
@@ -1307,6 +1369,229 @@ async fn app_list_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `feldspar add-user EMAIL --role ROLE [--password [VALUE]]` — create an
+/// account from a terminal. With no password value, it is asked for.
+async fn add_user_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::users::parse_add_user(&rest)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    // Before the prompt: a role or email that will be refused should not cost a
+    // password typed twice first.
+    let role = sc_cli::auth::resolve_role(&catalog, &parsed.role).await?;
+    if sc_auth::load_user_by_email(&catalog, parsed.email.trim())
+        .await?
+        .is_some()
+    {
+        return Err(sc_error::Error::invalid(format!(
+            "there is already a user with the email `{}`; use modify-user to change it",
+            parsed.email.trim()
+        )));
+    }
+    let password = sc_cli::users::password_from(parsed.password.as_ref())?;
+    let user = sc_auth::create_user(&catalog, &parsed.email, &password, role.role).await?;
+    eprintln!(
+        "feldspar: created {} with role {} ({}), id {}",
+        parsed.email.trim(),
+        role.name,
+        role.role,
+        user.id
+    );
+    Ok(())
+}
+
+/// `feldspar modify-user EMAIL [--role ROLE] [--password [VALUE]]` — change an
+/// account's role or password from a terminal: the way back in for an admin who
+/// has forgotten their password on a server that cannot email a reset link.
+async fn modify_user_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::users::parse_modify_user(&rest)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    let user = sc_auth::load_user_by_email(&catalog, parsed.email.trim())
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::not_found(format!("no user with the email `{}`", parsed.email.trim()))
+        })?;
+    let role = match &parsed.role {
+        Some(spec) => Some(sc_cli::auth::resolve_role(&catalog, spec).await?),
+        None => None,
+    };
+    let password = match &parsed.password {
+        Some(arg) => Some(sc_cli::users::password_from(Some(arg))?),
+        None => None,
+    };
+    sc_auth::update_user(
+        &catalog,
+        user.id,
+        sc_auth::UserUpdate {
+            role: role.as_ref().map(|r| r.role),
+            password: password.clone(),
+            ..Default::default()
+        },
+    )
+    .await?;
+    if let Some(role) = &role {
+        eprintln!(
+            "feldspar: {} now has role {} ({})",
+            parsed.email.trim(),
+            role.name,
+            role.role
+        );
+    }
+    if password.is_some() {
+        eprintln!("feldspar: password changed for {}", parsed.email.trim());
+    }
+    Ok(())
+}
+
+/// The FILE a `backup` or `restore` names, which comes first, and the
+/// arguments after it.
+fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, Vec<String>)> {
+    match args.split_first() {
+        Some((first, rest)) if !first.starts_with('-') => {
+            Ok((std::path::PathBuf::from(first), rest.to_vec()))
+        }
+        _ => Err(sc_error::Error::config(format!(
+            "{command} requires the backup file: feldspar {command} FILE [database flags]"
+        ))),
+    }
+}
+
+/// `feldspar backup FILE [database flags]` — the zip Settings → Backup
+/// downloads, with everything ticked except the TLS settings, written to FILE.
+///
+/// The TLS settings are left out because they belong to the machine rather than
+/// to the installation: a certificate, its private key and the names it covers
+/// are wrong on the staging copy or the new host a backup from a terminal is
+/// usually taken for. The Backup dialog still offers them for the admin who
+/// does mean to move them.
+///
+/// Nothing is remembered: the dialog's stored selection is the dialog's, and a
+/// script's backup is not the admin saying what the next one should include.
+async fn backup_command(args: &[String]) -> Result<()> {
+    let (file, rest) = file_argument("backup", args)?;
+    let (db, leftover) = DbConfig::extract(rest)?;
+    if let Some(unknown) = leftover.first() {
+        return Err(sc_error::Error::config(format!(
+            "unknown backup argument `{unknown}`"
+        )));
+    }
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    sc_log::set_log_sql(false);
+    // A file store's bytes are read through its connection, so a store that is
+    // not connected comes out as its definition with no files.
+    connect_stored_file_stores(&catalog).await?;
+
+    let available = sc_server::backup_available(&catalog).await?;
+    let selection = sc_server::BackupSelection {
+        ssl: false,
+        ..sc_server::BackupSelection::everything(&available)
+    };
+    let bytes = sc_server::write_backup(&catalog, &selection).await?;
+    write_whole(&file, &bytes)?;
+    eprintln!(
+        "feldspar: wrote {} ({} tables, {} applications, {} file stores, {} bytes)",
+        file.display(),
+        selection.tables.len(),
+        selection.applications.len(),
+        selection.file_stores.len(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+/// Write `bytes` to `path` by way of a sibling file and a rename, so an
+/// interrupted backup leaves the previous file at `path` rather than half of a
+/// new one — the automated backups' arrangement.
+fn write_whole(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| sc_error::Error::config(format!("`{}` is not a file name", path.display())))?
+        .to_string_lossy();
+    let partial = path.with_file_name(format!(".{name}.partial"));
+    std::fs::write(&partial, bytes)
+        .map_err(|e| sc_error::Error::file(format!("writing `{}`: {e}", partial.display())))?;
+    std::fs::rename(&partial, path).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        sc_error::Error::file(format!("writing `{}`: {e}", path.display()))
+    })
+}
+
+/// `feldspar restore FILE [database flags] [server flags]` — everything FILE
+/// holds, restored as the Restore dialog restores it with nothing unticked.
+///
+/// The restore runs over the services `serve` assembles, because it is the
+/// dialog's restore: modules are reinstalled into `--modules-dir`, applications
+/// are built, triggers and agents are validated against the registries a server
+/// would hold. Which is why it takes the server flags — the same ones, from the
+/// same environment, the server on this database is started with.
+///
+/// A server already running on the database does not see the result until it
+/// is restarted: its catalog, mounts and trigger set were loaded at its boot.
+async fn restore_command(args: &[String]) -> Result<()> {
+    let (file, rest) = file_argument("restore", args)?;
+    let (db, rest) = DbConfig::extract(rest)?;
+    let config = ServerConfig::from_args(serving_defaults(&db).iter().chain(&rest))?;
+
+    // The file before the database: one that is not a backup is refused before
+    // anything has been connected to, let alone written.
+    let archive = std::fs::read(&file)
+        .map_err(|e| sc_error::Error::file(format!("reading `{}`: {e}", file.display())))?;
+    let (contents, manifest) = sc_server::inspect_backup(&archive)?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    // A module reinstalled from a registry resolves its host's name, so the
+    // resolver `serve` starts is started here too.
+    sc_dns::init()?;
+    let catalog = connect_catalog(&db).await?;
+    sc_log::set_log_sql(false);
+    connect_stored_file_stores(&catalog).await?;
+    connect_stored_databases(&catalog).await?;
+    let Services { apps, .. } =
+        install_services(&catalog, &config, &ServiceManager::default()).await?;
+
+    eprintln!(
+        "feldspar: restoring {} ({}, written {})",
+        file.display(),
+        manifest
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("a backup"),
+        manifest
+            .get("created_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("at an unrecorded time"),
+    );
+    let selection = sc_server::BackupSelection::everything(&contents);
+    let report = sc_server::restore_backup(&catalog, &apps, &archive, &selection).await?;
+    for line in &report.restored {
+        println!("restored {line}");
+    }
+    for line in &report.warnings {
+        eprintln!("warning: {line}");
+    }
+    eprintln!(
+        "feldspar: restored {} item(s) with {} warning(s); restart any server running on \
+         this database to load them",
+        report.restored.len(),
+        report.warnings.len()
+    );
+    Ok(())
+}
+
 /// `feldspar auth SUBCOMMAND …` — sessions for driving an application without a
 /// browser to sign in with.
 async fn auth_command(args: &[String]) -> Result<()> {
@@ -1440,7 +1725,7 @@ async fn i18n_command(args: &[String]) -> Result<()> {
 }
 
 /// `feldspar demo analytics [--replace] [database flags]`: the Analytics UI's
-/// demo tables and datasets (analytics TODO A1.18, A2.15).
+/// demo tables and datasets (analytics TODO A1.18, A2.15, A5.14).
 async fn demo_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
     let parsed = sc_cli::demo::DemoArgs::parse(&rest)?;
@@ -1460,6 +1745,9 @@ async fn demo_command(args: &[String]) -> Result<()> {
     }
     for name in &report.kept {
         println!("kept the dataset {name}, which was already there");
+    }
+    if let Some(reason) = &report.skipped {
+        println!("{reason} (docs/OPERATIONS.md §10 says how to install PostGIS)");
     }
     println!(
         "Now run `feldspar serve`, sign in, and open Analytics in the admin sidebar \
@@ -1679,17 +1967,15 @@ async fn i18n_translate(
     }
     let catalog_db = connect_catalog(&db).await?;
 
-    // Which model. A named provider, or the only sensible default: the first
-    // one configured, with its default model. The error says what to configure
-    // rather than what failed.
+    // Which model. A named provider, or the installation's default provider,
+    // with its default model. The error says what to configure rather than what
+    // failed.
     let provider = match &parsed.provider {
         Some(name) => sc_llm::load_llm_provider_by_name(&catalog_db, name)
             .await?
             .ok_or_else(|| sc_error::Error::not_found(format!("no LLM provider named `{name}`")))?,
-        None => sc_llm::list_llm_providers(&catalog_db)
+        None => sc_llm::default_llm_provider(&catalog_db)
             .await?
-            .into_iter()
-            .next()
             .ok_or_else(|| {
                 sc_error::Error::config(
                     "no LLM provider is configured — add one in Settings → LLM providers, \
@@ -1792,7 +2078,11 @@ fn print_usage() {
     eprintln!("                      [--url ORIGIN] [--name NAME] [database flags]");
     eprintln!("  feldspar mcp-token list [--json] [database flags]");
     eprintln!("  feldspar mcp-token revoke ID [database flags]");
+    eprintln!("  feldspar add-user EMAIL --role ROLE [--password [VALUE]] [database flags]");
+    eprintln!("  feldspar modify-user EMAIL [--role ROLE] [--password [VALUE]] [database flags]");
     eprintln!("  feldspar app list [--json] [database flags]");
+    eprintln!("  feldspar backup FILE [database flags]");
+    eprintln!("  feldspar restore FILE [database flags] [server flags]");
     eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
     eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
@@ -1863,6 +2153,30 @@ fn print_usage() {
        once, alone on stdout; the id to revoke it by and the `claude mcp add`
        line go to stderr. Turn the server on with `set-cfg mcp_enabled true`.
 
+  add-user / modify-user: create an account, or change one's role or password,
+       straight in the database — the way back in for an admin who has forgotten
+       their password on a server with no SMTP to send a reset link. ROLE is a
+       role name (admin) or number (1). A password is never needed on the command
+       line: leave --password out of add-user, or give it no value, and it is
+       asked for without echo (or read as one line from stdin when that is not a
+       terminal). A password starting with -- is written --password=VALUE.
+
+  backup: writes everything this installation has to FILE, as the zip
+       Settings → Backup downloads with every box ticked but SSL / TLS: the
+       certificate, its key and the names it covers belong to this machine.
+       The file's directory must exist; a FILE already there is replaced only
+       once the new one is complete.
+
+  restore: restores everything in FILE — a backup from `feldspar backup`, from
+       Settings → Backup, or from Saltcorn 1 — exactly as the Restore dialog
+       does with nothing unticked. A restore adds and does not destroy: it
+       drops no table, deletes no row and replaces no account, and each thing
+       it left alone or could not restore is printed with why. It assembles what
+       `serve` does to do it (modules are reinstalled, applications built), so
+       give it the server flags the server is started with, or the same
+       --environment. A server already running on the database loads the
+       result when it is restarted.
+
   app list: every application with its framework and the project directory
        its source is in on this machine; --json prints an array of
        {{id, name, subdomain, framework, file_store, source_dir, project_dir}}.
@@ -1932,5 +2246,12 @@ fn print_usage() {
   `secure_cookies`, `https_port`, `browser`, `browser_sandbox`, `cmdstan` and the `stan_*` keys, so `serve --environment NAME` needs none of those flags —
   and so a build from the command line writes the same application URL into the
   generated documentation that the server would."
+    );
+    eprintln!();
+    eprintln!(
+        "  it may also pin the TLS settings — `ssl_mode`, `acme_contact_email`,
+  `acme_directory_url`, `redirect_http_to_https` and `ssl_extra_domains` (a list). A key
+  given there wins over the stored setting: Settings → SSL / TLS shows it read-only, and
+  neither a restore nor Clear all can change it."
     );
 }

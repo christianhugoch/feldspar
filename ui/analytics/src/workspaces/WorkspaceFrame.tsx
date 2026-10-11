@@ -6,6 +6,10 @@
 // (`StateSaver`), and leaving the workspace — another route, a closed tab —
 // saves what is pending. So "reopen the workspace and it is as it was" is the
 // frame's promise, and no kind has to remember to keep it.
+//
+// A workspace the person may not change (A9.4) — a fixed application's
+// dashboard, one shared with their role — is used the same way, and nothing
+// is saved: what they do on it is theirs until they leave.
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Alert from "react-bootstrap/Alert";
@@ -14,11 +18,22 @@ import Spinner from "react-bootstrap/Spinner";
 import { api, errorMessage } from "../api";
 import type { GetWorkspaceResponse } from "../client";
 import { T, useT } from "../i18n";
+import { usePane } from "../panes";
+import { useShell } from "../shell";
 import { StateSaver, type SaveStatus } from "./saver";
 
 /** The Data explorer, loaded when a workspace of its kind opens: it brings
  * ECharts, which the front page does not need. */
 const DataExplorer = lazy(() => import("../explorer/DataExplorer").then((m) => ({ default: m.DataExplorer })));
+/** The Report, loaded when one opens: its panels draw with ECharts too. */
+const ReportWorkspace = lazy(() => import("../report/ReportWorkspace").then((m) => ({ default: m.ReportWorkspace })));
+/** The Map workspace, loaded when one opens; MapLibre comes later still, with
+ * its map. */
+const MapWorkspace = lazy(() => import("../map/MapWorkspace").then((m) => ({ default: m.MapWorkspace })));
+/** The Dashboard, loaded when one opens. */
+const DashboardWorkspace = lazy(() =>
+  import("../dashboard/DashboardWorkspace").then((m) => ({ default: m.DashboardWorkspace })),
+);
 
 /** How long after the last change the state is saved. */
 const SAVE_DELAY_MS = 600;
@@ -30,10 +45,17 @@ export type WorkspaceState = Record<string, unknown>;
 export type WorkspaceProps = {
   state: WorkspaceState;
   setState: (update: (state: WorkspaceState) => WorkspaceState) => void;
+  /** The workspace's name: a printed report's title. */
+  name?: string;
+  /** Whether the person may not change it (A9.4): a kind that can, hides
+   * what would change it. Nothing is saved either way. */
+  readOnly?: boolean;
 };
 
 export function WorkspaceFrame({ id }: { id: string }) {
   const { t } = useT();
+  const pane = usePane();
+  const { application } = useShell();
   const [workspace, setWorkspace] = useState<GetWorkspaceResponse | null>(null);
   const [state, setLocal] = useState<WorkspaceState>({});
   const [error, setError] = useState<string | null>(null);
@@ -78,22 +100,25 @@ export function WorkspaceFrame({ id }: { id: string }) {
 
   const latest = useRef(state);
   latest.current = state;
+  const readOnly = workspace?.may_change === false;
   const setState = useCallback(
     (update: (s: WorkspaceState) => WorkspaceState) => {
       const next = update(latest.current);
       latest.current = next;
       setLocal(next);
-      saver.update(next);
+      if (!readOnly) saver.update(next);
     },
-    [saver],
+    [saver, readOnly],
   );
+  // A fixed application showing one workspace has no list to go back to.
+  const alone = application?.mode === "fixed" && application.workspaces.length === 1;
 
   if (error) {
     return (
       <div className="an-page">
         <Alert variant="danger">
           {error}{" "}
-          <a href="#/">
+          <a href={pane.href({ name: "home" })}>
             <T text="Back to the workspaces" />
           </a>
         </Alert>
@@ -110,30 +135,48 @@ export function WorkspaceFrame({ id }: { id: string }) {
   return (
     <div className="d-flex flex-column h-100">
       <div className="d-flex align-items-center gap-3 px-3 py-2 border-bottom">
-        <a href="#/" className="text-secondary">
-          ← <T text="Workspaces" />
-        </a>
+        {!alone && (
+          <a href={pane.href({ name: "home" })} className="text-secondary">
+            ← <T text="Workspaces" />
+          </a>
+        )}
         <strong>{workspace.name}</strong>
         <span className="text-secondary small ms-auto" aria-live="polite">
-          {status === "saved" && t("Saved")}
-          {(status === "pending" || status === "saving") && t("Saving…")}
-          {status === "failed" && t("Not saved — will retry on the next change")}
+          {readOnly && !alone && t("Shared with you: your changes are not saved")}
+          {!readOnly && status === "saved" && t("Saved")}
+          {!readOnly && (status === "pending" || status === "saving") && t("Saving…")}
+          {!readOnly && status === "failed" && t("Not saved — will retry on the next change")}
         </span>
       </div>
       <div className="flex-grow-1" style={{ minHeight: 0 }}>
-        <KindScreen kind={workspace.kind} state={state} setState={setState} />
+        <KindScreen
+          kind={workspace.kind}
+          name={workspace.name}
+          state={state}
+          setState={setState}
+          readOnly={readOnly}
+        />
       </div>
     </div>
   );
 }
 
 /** The kind's screen, handed the state and its setter. Each kind's arrives with
- * its milestone: A2's Data explorer first. */
+ * its milestone: A2's Data explorer first, then A4's Report, A5's Map and A6's
+ * Dashboard. */
+const SCREENS: Record<string, typeof DataExplorer> = {
+  data_explorer: DataExplorer,
+  report: ReportWorkspace,
+  map: MapWorkspace,
+  dashboard: DashboardWorkspace,
+};
+
 function KindScreen({ kind, ...props }: WorkspaceProps & { kind: string }) {
-  if (kind === "data_explorer") {
+  const Screen = SCREENS[kind] ?? null;
+  if (Screen) {
     return (
       <Suspense fallback={<Spinner animation="border" size="sm" className="m-3" />}>
-        <DataExplorer {...props} />
+        <Screen {...props} />
       </Suspense>
     );
   }

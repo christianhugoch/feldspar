@@ -62,11 +62,17 @@ pub async fn serve(
     crate::requests::install_app_requests(&config, &endpoints, &handlers, &sessions, &apps)?;
     // An application mounted from here on is served on a subdomain the
     // certificate has to cover, so the mount registry is given the certificate
-    // before the first request can arrive (§13.5). Only ACME has anything to do
-    // with this: a pasted certificate covers the names the admin's certificate
-    // covers, and there is nothing for this process to order.
-    if let TlsSettings::Acme { certificate, .. } = &config.tls {
-        apps.set_certificate(certificate.clone());
+    // before the first request can arrive (§13.5). Only ACME has anything to
+    // order: a pasted certificate covers the names the admin's certificate
+    // covers, and is installed only so it can be asked which those are.
+    match &config.tls {
+        TlsSettings::Acme { certificate, .. } => apps.set_certificate(certificate.clone()),
+        // A pasted certificate orders nothing, but the admin UI's move to a
+        // subdomain of its own asks whether it names the new host.
+        TlsSettings::Custom { certificate, .. } => {
+            apps.set_certificate(Arc::new(crate::tls::PastedCertificate::new(certificate)));
+        }
+        TlsSettings::Off => {}
     }
     let app = build_router_with_apps(&endpoints, handlers, sessions, &config, apps)?;
 

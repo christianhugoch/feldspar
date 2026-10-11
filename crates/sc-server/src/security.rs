@@ -78,24 +78,62 @@ frame-ancestors 'none'; \
 object-src 'none'";
 
 /// The Content-Security-Policy served with the **Analytics UI** under
-/// `/analytics/` (analytics TODO A1.14).
+/// `/analytics/` (analytics TODO A1.14), before the map hosts are added.
 ///
-/// The admin SPA's strict policy, word for word, for now: the bundle is React
-/// and react-bootstrap over the same stylesheet, and nothing in it is inline.
-/// It is a constant of its own, served per response on its own route like the
-/// IDE's, because the milestones after this one add renderers that will need
-/// their own relaxations — ECharts' SVG export, MapLibre's workers and tile
-/// hosts — and those must widen this policy and never the admin UI's.
+/// The admin SPA's strict policy, with two words more, both for MapLibre
+/// (analytics TODO A5.6): `blob:` in `img-src`, because MapLibre decodes a
+/// tile's or a sprite's image through an object URL where a browser cannot
+/// make an `ImageBitmap`, and an explicit `worker-src 'self'`, because its
+/// worker is a same-origin module (the bundle sets its URL) and never a
+/// `blob:` — which is the relaxation MapLibre's documentation otherwise asks
+/// for, and this policy does not make. It is a constant of its own, served per
+/// response on its own route like the IDE's, so that what the renderers need
+/// widens this policy and never the admin UI's.
+///
+/// What is served is [`analytics_content_security_policy`]: this, with the
+/// hosts the base maps load from.
 pub const ANALYTICS_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 script-src 'self'; \
 style-src 'self' 'unsafe-inline'; \
-img-src 'self' data:; \
+img-src 'self' data: blob:; \
 font-src 'self'; \
 connect-src 'self'; \
+worker-src 'self'; \
 base-uri 'none'; \
 form-action 'self'; \
 frame-ancestors 'none'; \
 object-src 'none'";
+
+/// [`ANALYTICS_CONTENT_SECURITY_POLICY`], with the origins a map may load its
+/// base map from (Settings → Maps, `sc_config::MapSettings::hosts`) in
+/// `connect-src` — MapLibre fetches a style, its tiles, glyphs and sprites —
+/// and in `img-src`.
+///
+/// Each host is an origin `sc_config::origin_of` parsed — a scheme, a host and
+/// a port — so nothing in it can end a source list; one that is not is left
+/// out rather than trusted.
+pub fn analytics_content_security_policy(map_hosts: &[String]) -> String {
+    let hosts: Vec<&str> = map_hosts
+        .iter()
+        .map(String::as_str)
+        .filter(|h| sc_config::origin_of(h).is_ok_and(|origin| origin == *h))
+        .collect();
+    if hosts.is_empty() {
+        return ANALYTICS_CONTENT_SECURITY_POLICY.to_owned();
+    }
+    let list = hosts.join(" ");
+    ANALYTICS_CONTENT_SECURITY_POLICY
+        .replacen(
+            "img-src 'self' data: blob:; ",
+            &format!("img-src 'self' data: blob: {list}; "),
+            1,
+        )
+        .replacen(
+            "connect-src 'self'; ",
+            &format!("connect-src 'self' {list}; "),
+            1,
+        )
+}
 
 /// [`CONTENT_SECURITY_POLICY`], with the **applications** the admin may frame.
 ///
@@ -113,6 +151,14 @@ object-src 'none'";
 /// like any other). `'self'` is there so the admin may frame its own pages —
 /// the IDE already does.
 ///
+/// The base domain itself is listed beside its subdomains, for two reasons
+/// that arrive together: once the admin UI has moved to a subdomain of its own
+/// (Settings → Development), an application may be served on the base domain
+/// (`@`), and the admin UI may move *back* there. The second is also why
+/// `connect-src` names the same hosts: the move's dialog asks the new address
+/// for `/health` from the browser before it lets the admin follow, because only
+/// the browser can say whether its DNS and its trust store accept the new name.
+///
 /// A deployment with no base domain serves no applications at all
 /// ([`build_router_with_apps`](crate::build_router_with_apps) refuses to start
 /// with mounts and no base domain), so there is nothing to allow and the strict
@@ -122,9 +168,10 @@ pub fn admin_content_security_policy(base_domain: Option<&str>) -> String {
         return CONTENT_SECURITY_POLICY.to_owned();
     };
     let base = base.trim_start_matches('.');
+    let hosts = format!("{base} {base}:* *.{base} *.{base}:*");
     CONTENT_SECURITY_POLICY.replacen(
         "connect-src 'self'; ",
-        &format!("connect-src 'self'; frame-src 'self' *.{base} *.{base}:*; "),
+        &format!("connect-src 'self' {hosts}; frame-src 'self' {hosts}; "),
         1,
     )
 }
@@ -519,15 +566,22 @@ mod tests {
     #[test]
     fn the_applications_subdomains_are_the_only_thing_the_admin_may_frame() {
         let policy = admin_content_security_policy(Some("example.com"));
+        let hosts = "example.com example.com:* *.example.com *.example.com:*";
         assert!(
-            policy.contains("frame-src 'self' *.example.com *.example.com:*;"),
+            policy.contains(&format!("frame-src 'self' {hosts};")),
+            "{policy}"
+        );
+        assert!(
+            policy.contains(&format!("connect-src 'self' {hosts};")),
             "{policy}"
         );
         // ...and that is the *whole* of the difference: a directive that gained
         // a source here would relax the admin UI, which the strict policy is
         // there to keep from happening by accident.
         assert_eq!(
-            policy.replace("frame-src 'self' *.example.com *.example.com:*; ", ""),
+            policy
+                .replace(&format!("frame-src 'self' {hosts}; "), "")
+                .replace(&format!(" {hosts}"), ""),
             CONTENT_SECURITY_POLICY,
         );
         // Nothing the IDE's policy relaxes arrives with it.

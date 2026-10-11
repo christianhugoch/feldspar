@@ -16,3 +16,18 @@ mod hypothesis;
 
 #[path = "fit_outputs.rs"]
 mod fit_outputs;
+
+#[path = "layers.rs"]
+mod layers;
+
+#[path = "maps.rs"]
+mod maps;
+
+#[path = "map_workspace.rs"]
+mod map_workspace;
+
+#[path = "cards.rs"]
+mod cards;
+
+#[path = "crossfilter.rs"]
+mod crossfilter;

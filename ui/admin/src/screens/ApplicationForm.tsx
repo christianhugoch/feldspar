@@ -459,9 +459,13 @@ export function ApplicationForm({
                     onChange={(e) => setSubdomain(e.target.value)}
                   />
                   <Form.Text muted>
-                    {t("Served at {subdomain}.your-domain.", {
-                      subdomain: subdomain || "<subdomain>",
-                    })}
+                    {subdomain.trim() === "@"
+                      ? t(
+                          "Served on the base domain itself. Allowed once the admin UI has moved to a subdomain of its own (Settings → Development).",
+                        )
+                      : t("Served at {subdomain}.your-domain.", {
+                          subdomain: subdomain || "<subdomain>",
+                        })}
                   </Form.Text>
                 </Form.Group>
               </Col>

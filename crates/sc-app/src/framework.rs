@@ -568,7 +568,11 @@ pub async fn validate_config_in(
     // is what turns an unknown store name from a build-time failure into a
     // save-time one, where the admin is still looking at the form.
     let spec = sc_catalog::resolve_options(catalog, spec).await?;
-    validate_against(fw, &spec)
+    validate_against(fw, &spec)?;
+    if let Some(factory) = framework_factory(&fw.name) {
+        factory.check_config_against(catalog, &fw.config).await?;
+    }
+    Ok(())
 }
 
 /// Check a config's **structure** only: every setting present, of the right

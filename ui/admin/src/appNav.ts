@@ -9,6 +9,7 @@
 // and when one is "here"; `AppSidebar.tsx` draws them.
 
 import { ideUrl } from "./App";
+import { appUrl } from "./adminAddress";
 import type { ListAgentsResponse, ListApplicationsResponse } from "./client";
 
 type AppItem = ListApplicationsResponse[number];
@@ -63,12 +64,9 @@ export function linkKey(link: Pick<AppNavLink, "id" | "target">): string {
 /** Where the admin itself is served: what an application's subdomain sits on. */
 export type AdminLocation = Pick<Location, "protocol" | "host">;
 
-/** The URL an app is served at: `<subdomain>.<the admin's host>`. The admin runs
- * on the base domain, so its own host (with port) is what the subdomain sits on —
- * `blog.example.com` or, in local dev, `blog.localhost:3032`. */
-export function appUrl(subdomain: string, admin: AdminLocation = window.location): string {
-  return `${admin.protocol}//${subdomain}.${admin.host}`;
-}
+// Where an app is served is the base domain's business, not the admin's own
+// host's — the two part company once the admin UI moves to a subdomain.
+export { appHost, appUrl, setServedBaseDomain } from "./adminAddress";
 
 /** The coding agent that builds `app`, by name, if there is one.
  *

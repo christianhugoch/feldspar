@@ -64,8 +64,13 @@ impl PublicOrigin {
         if self.secure { "https" } else { "http" }
     }
 
-    /// The host an application is served on: `blog.example.com`.
+    /// The host an application is served on: `blog.example.com`, or the base
+    /// domain itself for the application whose subdomain is `@` (which it may
+    /// be once the admin UI has moved to a subdomain of its own).
     pub fn host_for(&self, subdomain: &str) -> String {
+        if subdomain == "@" {
+            return self.base_domain.clone();
+        }
         format!("{subdomain}.{}", self.base_domain)
     }
 
@@ -94,6 +99,13 @@ mod tests {
         let origin = PublicOrigin::new("example.com", 3032);
         assert_eq!(origin.host_for("blog"), "blog.example.com");
         assert_eq!(origin.url_for("blog"), "http://blog.example.com:3032");
+    }
+
+    #[test]
+    fn the_root_application_is_on_the_base_domain() {
+        let origin = PublicOrigin::new("example.com", 443).secure(true);
+        assert_eq!(origin.host_for("@"), "example.com");
+        assert_eq!(origin.url_for("@"), "https://example.com");
     }
 
     #[test]

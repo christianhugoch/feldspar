@@ -90,7 +90,8 @@ feldspar/
 │  ├─ sc-dataset/                 # 5. Datasets (§14.4): a base and an ordered list of
 │  │                              #    operations, compiled into one sc-query statement; the
 │  │                              #    stage shapes and grain, reading a stage, the snapshot a
-│  │                              #    fit records, and `_fd_datasets`
+│  │                              #    fit records, `_fd_datasets`, and reading as the caller
+│  │                              #    (`access.rs`: `Caller`, `Reader::guard`, `Sharing`, §14.9)
 │  ├─ sc-action/                  # 6. Action trait + registry, Event/Trigger model, `_fd_triggers`
 │  │                              #    storage & validation, the live set, dispatch, scheduler
 │  ├─ sc-llm/                     # 6. object-safe LlmProvider seam over a provider crate
@@ -110,7 +111,8 @@ feldspar/
 │  ├─ sc-analytics/               # 6. The Analytics UI's server half (§14.5): workspaces
 │  │                              #    (`_fd_workspaces`), the demo data, plot specs and their
 │  │                              #    stats, tests, a fit's outputs drawn (above sc-model), and —
-│  │                              #    as the analytics milestones arrive — panels, map layers
+│  │                              #    as the analytics milestones arrive — panels, map layers,
+│  │                              #    and the Analytics framework's policy (`app.rs`, §14.9)
 │  ├─ sc-stan/                    # 6. Bayesian models with Stan, beside sc-model (§14.2,
 │  │                              #    "Bayesian models"): CmdStan discovery (`--cmdstan`,
 │  │                              #    `$CMDSTAN`, `~/.cmdstan`) and `feldspar cmdstan install`;
@@ -225,6 +227,7 @@ graph TD
   email --> config["sc-config"]
   config --> catalog["sc-catalog"]
   auth --> catalog
+  llm --> config
   llm --> catalog
   catalog --> db["sc-db"]
   catalog --> pg
@@ -267,11 +270,11 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
 | `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-llm` | `sc-catalog` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-llm` | `sc-catalog` `sc-config` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-dataset` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-dataset` | `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
-| `sc-analytics` | `sc-catalog` `sc-dataset` `sc-db` `sc-db-sqlite` `sc-error` `sc-model` `sc-query` `sc-types` |
+| `sc-analytics` | `sc-catalog` `sc-config` `sc-dataset` `sc-db` `sc-db-sqlite` `sc-error` `sc-model` `sc-query` `sc-types` |
 | `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
@@ -284,7 +287,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
 | `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
-| `sc-cli` | `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
+| `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
 
@@ -762,6 +765,15 @@ model keeps them apart. And **introspection never resolves a column back to a ri
 `_fd_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
 is exactly the magic that makes a legacy database behave surprisingly.
 
+**Geometry is a basic type** (analytics TODO A5.1, §14.6): `BasicType::Geometry(GeometryKind)`,
+where the kind is any geometry, a point, a line, a polygon or one of the multi variants. Its
+column is PostGIS's `geometry(<Kind>,4326)`, and its value is a **GeoJSON geometry object in a
+`Value::Json`** — there is no geometry `Value` variant, because everything above the driver
+already moves JSON, and the Postgres driver converts at the wire. It is basic rather than rich
+because the kind is part of the column's SQL type, not an attribute of a field over one; the
+field types are named `geometry`, `geometry_point`, `geometry_polygon`, … (never `point` or
+`polygon`, which are Postgres's own non-geographic types and keep meaning those).
+
 ### 6.2 Fields — the `BaseField` / `DataField` / `FormField` split
 
 GOALS calls out that v1 conflated DB fields and form fields. v2 separates them explicitly:
@@ -1077,6 +1089,16 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   looking correct. The database role needs only `LOGIN` and ownership of its own objects; CI
   creates one deliberately rather than using the image's bootstrap superuser, and a deployment
   that gets this wrong has no enforcement to fall back on but the runtime checks above.
+
+**Aggregated reads: the Analytics UI** (analytics milestone A9; §14.9). A dataset is read as one
+statement that the database counts, bins and sums, and it may reach many tables: a base, a Join's
+other side, a Ⱶ path's target. The same rule applies to each of them, by one guard
+(`sc_dataset::Reader::guard`). After the statement is built, the guard replaces every table it
+reads with the rows of that table the caller may read, as a derived table filtered by the
+ownership formula's translation. Row-level security is left to the policies, inside a read-only
+transaction carrying the caller. The REST provider's fetch-then-filter fallback has no
+equivalent here, so a formula that does not translate is **refused** rather than filtered after
+the fact: a count over rows nobody could filter would show rows the caller may not read.
 
 **The Ⱶ operator is an identifier character, not an operator.** U+2C75 (Latin capital letter
 half H, category Lu) is a valid JavaScript identifier character, so `publisherⱵname` is a
@@ -1536,14 +1558,18 @@ erDiagram
     json base "a table, or another dataset; never changed"
     json operations "the ordered list of { id, enabled, kind, params }"
     json attributes
+    uuid owner "A9.1: -> users.id, by value; null is the admin's"
+    int share_role "A9.1: the role floor it is shared with; null for its owner alone"
   }
   WORKSPACES["_fd_workspaces"] {
     uuid id PK
     text name
     text kind "one of the six; only those whose milestone arrived can be made"
     json state "the kind's own, restored when it is opened"
-    uuid created_by "-> users.id, by value"
+    uuid created_by "-> users.id, by value; its owner (A9.1)"
     timestamp updated_at
+    int share_role "A9.1: the role floor it is shared with; null for its owner alone"
+    uuid application "A9.3: -> _fd_applications.id, by value; null for the unrestricted UI"
   }
   INSTANCES["_fd_model_instances"] {
     uuid id PK
@@ -3162,6 +3188,36 @@ Phase 1):
   `native_apply_patch` is still offered `coding`'s `apply_patch_…` as a **function tool** taking the
   V4A patch text. The capability is resolved and stored, and nothing reads it yet.
 
+**A provider from `feldspar.toml`, and the default provider** (as built). An environment may
+supply one provider (`[environments.NAME.llm_provider]`: `name`, `backend`, `api_key`,
+`base_url`, `description`, `default_model`, and `[[…models]]` entries carrying a model's settings
+by their declared names). This follows the TLS keys of §13.5: the file wins, and the admin can
+use the provider but not change it.
+
+- **It is never a row.** `sc_llm::set_host_llm_provider` holds a checked `HostLlmProvider` on
+  the `Catalog`, in an opaque slot like the other hosts. `storage`'s readers merge it in: listed,
+  found by id and by name, with its models. Its writers refuse it: saving or deleting it, and
+  adding, changing or deleting its models. So its key is in no backup, Clear all leaves it, and
+  a restore cannot overwrite it. The ids are UUID v5 of the name, so they are the same on every
+  boot.
+- **Checked at boot.** It is checked the way a save is checked: the backend, the key, each
+  model's settings against the backend's spec, one default. A stored provider with the same
+  name stops the boot rather than being shadowed, because shadowing it would quietly change
+  which key the admin's agents are billed to.
+- ***Test* sends the file's settings as they are.** It never merges the form's settings over
+  them, and it only tests the models the file lists. Merging would let an admin who cannot see
+  the key send it to a `base_url` of their own.
+- **The default provider** is what a caller uses when nothing names a provider: a new
+  application's builder agent, `i18n translate`, `eval`, and the first choice in the agent
+  form. Callers use `sc_llm::default_llm_provider`, which checks, in order:
+  1. the admin's pick (`default_llm_provider` in `_fd_config`, an internal key set by
+     `PUT /api/llm-providers/{id}/default`);
+  2. the file's provider;
+  3. the first provider by name.
+
+  A pick whose provider has been deleted falls through to the next. The admin API reports
+  `from_config_file` and `is_default` on each provider.
+
 ### 11.2 Agents, traits and the loop (`sc-agent`)
 
 ```rust
@@ -3886,7 +3942,9 @@ Four more decisions in that half:
 **An application's custom SQL queries, and where the line is drawn.** The third part is
 `describe_applications`, `save_api_query` and `delete_api_query` (§13.4). An application record
 carries a subdomain, a framework and its settings, a table subset, file stores, exposed triggers,
-static directories and a CSP; **one** of those is the agent's to write and the rest are not. A
+static directories and a CSP; **one** of those is the agent's to write and the rest are not
+(since amended: `update_application` changes the connected tables, the static directories and,
+behind `allow_access_changes`, the CSP — see the creating-an-application part below). A
 framework's `store` and `source` say where somebody's code lives, a CSP is a security boundary, a
 subdomain is a DNS record somebody else configured — none of them is *building*, and all of them
 are the kind of setting whose damage is invisible from the transcript. A custom SQL query is the
@@ -6051,6 +6109,19 @@ has to fit on a 1 GB machine. For the same reason a build command of exactly
 without an `npm` process holding ~60 MB for the length of the build. Anything else goes to npm
 as written.
 
+#### Analytics: part of the Analytics UI as an application
+
+The framework **Analytics** (`analytics`; analytics milestone A9) serves the Analytics UI's own
+bundle on an application's subdomain, in a restricted shell, to the application's users. It has
+no build step and no source of its own. Its settings say what part of the UI it shows: some
+workspaces the admin made (*fixed*), or a small Analytics UI of the users' own over the
+application's tables (*self-serve*). Its endpoints are a subset of the admin API, dispatched on
+the application's host under the application's role floor. It added one general hook to the
+framework model: `FrameworkFactory::check_config_against(catalog, config)`, a check of the
+settings against the database. It runs when the application is **saved**, and only then, as the
+store check above does, so that a fixed application naming a workspace that is not there is
+refused on the form. The design is §14.9.
+
 ### 13.4 API providers
 
 ```rust
@@ -6524,7 +6595,14 @@ remains available.
 `off`/`letsencrypt`/`custom`, the pasted chain and key, the ACME contact and directory URL,
 extra domains, `redirect_http_to_https`); the HTTPS port is the host's, not a stored
 setting — `https_port` in the `feldspar.toml` environment or `serve --https-port`, default
-443 — so a backup does not carry it to another deployment; `sc-server::tls` turns those into a
+443 — so a backup does not carry it to another deployment. The same environment may also
+**pin** `ssl_mode`, `acme_contact_email`, `acme_directory_url`, `redirect_http_to_https` and
+`ssl_extra_domains` (`sc_config::set_host_config`, held on the `Catalog` for the life of the
+process): a pinned key wins over its row, the settings screen shows it read-only (`host_keys`
+in the settings response), a save that would change it is refused, and a restore skips it. For
+installs with no file, **Clear all keeps the whole TLS section and `_fd_acme_cache`**, since
+losing them takes the host off the port its proxy forwards to at the next restart, and with
+it the admin UI that would put them back. `sc-server::tls` turns those into a
 serving plan and an `axum-server` acceptor — a fixed `rustls::ServerConfig` for a pasted
 certificate, `rustls-acme`'s resolver for an ACME one — and `sc-cli` reads the settings at
 boot, after the mounts, so the certificate covers the base domain plus every mounted app's
@@ -6564,6 +6642,43 @@ subdomain. Six decisions worth stating:
 With TLS on there are two listeners — the bind address (plain HTTP, redirecting with a **308**
 so a redirected `POST` stays a `POST`, unless the admin turns the redirect off) and the TLS
 port beside it — and one shutdown signal stops both.
+
+**Where the admin UI is served** (`admin_subdomain`, Settings → Development;
+`sc-server::admin_host`). By default the admin UI is the base domain and every host that names
+no application. An admin can move it to `<subdomain>.<base domain>`, which frees the base domain
+for an application whose subdomain is **`@`**. The move is a save, not a restart:
+
+- **Routing is live.** `AppMounts` holds the subdomain beside the mounts; the router gives that
+  host to the admin, and the bare base domain (and each extra base domain) to the `@`
+  application when one is mounted. With no `@` application, a page *navigation* to the base
+  domain gets a **307** to the admin host — only once that host's certificate is ready, and
+  never an API request, so the admin UI still open at the old address keeps working while it
+  waits.
+- **The certificate follows.** The admin subdomain is one more name `AppMounts` reports through
+  the `tls::Certificate` seam, so in ACME mode saving it orders a certificate exactly as mounting
+  an application does. `Certificate::status_for(host)` answers whether a handshake for the host
+  gets a certificate naming it: `ordering` (with the CA's last error) until the order deploys,
+  then `ready`. A pasted certificate (`tls::PastedCertificate`) is checked with `webpki` for the
+  name; TLS off is `plain_http`. `GET /api/settings/admin-address` reports it.
+- **The session follows.** The session cookie is host-only — a `Domain` attribute would give the
+  admin's credential to every application under the base domain — so the new host has no
+  session. `POST /api/settings/admin-address/handoff` mints a single-use token (two minutes,
+  bound to the admin host, held in memory) which `GET /_feldspar/admin-handoff?token=…` on the
+  new host exchanges for a fresh session of the same user, landing on Settings.
+- **The dialog** the save opens (`ui/admin` `AdminMove`) polls the address until the
+  certificate is ready, then fetches the new origin's `/health` from the browser (the admin
+  CSP's `connect-src` names the base domain and its subdomains for this), because only the
+  browser can say whether its DNS and trust store accept the name. Only then is *Go* enabled.
+
+Saves that would put the admin UI and an application on one host are refused (an application
+on the admin subdomain, `@` while the admin UI is on the base domain, moving the admin UI onto
+an application's subdomain or back under an `@` application), as is a move with no base domain.
+The admin subdomain is this host's, like its TLS settings: Clear all keeps it and a backup
+neither writes nor restores it. An application's stored `frame-ancestors`, widened for the base
+domain when it was created, is widened for the admin host as it is served
+(`sc_app::follow_admin_host`), so the builder's preview pane keeps working after a move. A
+preview of the `@` application is `<label>.<base domain>`, having no subdomain to put after
+the `--`.
 
 **Name resolution is this process's own** (`sc-dns`, layer 0), and turning TLS on is what
 first made that necessary. glibc's `getaddrinfo` `dlopen`s a shared object per module named on
@@ -6746,7 +6861,7 @@ of those endpoints are the SPA's own plumbing.
 - **Tier 1 — composite tools.** The ones §11.3's `admin_copilot` already defines:
   `describe_schema`, `edit_schema`, `describe_triggers`, `describe_action`, `save_trigger`,
   `delete_trigger`, `describe_apps`, `create_file_store`, `create_application`,
-  `set_application_tables`, `save_query`, `delete_query`. These exist *because* a
+  `update_application`, `save_query`, `delete_query`. These exist *because* a
   one-endpoint-one-tool projection is the wrong shape — `edit_schema` takes an ordered operation
   list because a schema is a set of connected tables and a per-operation tool turns a
   twelve-table domain into forty round trips; `describe_action` is progressive disclosure
@@ -6890,11 +7005,44 @@ MCP — carry to a working first draft with nobody opening a form. Three shared 
 - **`create_file_store`** makes a local store, or a **git** one cloned from a URL. A private SSH
   repository is two calls: `generate_deploy_key: true` creates nothing and returns the public key
   for the person to add, and the second call passes the `key_path` back.
-- **`set_application_tables`** connects tables to an application (`add`, `remove`, or the whole
-  list), saving through `save_application` and regenerating the client — the step between
+- Connecting the tables is `update_application`'s `tables` section (below) — the step between
   `edit_schema` and code, because the client is typed only for connected tables.
 
 `describe_applications` now carries each application's `id`, `project_dir` and `builder_agent`.
+
+**Changing an application: `update_application`** (`sc_app::mcp::update`). One tool with a
+section for each part of the record an agent may change, rather than one tool per part. Every
+tool is something the model reads and chooses between on every turn, and these all have the same
+shape: name the application, say what changes, save. An external agent building an app had to
+leave its static directories and CSP for a person, so the line drawn above moved for them:
+
+- **`tables`** (`add`, `remove`, `set`): the connected tables. Needs `allow_edit`. Connecting a
+  table does not open its rows; its own roles still decide.
+- **`static_dirs`** (`add` of `{ mount, file_store, path }`, where a mount already in use is
+  replaced; `remove` of mounts). Needs `allow_edit`. A store the app was not connected to is
+  connected. It is only an edit because a mount is not a grant: every file is still served
+  through `sc_files::check_access` as the request's user.
+- **`csp`** (`{ "frame-ancestors": ["'self'", "https://other.example.com"], "img-src": null }`)
+  replaces or removes single directives and keeps the rest. A CSP is a security boundary, so it
+  needs `allow_access_changes`, the grant that guards roles. Names must be lower-case letters
+  and `-`. A source must be one printable word with no `;` or `,`, because the policy goes into
+  a header verbatim.
+
+As `edit_schema` checks a grant per operation, this checks one per section, all before anything
+changes. A call with several sections is saved as one, and a refused section changes nothing.
+
+It saves through the server's own `listApplications` → `updateApplication`, through the
+`AdminHost`, with the changed keys written into the stored JSON. A mounted app is served from
+the record it was mounted with, and that handler is the one that refreshes the mount, so the
+running app serves the change at once. With no server (a CLI command) the record is saved
+through `save_application` and the client rewritten, and the answer says the change is served
+from the next start. `describe_applications` reports `file_stores`, `static_dirs` and `csp`.
+
+**`edit_schema` makes File fields.** `file_store` (with optional `file_folder` and `file_mime`)
+on a field makes a `DataFieldKind::File` stored as `text`. `type: "file"` is refused with a
+sentence saying what to write instead, and so is a store that does not exist. Before this, an
+agent that read `listFieldTypes` (where `file` is a *kind*) tried `type: "file"`, was refused,
+and kept images in a `bytes` column.
 
 **The creates run the server's own handlers.** Creating an application is a sequence — store,
 record, scaffold, builder agent, first build — two of whose steps need the agent registry and
@@ -6908,7 +7056,7 @@ half-creating.
 
 **The order is instructions, not code.** Both callers are told to build without asking what can
 be decided — React and a local store when the request is vague about technology — and to do
-tables first: `create_application`, one `edit_schema` batch, `set_application_tables`, then the
+tables first: `create_application`, one `edit_schema` batch, `update_application`, then the
 code, then a build. The MCP server says so in its `initialize` instructions, and the external
 agent then works in `project_dir` with its own file tools; `SKILL.md` adds the connect step to
 "the order that works".
@@ -7055,8 +7203,8 @@ pub trait ModelProviderHost: Send + Sync {
 ```
 
 The source compiles the dataset (§14.4) into one query and runs it on the primary database, as
-the admin: a model is the admin's, and the Analytics UI's A9 is where a restricted reader's
-permissions enter. A table's non-stored calculated fields are columns of a dataset over it where
+the admin (`Caller::admin()`): a model is the admin's. A restricted reader's permissions enter
+everywhere else the Analytics UI reads (§14.9), and a fit's output data is refused to them. A table's non-stored calculated fields are columns of a dataset over it where
 they become SQL; a provided table (§8.3) cannot be a dataset's base, because a dataset is one
 query. `ModelServices` in `sc-server/src/models.rs` assembles the pieces the way
 `AgentServices` and the trigger dispatcher already are: the registry, the `DatasetSource`, and
@@ -8113,15 +8261,16 @@ store; models (`sc-model`), the Analytics UI's workspaces and, from A2, panels r
 pub struct DatasetDef { id, name, description, base: Base, operations: Vec<Operation> }
 pub enum Base { Table { table }, Dataset { dataset: DatasetId } }
 pub struct Operation { id: String, enabled: bool, #[serde(flatten)] op: Op }  // { id, enabled, kind, params }
-pub enum Op { Calculated, Filter, Select, Sort, Window, Aggregate, Limit, Stack, Split, Complete, Join, Union }
+pub enum Op { Calculated, Filter, Select, Sort, Window, Aggregate, Limit, Stack, Split, Complete, Join, Union, SpatialJoin }
 ```
 
-The operations of milestone A1 are the goals document's, less the three that need later
-machinery (Neighbourhood column in A8, Model predictions in A7, Spatial join in A5):
+The operations are the goals document's, less the two that need later machinery
+(Neighbourhood column in A8, Model predictions in A7). Milestone A1 built the first twelve; the
+Spatial join and the geometry union came with A5 (§14.6):
 
 | keep the grain | change the grain | combine |
 |---|---|---|
-| Calculated column, Filter, Select columns, Sort, Window column (lag, lead, difference, running total and mean, rank, row number, group summaries, share, last value that was not missing) | Aggregate (count, distinct count, sum, mean, median, min, max, standard deviation, first, last; `distinct` with no summaries), Limit (first N, seeded sample, top N per group), Stack, Split (columns fixed when defined, pre-filled from the data), Complete (from the data, a number or date range, or every row of a key's table) | Join (inner, left, full; equality keys; "nearest earlier" on a date), Union (by column name, an optional source column) |
+| Calculated column, Filter, Select columns, Sort, Window column (lag, lead, difference, running total and mean, rank, row number, group summaries, share, last value that was not missing) | Aggregate (count, distinct count, sum, mean, median, min, max, standard deviation, first, last, union of geometries; `distinct` with no summaries), Limit (first N, seeded sample, top N per group), Stack, Split (columns fixed when defined, pre-filled from the data), Complete (from the data, a number or date range, or every row of a key's table) | Join (inner, left, full; equality keys; "nearest earlier" on a date), Union (by column name, an optional source column), Spatial join (intersects, contains, within, within a distance, nearest) |
 
 **Compiling: stages, merged or nested.** `compile(schema, library, def, options)` turns the
 definition into one `Compilation`: a report for the base and every operation (its status —
@@ -8165,7 +8314,8 @@ back typed by the stage's column types on both backends; a decimal is sent to th
 number.
 
 **The store** is `_fd_datasets` (`id`, `name` unique, `description`, `base`, `operations`,
-`attributes`), read strictly. What a save refuses: an empty or taken name, a missing base, a base
+`attributes`, and since A9 `owner` and `share_role`, which are not part of the definition,
+§14.9), read strictly. What a save refuses: an empty or taken name, a missing base, a base
 that leads back, a changed base ("clone it or create a new one"), and empty or repeated
 operation ids. Deleting a dataset other datasets read is refused, naming them; a model that uses
 it is listed by `datasetUsage` for the warning and afterwards stays listed with its error.
@@ -8177,6 +8327,72 @@ the enabled operations.
 **Migrating.** A model stored with its dataset written on it is moved by `TABLES_RENAME.sql`
 sections 7 (Postgres) and 8 (SQLite): one named dataset per old dataset, built as
 `DatasetDef::from_columns` builds it.
+
+#### Public datasets ("Get datasets")
+
+`sc_api::public_datasets` offers well-known open datasets, which the front page's *Get datasets*
+lists. Getting one downloads it, creates its tables and creates a dataset on its main table.
+There are 34, across four categories:
+
+- **Tabular**: penguins, iris, Titanic, tips, diamonds, Auto MPG, mtcars, wine quality, adult
+  income, abalone, California housing.
+- **Hierarchical**: Gapminder, Minnesota radon, sleep study, the Flare class tree, Australian
+  tourism, Northwind.
+- **Time series**: Mauna Loa CO₂, air passengers, the Nile, Seattle weather, global temperature,
+  S&P 500, US unemployment, OWID emissions, NYC flights 2013.
+- **Spatial**: world countries, US states, world cities, rivers, USGS earthquakes, Fiji
+  earthquakes, world airports, EU NUTS regions.
+
+- **Only metadata is in the codebase.** `public_datasets/catalogue.toml` is compiled in. It
+  holds each table's fields, types, keys and references, its source URLs, how to read each file,
+  and the licence and credit. The data is fetched from its publisher on request, so Feldspar
+  (MIT) redistributes nobody's data. The licence and credit go onto the picker and into the
+  descriptions of the tables and the dataset. Descriptions are our own words.
+- **Pinned sources.** GitHub sources are pinned to a commit (a test checks this), so a column
+  cannot be renamed under the field list. Live feeds (NOAA, USGS, OurAirports, Eurostat) are
+  read by column name.
+- **Licences were checked when the list was chosen.** Sets whose terms were not open enough
+  were left out: SILSO sunspots (non-commercial), and the Melbourne temperatures and stock
+  prices mirrors (no licence stated). The ISO 3166 region table (share-alike) was left out
+  because Natural Earth carries the same regions.
+- **Declared, not deduced** (unlike a CSV import, §13.1). The schema says how a value is read:
+  - a file with no header, columns lined up with spaces, `?`/`NA`/`NULL`/`-99` meaning none;
+  - a quarter (`1998 Q1`), a decimal year, milliseconds since 1970;
+  - a point from two columns, a date from year, month and day;
+  - a GeoJSON feature's id or depth.
+
+  A lookup table can be cut from a flat file (`distinct`): Gapminder's countries, radon's
+  counties, tourism's regions. A reference may be written as none when its row is missing
+  (`if_missing = "null"`): nycflights13's flights name planes and airports its other tables do
+  not have.
+- **`install(catalog, key, fetch, progress, context)`** does the whole job:
+  1. It downloads every file first (a failure creates nothing).
+  2. It creates the tables in one schema batch. A reference to a table created earlier in the
+     batch resolves; a reference to the table itself is added afterwards.
+  3. It writes the rows through the row layer (`rows::create_row_in`) in one transaction,
+     reading one record at a time. A table that references itself (Flare, the Northwind
+     employees, NUTS) is written parents first.
+  4. It moves supplied integer keys' identity sequences past the largest key, and creates the
+     dataset.
+
+  A row that will not go in drops the tables, and the error names the table, the row and the
+  field. If the tables are already there, it answers (or remakes) the dataset and downloads
+  nothing.
+- **Geometry.** A spatial entry needs PostGIS; the listing says why one cannot be got. A point
+  built from coordinates in a non-spatial entry (housing blocks, flights' airports) is left out
+  without PostGIS.
+- **API** (§14.5): `listPublicDatasets`, `installPublicDataset` and `getPublicDatasetInstall`.
+  An install is a background job in the server process (`sc-server`'s `public_datasets.rs`, the
+  shape `target_builds` gives a target build). The UI polls it for the file being downloaded or
+  the table being written and its row count. The download is `reqwest` with a 10-minute timeout
+  and a 256 MB cap.
+- **Speed.** At about 2,500 rows a second through the row layer (debug build), the largest
+  entry, nycflights13 (368,000 rows over five tables), takes about two and a half minutes.
+  Everything else takes under 40 seconds.
+- **Tests.** `sc-api`'s `tests/public_datasets.rs` installs real entries from synthetic stand-ins
+  in each source's format. The `#[ignore]`d `every_public_dataset_installs_from_its_source`
+  downloads and installs all of them; `FELDSPAR_PUBLIC_DATA_CACHE` and
+  `FELDSPAR_PUBLIC_DATASETS` let it reuse downloaded files and run only some entries.
 
 ### 14.5 The Analytics UI (`sc-analytics`, `ui/analytics`)
 
@@ -8191,17 +8407,18 @@ was left in the model's **view state** (§14.2, A3.4), which nothing about fitti
 reads. Split view (A4) holds either editor or a workspace on each side.
 
 **Workspaces** (`sc-analytics`, `_fd_workspaces`: `id`, `name`, `kind`, `state`, `created_by`,
-`updated_at`). `kind` is one of the six of the goals document (Data explorer, Report, Map,
+`updated_at`, and since A9 `share_role` and `application`, §14.9). `kind` is one of the six of the goals document (Data explorer, Report, Map,
 Dashboard, Simulation, Notebook). The store keeps any kind; `createWorkspace`
 refuses one whose milestone has not arrived, naming it ("arrives with milestone A2"), and
 `listWorkspaceKinds` says which are here so the create dialog lists the rest disabled — since
-A2, all but the Data explorer. `state` is JSON owned by the kind — an explorer's is its dataset and
+A6.1, the Simulation and the Notebook. `state` is JSON owned by the kind — an explorer's is its dataset and
 drop zones — saved as it changes (`saveWorkspaceState`) and restored when the workspace is
 opened.
 
-**The API** (`sc-api`'s `analytics.rs`, handled in `sc-server`'s `analytics.rs`; admin-only
-until A9): datasets (`listDatasets`, `getDataset`, `createDataset`, `updateDataset`,
-`deleteDataset`, `cloneDataset`, `datasetUsage`, `listDatasetTables`), and the reads, which take
+**The API** (`sc-api`'s `analytics.rs`, handled in `sc-server`'s `analytics.rs`; admin-only on
+the admin host, and a subset of it on an Analytics application's host under that application's
+role floor, §14.9): datasets (`listDatasets`, `getDataset`, `createDataset`, `updateDataset`,
+`shareDataset`, `deleteDataset`, `cloneDataset`, `datasetUsage`, `listDatasetTables`), and the reads, which take
 a **whole definition** in the body so the editor previews edits before they are saved
 (`datasetShapes` — every stage's shape plus what formulas may name; `validateDatasetOperation` —
 one operation compiled where it would go; `readDatasetStage`; `datasetColumnValues`); the model
@@ -8211,14 +8428,20 @@ at the fit's output data, each drawn by `render_plot` unless it is optional and 
 `dataset_changed` — beside the model endpoints of §14.2 (`cloneModel`, `patchModelViewState`,
 `cancelModelFit`, `listModelInstances`) and the fit's progress socket; and workspaces
 (`listWorkspaceKinds`, `listWorkspaces`, `getWorkspace`, `createWorkspace`, `updateWorkspace`,
-`saveWorkspaceState`, `deleteWorkspace`).
+`shareWorkspace`, `saveWorkspaceState`, `deleteWorkspace`); the shell (A9.3): `analyticsShell`; panels (A4.2): `renderPanel`, with a dashboard's conditions as `filters` (A6.4, §14.8); map layers (A5.5,
+§14.6): `layerData`, `layerTile`; maps (A5.6–A5.7, §14.6): `mapSettings`, `suggestMap`,
+`renderMap`; and the Map workspace (A5.8–A5.13, §14.7): `layerRows`, `selectFeatures`,
+`saveSelection`, `allowMapHost`, `listMapTools`, `runMapTool`. `saveWorkspaceState` checks a
+report's document and a map's spec (`check_state`) before it stores it.
 
 **The bundle** (`ui/analytics`): React, TypeScript and react-bootstrap over the generated client,
-like the admin SPA, but a bundle of its own — so that A9 can mount it in an application without
-the admin shell. It is served under `/analytics/` in the way the IDE is (§12.1): admin-only (a
+like the admin SPA, but a bundle of its own, so that an Analytics application can serve it
+without the admin shell (§14.9). On the admin host it is served under `/analytics/` in the way
+the IDE is (§12.1): admin-only (a
 visitor is sent to sign in, a non-admin refused), under its own CSP
-(`ANALYTICS_CONTENT_SECURITY_POLICY`, strict for now, widened by later milestones' renderers
-without touching the admin UI's), built into the binary by `sc-cli`'s build script, and sharing
+(`analytics_content_security_policy`: the strict `ANALYTICS_CONTENT_SECURITY_POLICY` with the
+base map's hosts added since A5.6, §14.6 — widened for the renderers without touching the admin
+UI's), built into the binary by `sc-cli`'s build script, and sharing
 the admin UI's session cookie. It routes on the hash (`#/` the front page, `#/w/<id>`,
 `#/datasets/<id>` with `?back=` naming where its Back returns, `#/datasets/new`, and from A3
 `#/models/<id>` with `?fit=`, `#/models/new?dataset=`, `#/models/compare?ids=` and
@@ -8266,8 +8489,8 @@ regression of Y — a logistic one when Y is not a number — opened in the edit
 **The Data explorer** (A2.7–A2.14; `ui/analytics/src/explorer`, `src/plot`). Its state is what
 the person chose — the dataset, the columns on the nine drop zones (X, Y, Color, Size, Shape,
 Label, Facet rows, Facet columns, Wrap; several on Y compared as one variable), the mark
-palette's choice, a gallery preset that reshapes, plot or summary table, the layers panel's
-changes and the tests' settings — never the spec. The spec is the server's answer to the drop zones (`suggestPlot`: the
+palette's choice, a gallery preset that reshapes, plot, summary table or map (with the map's
+geometry source, A5.7), the layers panel's changes and the tests' settings — never the spec. The spec is the server's answer to the drop zones (`suggestPlot`: the
 "show me" rules, a gallery preset or the chosen mark), with the layers panel's `Extras` laid over
 it in the browser (`composeSpec`: the first layer's stat, added layers that take X, Y and Color
 from the first unless the stat makes its own, scales, reference lines, coordinates); `renderPlot`
@@ -8307,8 +8530,8 @@ quantiles, box plot (`coef` 1.5), summary (a mean with its confidence interval),
 (Gaussian, `bw.nrd0` unless a bandwidth is given), smooth (linear or loess, with a band) or
 correlation. Scales are linear, log or square root, from zero or fitted (or a fixed domain), reversed, with a
 colour scheme; coordinates are Cartesian, flipped or polar; facets are rows, columns or wrap (fixed or
-free scales); references are lines at a value of X or Y; selections are declared and validated
-now, and dashboards (A6) turn them into filters.
+free scales); references are lines at a value of X or Y; selections declare what a click and a brush
+pick, and a dashboard turns them into filters (§14.8).
 
 `validate` checks a spec against the dataset's shape and answers **every** refusal at once, each
 a sentence naming the channel and the column ("X: `colour` is not a column of the dataset"): the
@@ -8426,6 +8649,126 @@ Beside the plot, the tests column scrolls on its own (`.an-tests`'s `max-height`
 has a section per group, and stretching the plot to its height made the plot thousands of
 pixels tall, its percentage margins blank bands.
 
+**Split view** (A4.1; `ui/analytics/src/panes.tsx`, `router.ts`, `changes.ts`). The header's
+**Split** opens a second screen beside the first. Each side is a workspace, the Dataset editor,
+the model editor or the front page, with its own bar (front page, close) and its own state, and a
+divider between them moved by pointer or arrow keys (its position is a per-viewer `localStorage`
+convenience, not part of anything stored). The address records both: the main route with
+`side=<the other side's whole hash>` added, so a reload or a bookmark reopens both and each side
+keeps its own `?fit=` or `?back=`. A screen never navigates the window. It moves its own side
+through `usePane()` (`href`, `go`, `replace`, `beside`, `close`), so the same screen works on
+either side, and the main side is mounted in the same place split or not, so splitting does not
+rebuild it. **Changes reach the other side**: saving, cloning or deleting a dataset, and saving
+or fitting a model, is announced in the page with the side it came from (`announce`, `useChanges`).
+The other side reads again whatever it shows of it: the Dataset editor, an explorer's columns and
+drawings, the model editor's dataset picker and its fits' "dataset changed", the front page's
+lists and a report's panels. Nothing is announced across browser tabs.
+
+**Panels** (A4.2; `sc_analytics::panel`, `ui/analytics/src/panels`). A panel is an elementary
+output, stored as what makes it rather than as what it drew:
+
+```rust
+pub struct Panel { id: Uuid, title: Option<String>, body: PanelBody }   // { id, title?, kind, content }
+pub enum PanelBody {
+    Plot { spec: PlotSpec },                              // "plot"
+    SummaryTable { spec: TableSpec },                     // "summary_table"
+    TestResult { tests: TestSpec, plot: Option<PlotSpec> }, // "test_result": the explorer's tests and the plot beside them
+    Text { markdown: String },                            // "text"
+    FitTable { fit: Uuid, output: String },               // "fit_table": a table a fit recorded
+    Custom { renderer: String, config: Json },            // "custom": a plugin's own kind
+}
+```
+
+`fit_table` is a sixth kind beside the plan's five. A coefficient table is not a summary of a
+dataset but a table a fit recorded, so it names the fit and the output rather than holding a
+spec. A plot of a fit's outputs is an ordinary `plot` whose spec's data is the fit's output data
+(§14.2). Because a panel holds a spec, it is a **live view**: `renderPanel` (`POST
+/api/panels/render`) draws it from the dataset as it is now, answering each kind's data (a plot's
+layers, a table's body, tests with their plot, a fit's output by `render_one_output`) and the
+foreign-key columns a plot should draw as categories. A panel whose dataset or fit has been
+deleted answers a sentence in `error` ("The dataset this panel shows has been deleted.") instead
+of failing the report around it. `custom` answers a sentence naming its renderer until plugins
+register renderers. `Panel::datasets()` and `Panel::fits()` say what a panel reads, through every
+data reference in its specs.
+
+**The usage index** (`UsageIndex`) answers "what uses this dataset" and "what uses this fit" for
+the delete warnings. It is built from the stored workspace states when asked, so it is never out
+of date. There are a handful of workspaces, not millions, and an index kept on every save would be
+a second copy to keep right. `panels_in_state(kind, state)` is the one place that knows where a
+kind keeps its panels (a report's `blocks[].panel`, a dashboard's `tiles[].panel`), and an
+explorer's chosen dataset counts as a use with no panels. `datasetUsage` and `modelUsage` answer
+`workspaces: [{ id, name, kind, panels }]` beside the datasets, models, fields and triggers they
+already listed, and the front page's delete dialogs list them with links. Deleting is not refused:
+the panels that read the deleted thing then show their sentence.
+
+**Drag and drop** (A4.3). The drag payload is the panel's JSON, as it is when the drag begins,
+under `application/x-feldspar-panel`, with its title as `text/plain` for anything outside the
+Analytics UI. A drop is **always a copy**: `readPanelDrag` reads the JSON and gives the panel a
+new id, so nothing the source does afterwards reaches it and nothing is taken from the source.
+The sources are the explorer's **Drag** handle (the plot as drawn, with the layers panel's
+changes; the plot with its tests, as one `test_result`; or the summary table) and each output
+card's header in the model editor (a plot by its spec over the fit's output data, a table as
+`fit_table`), and a report's own blocks. The sink is the Report workspace. Dragging across a split
+view is the usual way, but the payload is plain data, so a drop works from another tab or window
+too.
+
+**The Report workspace** (A4.4–A4.5; `ui/analytics/src/report`). Its state is a document of
+blocks on a page:
+
+```json
+{ "page": { "size": "A4", "orientation": "landscape" },
+  "blocks": [
+    { "id": "…", "kind": "heading", "text": "House prices", "level": 1 },
+    { "id": "…", "kind": "text", "markdown": "Prices rise with **area**." },
+    { "id": "…", "kind": "panel", "panel": { "id": "…", "kind": "test_result", "content": { … } } },
+    { "id": "…", "kind": "page_break" } ] }
+```
+
+Headings, text and page breaks are added from the toolbar's **Add** menu or above a block from its
+own menu; panels arrive by dropping, before the block dropped on or at the end. A block is moved by
+dragging its grip or by Move up and Move down, and removed with ×. Blocks are drag sources too:
+the drag carries the block and the report it came from (`application/x-feldspar-report-block`),
+and a panel or a text block also travels as a panel. `dropInto` decides what a drop is: a block
+dropped in its own report moves, one dropped in another report is copied with new ids, and a panel
+from anywhere is added. `sc_analytics::panel::check_state` reads the same shape when the state is
+saved and refuses, naming the block, a block with no id or of an unknown kind, a heading without
+text or with a level other than 1–3, text without Markdown or over 100 kB, a panel that does not
+read, and a page whose size is not A4, A3, Letter or Legal or whose orientation is neither portrait
+nor landscape.
+
+*Markdown* (`panels/markdown.ts`, `Markdown.tsx`) is a small parser of its own, for headings,
+paragraphs, lists, quotes, code, rules, strong, emphasis, inline code and links. Its tree is drawn
+as React elements and never as HTML, so a report cannot carry script. Links go only to `http(s):`,
+`mailto:` or relative addresses, and `_` emphasises only at a word's edge, so `price_per_m2` reads
+as written. Text panels use it too. It adds no dependency.
+
+*Panels in a report are still* (`PanelView`'s `look`): `stillOption` turns off tooltips, hover
+highlighting, legend toggles, the colour scale's handles and animation. The plots are drawn by
+ECharts' **SVG renderer** in the light scheme, because a report is a document and its plots print
+as vectors. The page is white paper in the dark theme too.
+
+*The page and its pagination* (`report/pages.ts`). A4, A3, US Letter or US Legal, portrait or
+landscape, with 15 mm margins. The paper is drawn on the screen at its printed width in millimetres
+(96 CSS pixels to the inch on the screen and in print), so line breaks and plot sizes are the same on
+screen and on paper. An SVG plot is drawn at a fixed size, so a different printed width would cut it
+off or stretch it. `paginate` lays the blocks' measured heights out by the print stylesheet's own
+rules: a block that does not fit starts the next page; one taller than a page stays where it is
+and runs over, because moving it would not keep it whole; a heading goes with a following block
+that moves; a page break ends its page, and one at the very end makes no blank page. The screen
+shows dashed **Page n** markers where the pages will start, and the toolbar the page count.
+
+*Export PDF* (`report/print.ts`) is the browser's print dialog, whose "Save as PDF" makes the PDF:
+there is no PDF on the server (scheduled or emailed reports are out of scope). `printReport` waits
+until every panel has drawn (or 15 s), marks `<html>` with `an-printing` and the paper with
+`an-print-root` and `an-page-<size>-<orientation>`, sets the document title to the report's name so
+the browser offers it as the file name, opens the dialog and takes the marks off afterwards. The
+print stylesheet (`analytics.css`, "Printing a report") does the rest: it hides everything but the
+paper, using `:has()` to keep the paper's ancestors and stop them scrolling or clipping; removes the
+controls, markers and placeholders; keeps blocks whole (`break-inside: avoid`) and headings with
+what follows; and breaks at page breaks. The page size is one **named `@page`** per size and
+orientation (`@page a4-landscape { size: A4 landscape; margin: 15mm }`), chosen by the paper's
+class, rather than a `<style>` written at print time.
+
 **Demo data** (`sc_analytics::demo`, `feldspar demo analytics [--replace]`), deterministic and
 synthetic: `neighbourhoods`, `houses` and `viewings` (A1), shaped as the models tutorial has
 them; `patients` and `measurements` (A2: 90 patients, a third on each of placebo, a low and a high
@@ -8438,12 +8781,811 @@ an expression that doubles at every step (18 s rather than 3 on Postgres). Both 
 same rows. The demo also makes the datasets `Houses`, `Measurements` (with `treatment =
 patientⱵtreatment` and `change = after - before`) and `Events`, since the explorer reads datasets;
 one of those names that is there already is kept, and `--replace` never drops a dataset.
+Where the database has PostGIS the demo also makes `districts` and `incidents` with the datasets
+`Districts` and `Incidents` (A5, §14.7); where it has none they are left out and
+`DemoReport::skipped` says why, which the command prints.
 
 **Definitions of done** (`sc-server`'s `tests/analytics_done.rs`): each milestone's Try it through
 the API over the demo's rows. A2's checks the bins and box statistics against the rows read
 through the dataset, and every test statistic and p-value against R's answers for the same rows
 (`tests/r/demo_reference.R` reads the demo's tables exported as CSV and writes
-`demo_reference.json`).
+`demo_reference.json`). A3's fits a regression and the stub posterior provider and draws every
+declared output. A4's builds a report the way the UI does — an explorer's panel and a model's
+output panels copied in as a drop copies them, headings, text and a page break, reordered, on an
+A4 landscape page — and checks that the report's plot follows a new row of `houses` while the
+fit's residual plot does not, that a copy into a second report is its own, and that the usage
+index lists both reports for the delete warnings. The print dialog cannot be driven from a test;
+it was walked in headless Chromium, whose `page.pdf({ preferCSSPageSize: true })` gives the
+pages the screen counted. A5's is described in §14.7.
+
+### 14.6 Geometry and maps (analytics milestone A5, phases 1 to 3)
+
+The milestone as a whole, briefly: geometry is a field type stored by PostGIS and carried as
+GeoJSON (below); a **Spatial join** operation and the `Geo` formula functions do the spatial
+work, in SQL; a dataset is drawn as a **layer**, delivered as GeoJSON or as vector tiles; the
+explorer draws a map of one layer, and the **Map workspace** (§14.7) stacks layers, styles them,
+selects features and runs tools that make datasets.
+
+Maps begin with geometry in core: a field type, files that make tables of it, and formula
+functions over it. All of it needs PostgreSQL with PostGIS (`OPERATIONS.md` §10); SQLite, and a
+Postgres database without the extension, refuse it with a sentence saying which.
+
+**Whether a database has PostGIS** is a fact about one database, not about a backend, so it is
+not a `DbCapabilities` flag but a driver answer: `DatabaseDriver::spatial()` returns
+`SpatialSupport::Available { version }` or `Unavailable { reason }`, remembered from the last
+`detect_spatial()` (a query of `pg_extension`) or `enable_spatial()` (which also tries
+`CREATE EXTENSION postgis`, where the role may). `Catalog::init` detects; `feldspar serve`'s boot
+calls `sc_catalog::bootstrap_spatial`, which enables, and logs the answer. A connected database
+is only ever asked. When PostGIS is there the driver (re)creates three SQL functions beside it:
+`_fd_utm_srid`, `_fd_square_cell` and `_fd_hex_cell` (`sc-db-postgres`'s `spatial.rs`).
+
+**The type** (§6.1) is `BasicType::Geometry(kind)`, a GeoJSON object in a `Value::Json`.
+`sc_types::geometry::check_geojson` is the validation, sentence by sentence: the right `type`
+for the column (a polygon is refused from a point field, saying both), positions of two or three
+numbers, longitude and latitude in range (a British National Grid easting typed into a point is
+refused naming WGS84, and pointing at importing instead), lines of two positions or more, rings
+closed. A height is accepted and not stored. Introspection reads a geometry column's type with
+`format_type`, because `information_schema` says only `geometry`; tables an extension owns
+(`spatial_ref_sys`) are not listed. A geometry field on a table whose database has no PostGIS is
+refused by `schema_edit` before any DDL (`field `location` cannot be a geometry: …`).
+
+**At the wire.** The Postgres driver reads `geometry` and `geography` columns as EWKB and writes
+GeoJSON parameters as 2D little-endian EWKB with SRID 4326 (`sc-db-postgres`'s `geometry.rs`;
+ISO WKB's thousands for Z and M are read too). So a geometry column needs no `ST_AsGeoJSON` in
+any query, and every reader — a REST list, a GraphQL query, a dataset stage, the admin grid —
+gets GeoJSON. REST carries it as the object; GraphQL as a `GeoJSON` scalar with an unordered
+comparison input (`eq`, `ne`, `in`, `nin`, `is_null`); a generated TypeScript client as
+`{ type: string; coordinates?: unknown; geometries?: unknown[] }`; an MCP tool's JSON Schema as
+an object with a `type`. A dataset's column type is `ColType::Geometry`: not sortable, not
+plottable (it is drawn on a map), but a group key (`Geo.hexCell(location, 500)`).
+
+**Importing** (`sc_api::geo_import`, `createTableFromGeoFile`, the admin's *New table → Create
+from a map file*): a GeoJSON file, a zipped Shapefile or a GeoPackage, told apart by their first
+bytes, becomes a new table as a CSV does — fields deduced, the table made through `schema_edit`,
+every feature written through the row layer in one transaction, and no table left behind when a
+feature will not go in. The readers are pure (bytes → `GeoFile { crs, features, warnings }`):
+
+| | geometry | attributes | coordinate system |
+|---|---|---|---|
+| GeoJSON | the Feature's `geometry` | `properties`, plus the Feature's `id` | WGS84, or a pre-RFC 7946 `crs` naming an EPSG code |
+| Shapefile | the `.shp`'s records (holes assigned to the outer ring that contains them) | the `.dbf` (text, numbers, logicals, dates; `.cpg` for the encoding) | the `.prj`'s WKT; WGS84 with a warning when there is none |
+| GeoPackage | the WKB inside each GeoPackage geometry blob | the table's other columns | the EPSG code `gpkg_spatial_ref_sys` names, else its WKT |
+
+A zip with several Shapefiles, or a package with several feature tables, is refused naming them
+until a `layer` is chosen. **PostGIS reprojects**: each chunk of geometries is one query,
+`ST_Force2D(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(…) | ST_GeomFromWKB(…), srid), 4326))`
+(or `ST_Transform(g, '<wkt>', 4326)` for a definition, which PROJ reads), and the result comes
+back through the driver as GeoJSON; a chunk that fails is retried feature by feature so the
+refusal names the feature. The geometry column's kind is the one every feature fits, with single
+geometries made multi (`ST_Multi`) when a file mixes polygons and multipolygons. Attribute types
+come from the JSON values (whole numbers, numbers, flags, ISO dates and timestamps, objects,
+else text). The file's `id` is the key when every feature has a different whole number for it;
+otherwise the table numbers its rows and keeps the file's as `source_id`. How exactly a datum
+shift is made depends on PROJ's grids (`OPERATIONS.md` §10.2).
+
+**The `Geo` functions** (`sc-expr`'s `geo.rs`) are methods of one global, as JavaScript's own are
+of `Math`, so they claim one identifier rather than eleven a table might have columns called — and
+a field called `Geo` wins, as one called `Math` does:
+
+| function | PostGIS | returns |
+|---|---|---|
+| `Geo.point(lon, lat)` | `ST_SetSRID(ST_MakePoint(…), 4326)` | geometry |
+| `Geo.buffer(g, metres)` | `ST_Buffer(g::geography, m)::geometry` | geometry |
+| `Geo.centroid(g)` | `ST_Centroid(g::geography)::geometry` | geometry |
+| `Geo.area(g)`, `Geo.length(g)` | `ST_Area` / `ST_Length` of `g::geography` | square metres, metres |
+| `Geo.distance(a, b)` | `ST_Distance(a::geography, b::geography)` | metres |
+| `Geo.intersects`, `Geo.contains`, `Geo.within` | `ST_Intersects` / `ST_Contains` / `ST_Within` | a condition |
+| `Geo.squareCell(g, metres)`, `Geo.hexCell(g, metres)` | `_fd_square_cell`, `_fd_hex_cell` | geometry |
+
+Distances and areas are on the WGS84 spheroid through `geography`, so nobody chooses a
+projection. A grid cell is laid out in the UTM zone of the geometry's point on surface — sides
+(a square) or edges (a hexagon) of the given metres on the ground, tiling within a zone — drawn
+by PostGIS's `ST_Square`/`ST_Hexagon` and returned in WGS84; a dataset that straddles two zones
+has two lattices that do not meet at the boundary. Validation checks each call's name and
+argument count and records `Analysis::geo_calls`; the symbolic translation turns each into SQL,
+a boolean one also in condition position. Only the database computes them: the JavaScript
+evaluator has no `Geo`, and says so by name if a formula that needs one reaches it, and a
+dataset whose database has no PostGIS refuses the operation with `Schema::spatial`'s sentence.
+The dataset compiler infers their types (geometry, number, boolean), and the Analytics UI's
+formula input offers them over a stage with a geometry column.
+
+Two compiler fixes came with them, both general: a negative number literal is one literal
+(`-0.12`, not `-$1`, which Postgres cannot type), and an Aggregate key holding a literal
+(`price > 100000`, `Geo.squareCell(location, 500)`) is computed a level down and grouped by
+name, since `f($1)` in the select list and `f($7)` in the `GROUP BY` are not one expression to
+Postgres.
+
+**The Spatial join** (A5.4; `Op::SpatialJoin`, kind `spatial_join`) is the one operation
+geometry needs: what involves another dataset's rows. Its parameters are what is joined (a table
+or a dataset, as a Join's), `inner` or `left` (never `full`: a spatial join keeps these rows, and
+the other's that match nothing mean nothing here), the **relation**, a geometry column on each
+side, a `distance` in metres, an optional `distance_column`, the other's `columns` to bring and a
+`suffix` for a name already taken:
+
+| relation | matches when | SQL |
+|---|---|---|
+| `intersects` | the two share a point | `ST_Intersects(l, r)` in the `ON` |
+| `contains` | this row's geometry contains the other's (a region and its points) | `ST_Contains(l, r)` |
+| `within` | this row's geometry is inside the other's (a point and its region) | `ST_Within(l, r)` |
+| `within_distance` | they are at most `distance` metres apart | `ST_DWithin(l::geography, r::geography, d)` |
+| `nearest` | the other's one row nearest to this one, within `distance` if given | `LEFT`/`INNER JOIN LATERAL (… ORDER BY ST_Distance(l::geography, r::geography) LIMIT 1) ON true` |
+
+Both sides are sealed and the other's columns brought across, as a Join does. The distance
+column is `ST_Distance` over `geography`, in metres, like `Geo.distance`. `nearest` is the one
+relation that matches each row at most once, so it **keeps the grain** (and the row key, so a
+model can still `predict` over it); the others may match a point to two overlapping regions,
+so their grain is `Derived`. **The other's primary key comes across as a foreign key to its
+table**, whatever it is called (`id_right` by default): so `id_rightⱵname` follows it, an
+Aggregate grouped by it is one row per region (`Grain::Group` on a key, whose `Ↄ` and Complete
+from the table then work), and a map finds the region's polygon by it. "Count per region" is
+therefore a Spatial join `within` and an Aggregate by the region's key, and the toolbox (A5.12)
+will write exactly that. The lateral subquery is `sc-query`'s new `Source::Lateral` (Postgres
+only; nothing reaches it without PostGIS). The nearest match is exact on the spheroid and
+ordered by `ST_Distance`, not by the planar `<->`, so it does not use a GiST index; that is the
+place to start if nearest-neighbour joins over large tables are slow. A geometry union is the
+Aggregate summary `union` (`ST_Union`): a column of geometry dissolved into one per group, so
+regions merge and the shared edges go. Without PostGIS both are refused with the sentence.
+
+**Layer data for the browser** (A5.5; `sc-analytics`' `layer.rs`, the endpoints `layerData` and
+`layerTile`). A layer is a stored dataset, a **geometry source** and the columns each feature
+carries (`LayerRequest { dataset, geometry, properties?, filter? }`). The source is a geometry
+column, longitude and latitude columns, or a foreign key to a table with a geometry column. The
+last two become one more Calculated column (`Geo.point(lon, lat)`, `districtⱵoutline`) added to
+the dataset for the read, under a name it does not use, as does the optional filter. So the
+compiler and the formula rules do the work, and an error in either is reported as "the layer's
+geometry/filter does not work: …". A feature carries every column that is not geometry, JSON or
+bytes, unless `properties` names them.
+
+`layerData` first counts the features and their vertices (`count`, `sum(ST_NPoints)`) and takes
+the extent in one aggregate query. Within both limits (5,000 features, 250,000 vertices) it
+answers `delivery: "geojson"` with the whole FeatureCollection. Over either, it answers
+`delivery: "tiles"`, the `source_layer` (`features`) and the URL template
+`/api/layers/tiles/{z}/{x}/{y}?layer=<the request, JSON, encoded>`. The map fills in the tile
+numbers; it needs the page's origin in front, since MapLibre wants absolute tile URLs. A tile is
+one `ST_AsMVT` query over the dataset's rows that meet the tile's envelope (with a 64-unit margin,
+by `ST_Intersects`, which an index answers). Each geometry is transformed to Web Mercator,
+**simplified by zoom** (`ST_Simplify` at one unit of the tile's 4096 grid, keeping tiny polygons
+from vanishing), then clipped and quantised by `ST_AsMVTGeom`. Numbers, flags and text are kept
+as they are and anything else is sent as text. A feature's **id is its row's key** while rows
+are a table's and keyed by an integer, in GeoJSON and in tiles alike, which is what the attribute
+table and the map will be linked by (A5.10). Otherwise a GeoJSON feature is numbered by its place
+in the dataset's order. A layer that cannot be drawn answers `delivery: "none"` and the sentence;
+a tile is refused with a 400 instead (outside the grid, deeper than zoom 24, or a layer that does
+not draw). The tile response is `application/vnd.mapbox-vector-tile`, a `Download` with no
+filename, which the router does not mark as an attachment.
+
+**Maps in the browser** (A5.6–A5.7; `sc-analytics`' `map.rs`, `ui/analytics/src/map`). A map
+is not a plot spec. A plot has one dataset and positions on axes; a map has layers, each a
+dataset of its own with a geometry source, over a base map. So it has a spec of its own, `MapSpec
+{ layers: [MapLayer { dataset, geometry, encoding?, filter? }] }`, whose `MapEncoding` holds a
+plot layer's channels without the positions: Color, Size, Shape and Label. The Map workspace
+(A5.8) will hold several layers; the explorer's map panel holds one. A map is drawn in two
+steps. `renderMap` answers each layer's `LayerData` (§ *Layer data* above, now with the kinds of
+geometry among its features) and the **domains** of its encoded columns. These are computed in
+SQL over every feature with a geometry (`layer_domains`): the smallest and largest value of a
+number on Color or Size, and the values, in order, of a category on Color or Shape. A tiled
+layer is then coloured by the same scale at every zoom, which a scale computed from the
+features in view would not be. The browser compiles spec and data to MapLibre sources and
+layers (`maplibre.ts`, pure and unit-tested like `echarts.ts`). A layer that cannot be drawn
+(its dataset gone, a column renamed, Size on text) answers `delivery: "none"` and its sentence,
+and the others are drawn.
+
+| geometry | MapLibre layers |
+|---|---|
+| polygons | `fill` coloured by Color at 0.6 opacity, and a `line` of outlines in the surface colour |
+| lines | `line` coloured by Color, as wide as Size (1–8 px) |
+| points | `circle` coloured by Color, as large as Size; with a column on Shape, a `symbol` of SDF shape images |
+| any | `symbol` with the Label column's text, in the base map's own font |
+
+The scales are MapLibre expressions over each feature's properties, in the plots' palette
+(`palette.ts`), so a category has the same colour on a map as in a bar chart. A category
+(`match` on `to-string` of the property) takes the slot of its place in the domain, and the
+ninth value onwards share the muted ink, with a note saying so. A number is interpolated across
+the sequential ramp. A missing value is grey. A point's Size is its **area** from zero
+(`r = 18·√(v / max)`, never under 2 px) when no value is negative, as a proportional symbol is,
+and linear across the range when some are. Size does not apply to polygons, and Shape applies
+to points only; each is noted. Shapes are signed-distance-field images made pixel by pixel in
+`shapes.ts` (circle, square, triangle, diamond, cross, star) and added with `sdf: true`, so
+`icon-color` and `icon-size` colour and size them as a circle would be. A tiled layer's source is
+`layerTile`'s template made absolute on the page's origin, with the layer's bounds. One that
+reported no geometry kinds is drawn as all three, which costs nothing where a kind is absent.
+
+**The geometry source** a dataset is mapped by is chosen on the server (`geometry_sources`),
+best first: its geometry columns; number columns paired as longitude and latitude by name
+(`lon`/`lng`/`long`/`longitude` with `lat`/`latitude`, alone or as a prefix or suffix with `_`:
+`pickup_longitude` with `pickup_latitude`, `lng_dropoff` with `lat_dropoff`); and each foreign
+key to a table with a geometry column, once for each such column (`district` → `districts.outline`).
+`suggestMap` answers them all and a spec drawn from the one the explorer's state names, else
+from the first. A dataset with none is told so in a sentence.
+
+**The explorer's map** (A5.7) is a third view beside Plot and Summary table, reached by it or by
+the gallery's Map, which is no longer disabled. The drop zones stay as they are, so going back
+to the plot loses nothing. Color, Size, Shape and Label draw the map. X, Y and the facets are
+dimmed, and a drop on them does not ask the server again (`mapAssignment`). Bins are dropped:
+a map classifies by its style (§14.7), not by binning. A **Geometry** picker lists the sources,
+"Automatic" first. The tests and the layers panel are a plot's and are hidden on a map. The map
+is dragged into a report as a `map` panel, and **Open in map** makes a Map workspace of it
+(§14.7).
+
+**The base map** is a setting: Settings → Maps (`sc_config::maps`) holds a MapLibre style URL
+for a light page, one for a dark page, and further hosts. The default is OpenFreeMap's Positron
+and Dark, which need no key and serve style, tiles, glyphs and sprites from one host. An empty
+style means no base map: the layers are drawn on the page's background. `MapView` fetches the
+style itself rather than handing MapLibre the URL, for two reasons. A label layer needs the
+fonts the style's glyphs have (the first plain `text-font` among its layers). And a style that
+cannot be reached should leave the data on a plain background with a sentence, not a grey box.
+
+**The policy.** MapLibre fetches a style, its tiles, glyphs and sprites, so the Analytics UI's
+`connect-src` and `img-src` name the hosts of Settings → Maps (`MapSettings::hosts`). They are
+read per response, as the MCP switches are, so a changed base map is allowed on the next page
+load. Because a host goes into a header, it is parsed, not trusted. `origin_of` accepts an
+`http` or `https` origin of letters, digits, dots and hyphens (or a bracketed IPv6 address)
+with a numeric port. `updateSettings` refuses anything else by name, and
+`analytics_content_security_policy` leaves out any entry that is not exactly such an origin.
+The one other relaxation is `blob:` in `img-src`, where MapLibre decodes images through object
+URLs. **The worker** is not a `blob:`. MapLibre 6 builds one from its own module file unless
+told otherwise, so `runtime.ts` imports `maplibre-gl-worker.mjs?url` (Vite emits it beside the
+bundle) and calls `setWorkerUrl`, and the policy says `worker-src 'self'`. MapLibre and the map
+view are one lazily loaded chunk, so a page with no map does not fetch them.
+
+**deck.gl is not used** (a deviation from the plan's "MapLibre GL JS and deck.gl"). The goals
+document has deck.gl draw "layers with too many features for MapLibre alone". A5.5 sends such a
+layer as vector tiles made by PostGIS, which MapLibre draws natively at any size, so deck.gl
+would add about a megabyte with nothing to draw. It remains the option for what tiles do not
+cover, such as animating many points over time (A8.5).
+
+### 14.7 The Map workspace (analytics milestone A5, phases 4 and 5)
+
+The Map workspace is where multi-layer GIS work is done (goals document, "Map workspace"). It
+keeps the rule that "a layer is a dataset, a geometry source and a style, and the map never
+computes anything itself": every analysis it offers makes a dataset, and every selection is a
+condition the database evaluates.
+
+**The state is a map spec.** `MapSpec` (`sc_analytics::map`) gained what a workspace needs, and
+a Map workspace's state is that spec with the screen's own keys beside it:
+
+| part | what it is |
+|---|---|
+| `layers[]` | bottom first; each `MapLayer` has `id`, `name`, `dataset`, `geometry`, `filter`, `encoding`, `style`, `popup` (the columns its popup shows), `visible`, `opacity` (0–1) and `legend` — the last three left out at their defaults |
+| `reference[]` | `ReferenceLayer`s: `{ id, name, kind: tiles \| wms \| arcgis, url, layers?, opacity, visible, attribution? }` |
+| `view` | `{ center: [lon, lat], zoom }`, where the map was last looked at |
+| `selection`, `active`, `table` | the screen's: the selected features (`{ layer, ids, condition? }`), the layer whose settings and attribute table are open, and that table's order, kept per layer |
+
+`save_workspace_state` checks a map's state (`panel::check_state` → `MapSpec::check(true)`):
+every layer has an id of its own, an opacity in range, a style's classes from 2 to 7, a single
+symbol's colour as `#rrggbb`, a reference layer's URL an `http(s)` URL whose origin parses, a
+tile template with `{z}`, `{x}` and `{y}` (or `{quadkey}`, `{bbox-epsg-3857}`), a WMS with layer
+names. Each refusal names the layer. The usage index reads a map's layers, one use per layer, so
+deleting a dataset a map shows warns with the map. The `map` kind is no longer refused by
+`createWorkspace`.
+
+**Reading layers.** The workspace asks `renderMap` once per layer, with that layer alone, keyed
+by what changes its features or scales (`dataKey`: dataset, geometry, filter, encoding, style).
+A layer's name, visibility, opacity, legend and popup are drawn in the browser, so changing one
+reads nothing. `MapView` keeps a source while its data is the same object, so a selection or an
+opacity change re-adds the MapLibre layers but never re-sends a GeoJSON source to the worker;
+sources are named by the layer's id, so moving a layer keeps its source too. The view is passed
+once (`initialView`) and saved on every `moveend`, so panning does not recompile the map.
+
+**Styles** (A5.9) are a classification over the plot encodings:
+
+| style | server | browser |
+|---|---|---|
+| automatic | as the explorer (§14.6) | a ramp for a number on Color, slots for a category |
+| single symbol | Color is not read | one colour |
+| categories | Color's values, a number too | `match` per value, the plots' slots |
+| graduated colours | Color must be a number; its **breaks** (`classes`) | `step` over the breaks, `k` colours spread along the sequential ramp, a legend item per class |
+| proportional symbols | Size must be a number; features read at their centres (`points`) | circles by area, the small ones on top (`circle-sort-key`) |
+| heatmap | features at their centres; Size, if any, the weight's range | a `heatmap` layer, weight from 0 to 1 over Size's range, the sequential ramp from transparent |
+
+`LayerRequest.points` makes the geometry `Geo.centroid(…)` (a Calculated column the layer adds),
+so a polygon layer can be drawn as proportional circles or a heatmap. A style without the
+channel it needs is refused for that layer with a sentence; the others are drawn.
+
+**Classification** (`sc_analytics::classify`): quantiles (type 7, as R), equal intervals, and
+Jenks' natural breaks found exactly by Fisher's dynamic programme over sorted values. The values
+come from `layer_sketch`: one query numbers the column's values in order (`row_number()`) and
+keeps every value of a small layer, and of a large one every `n / 1000`th by rank, the first and
+the last — a sorted sample of at most about 2,000 values that is the same at every read, so the
+classes do not move between renders. The breaks are `k + 1` numbers: the smallest value, each
+class's lower bound, the largest. A class of the largest value alone is kept; a column with
+fewer distinct values than classes gets fewer classes, never an empty one.
+
+**The attribute table and selection** (A5.10, `sc_analytics::selection`). A feature's id is its
+row's key while rows are a table's, otherwise its place in the dataset's order (as `layer_data`
+numbers GeoJSON features). `layerRows` answers the first 5,000 rows of a layer — after its
+filter, geometry left out — with each row's id, so the table and the map share one selection.
+The server sorts a keyed layer (a Sort the read adds); any other is read in its order, since its
+ids are places in it, and the table sorts what it has. A click selects, Ctrl adds or removes,
+Shift takes a range; selected rows highlight their features, which are ringed in the text colour
+over every layer by a filter on `["id"]`.
+
+Every other selection is a formula, built on the server and evaluated by the database
+(`selectFeatures`):
+
+| selection | condition (`g` the layer's geometry formula) |
+|---|---|
+| by attribute | the formula typed |
+| lasso | `Geo.intersects(g, Geo.fromGeoJSON('…'))`, the lasso thinned to 200 vertices at most |
+| within a distance of a point | `Geo.distance(g, Geo.point(lon, lat)) <= d` |
+| within a distance of another layer's selection | `Geo.distance(g, Geo.fromGeoJSON('…')) <= d`, one per selected feature (200 at most), `\|\|`-ed |
+
+A keyed layer reads its ids through a Filter; another layer reads the condition as a column
+beside every row and keeps the places where it holds, since a Filter would renumber them.
+**Save selection as dataset** (`saveSelection`) makes a dataset whose base is the layer's
+dataset, followed by the layer's filter and a Filter. That Filter is the condition when the
+selection was made by one, so the saved dataset keeps its meaning as rows change, and for
+clicked features their identities: `id == 4 || id == 9` by the table's key, or the group keys of
+an aggregated dataset (`zone == 2`), as a balanced tree of `||` so a thousand ids nest ten deep.
+Rows that nothing tells apart (a join that repeats rows) are refused for a clicked selection,
+with a sentence pointing at a condition. Two `Geo` functions arrived for this:
+`Geo.fromGeoJSON(text)` (`ST_SetSRID(ST_GeomFromGeoJSON(…), 4326)`) and
+`Geo.intersection(a, b)`, which the toolbox's Intersection uses.
+
+**Reference layers** (A5.11) are raster sources under every data layer: a tile template as
+given, a WMS as a `GetMap` in EPSG:3857 with `{bbox-epsg-3857}`, an ArcGIS map service as
+`…/tile/{z}/{y}/{x}`. The browser may load images only from the hosts the policy names
+(§14.6), so a service on another host is shown with a warning and **Allow it**, which calls
+`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Settings → Maps' further
+hosts (`sc_config::allow_map_host`), and the page is reloaded for the new policy. The admin is
+the only one who can call it: it is not one of the endpoints an Analytics application exposes
+(§14.9). `mapSettings` answers
+`hosts`, the origins allowed now.
+
+**The toolbox** (A5.12, `sc_analytics::tools`) is a list of `MapTool`s. Each declares a form
+(`ToolDescriptor`: fields asking for a layer of the map, a column of a picked layer, a number in
+a unit, a choice, text) and builds a dataset and the layer that shows it. `runMapTool` compiles
+the dataset first and refuses with the first invalid operation's sentence, so nothing is stored
+that would show an error; it names the dataset after what it is made of (made unique) unless the
+person names it, stores it, and answers it with its layer, which the workspace adds on top. A
+new dataset starts from the input layer's dataset with the layer's filter as a Filter and its
+geometry as a Calculated column when it is not a column. The other side of a spatial join must
+be a layer whose geometry is a column and that shows all its rows, or the tool says so.
+
+| group | tool | operations |
+|---|---|---|
+| Proximity | Buffer | Calculated `Geo.buffer(g, d)`; drawn by the buffer |
+| Proximity | Distance to nearest | Spatial join `nearest`, left, bringing only the distance; graduated by it |
+| Proximity | Within a distance | Spatial join `nearest` within `d`, inner (keeps the grain) |
+| Overlay | Spatial join | Spatial join intersects / within / contains, left or inner |
+| Overlay | Intersection | Spatial join intersects, inner, and Calculated `Geo.intersection(g, h)` |
+| Aggregate | Count per region, Sum per region | Spatial join to the regions bringing their key, Aggregate by it (named after the table: `districts` → `district`), Complete over every row of the table with 0; drawn along the key, graduated |
+| Aggregate | Dissolve | Aggregate by a column with the union of the geometries and a count |
+
+Count per region keeps its rows told apart: a Complete over exactly the group keys of a Group
+grain keeps the grain, so a region can be clicked and saved by its key. **Plugins** add tools in
+two ways. A Rust plugin implements `MapTool` and calls `register_map_tool`. A JavaScript module
+declares tools as data under a `maptools` export (an object of templates, or a function of the
+module's configuration returning one): a form, the base layer field, the operations with the
+answers written in as `{{name}}` (`{{geometry}}` the base layer's geometry column, `{{p.name}}`,
+`{{p.dataset}}` and `{{p.geometry}}` for a layer field `p`; a text that is only `{{x}}` becomes
+the answer itself, so numbers stay numbers), and the result layer. The module host passes them
+through the manifest (`ModuleManifest.map_tools`) as JSON, and the server installs them whole on
+every module change (`install_plugin_tools`), each id prefixed with its module; one that does not
+read is logged and the rest installed.
+
+**The map as a panel** (A5.13). A `map` panel is `{ spec }`, a `MapSpec`: the explorer's map, or
+a workspace's shown layers and reference layers with its view (`specOf(state, "visible")`), made
+when the drag starts (`DragHandle`, `mapPanel`). `renderPanel` answers its layers as `renderMap`
+does, tile templates included. In a report `MapView` is `still`: drawn with
+`preserveDrawingBuffer`, and once MapLibre is idle replaced by an `<img>` of its canvas, which a
+browser prints where it would not print WebGL; until then it carries `an-panel-loading`, which
+the report waits for before printing. **Open in map** in the explorer's map view creates a Map
+workspace whose first layer is the explorer's (`stateFromLayer`), beside the explorer when the
+view is split.
+
+**Demo data** (A5.14, `sc_analytics::demo`). On a database with PostGIS, `feldspar demo
+analytics` makes `districts` (twelve polygons with a name and a population) and `incidents`
+(2,400 points with a category and a date in 2025) over an invented city of about 11 km square
+(`DEMO_EXTENT`, laid over Lyon so that a base map has streets under it). The districts are the
+Voronoi cells of a jittered 4 × 3 grid of seeded points. They are computed in Rust, not by
+`ST_VoronoiPolygons`, so that they do not depend on the GEOS version: each cell is the extent's
+rectangle clipped, Sutherland–Hodgman fashion, by the half-plane nearer its seed than each other
+seed, in a local kilometre plane (longitude scaled by the cosine of the middle latitude), and
+its vertices are rounded to six decimals. The cells therefore tile the extent, with no gaps or
+overlaps, and every incident is within exactly one district. Of the incidents, 55% are drawn
+around four hot spots (normal, σ 400–900 m) and the rest evenly. Burglary is twice as likely at
+a hot spot, so a category's map differs from the whole's. A point outside the extent is drawn
+again. The busiest district then has about eight times the quietest's count, which gives
+graduated colours, and A8's hot-spot statistics, something to find. Geometry is written as
+GeoJSON values through the ordinary `Insert`, like any other value (§14.6, *At the wire*).
+Without PostGIS (SQLite, or Postgres without the extension) the two tables and their datasets
+are left out, with the sentence `bootstrap_spatial` gives, and the rest of the demo is made.
+The demo calls `bootstrap_spatial` itself, as `feldspar serve`'s boot does, so a role that may
+install the extension gets it.
+
+**The definition of done** (A5.15, `analytics_done.rs`'s `the_try_it_of_milestone_a5`, on a
+database cloned from the PostGIS template, skipped with a message without it). It walks the Try
+it through the API:
+
+- imports the tutorial's GeoJSON file (`docs/tutorial-data/police-stations.geojson`) and draws it;
+- maps the demo's incidents, checking the explorer's automatic geometry and the category domain;
+- runs Count per region against the districts, and checks every district's count against a
+  point-in-polygon count made in the test from the features `renderMap` sent;
+- styles the result in natural breaks and checks the classes are Jenks's over those counts;
+- sorts the attribute table and selects the top three;
+- selects the incidents within 1 km of a point, checks each against a haversine distance (within
+  half a per cent of the spheroid's), and saves the selection as a dataset of that many rows;
+- keeps a reference layer and opacities in the workspace, and refuses a tile URL without
+  `{z}/{x}/{y}`;
+- renders the whole map as a report panel, and checks that the usage index finds the explorer,
+  the map and the report;
+- fetches the city's vector tile at zoom 12, which holds the incidents, and one over the ocean,
+  which does not.
+
+The pages were walked in headless Chromium with SwiftShader's WebGL
+(`--use-angle=swiftshader --enable-unsafe-swiftshader`). Without it MapLibre has no context and
+the map says so.
+
+### 14.8 Dashboards (analytics milestone A6)
+
+A dashboard is a tiled workspace of panels from any source, interactive where a report is still
+(goals document, "Workspaces"). It has no dataset of its own: each tile's panel names its own.
+
+**The state is tiles on a grid** (A6.1). `{ tiles: [{ id, panel, x, y, w, h }] }`, on a grid
+`DASHBOARD_COLUMNS` (12) wide: `x` and `w` count columns, `y` and `h` rows of 64 px.
+`panel::check_state` refuses a tile with no id or panel, one that does not fit the twelve columns,
+one more than `MAX_TILE_ROWS` (40) high, more than `MAX_TILES` (100) tiles, and two tiles that
+share a cell. `panels_in_state` reads `tiles[].panel`, so the usage index and the delete warnings
+find dashboards as they find reports.
+
+**The layout settles** (`ui/analytics/src/dashboard/layout.ts`). A tile moved or resized keeps
+where it was put; the tiles it lands on are pushed down below it, in reading order, and then every
+tile rises as far as it can (vertical compaction), so the grid never has holes or overlaps. A new
+tile goes where it is dropped, or from the Add menu into the first place it fits; its size is its
+kind's (a stat card 3×2, a plot 6×5, a map 6×6). Below 640 px the same tiles are shown stacked
+in reading order, full width, and moving and resizing wait for a wider screen: what is stored is
+always the wide layout. No grid library: the grid is CSS grid, and the layout is pure functions
+tested on their own.
+
+**Moving, resizing, dropping.** A tile's grip is an HTML5 drag carrying the tile and the open
+dashboard it came from (`application/x-feldspar-dashboard-tile`) and its panel
+(`application/x-feldspar-panel`). Over the grid, the cell under the dragged tile's corner is
+outlined; dropped into its own dashboard the tile moves there, into another it is copied (new ids,
+same size), and anything else that carries a panel — the explorer's output, a map, a model
+output, a report's block — is added there as a copy. Because the tile also travels as a panel, a
+report takes it. The corner handle resizes with pointer events, snapping to the cells and showing
+the settled layout as it goes. Each tile's menu moves and resizes by one cell at a time, for the
+keyboard.
+
+**Stat cards** (A6.2; `sc_analytics::card`). A `stat_card` panel's content is a `StatCard`:
+
+| field | what it is |
+|---|---|
+| `dataset` | the dataset the number comes from |
+| `value` | `{ function, column? }`: `count` (rows, or a column's values), `count_distinct`, `sum`, `mean`, `median`, `min`, `max` |
+| `filter` | a formula over the dataset's columns |
+| `time` | `{ column, period: day \| week \| month \| quarter \| year, anchor: latest \| today }`: the date or timestamp column periods come from |
+| `comparison` | `none`, `previous_period` (needs `time`), or `unfiltered` |
+| `sparkline`, `periods` | the value in each of the last `periods` (2–120, default 12) periods (needs `time`) |
+| `format` | `{ style: number \| percent \| currency, decimals?, currency?, compact?, suffix? }`, written by the browser with `Intl.NumberFormat` |
+| `higher_is_better` | `false` when a rise is bad news, so the arrow is red |
+
+`render_card` answers `{ value, label, period?, comparison?: { kind, value, period?, change,
+ratio }, sparkline? }`, or a refusal with a sentence, in `renderPanel`'s `card`. With `time`,
+the value is the **current period's**: the period holding the latest date in the filtered rows
+(`anchor: latest`, so last year's data still has a "this month"), or today's. The previous
+period is the one before it; `unfiltered` is the same aggregate, over the same period, without
+the card's filter.
+
+The card's filter is a Filter operation appended to the dataset's operations and compiled with
+them, so it is checked and translated as any Filter is (A6.4 appends the dashboard's selections
+the same way, and `unfiltered` leaves those out too). Periods are bucketed without date
+functions, which Postgres and SQLite do not share: the bounds are worked out in Rust (ISO weeks,
+calendar months, quarters and years), one `CASE` numbers each row's period, and one grouped
+query answers every period at once; a median goes through the plot renderer's percentiles, which
+work on both databases. A count of an empty period is 0; any other function's is missing.
+
+**Cross-filtering** (A6.3–A6.6) is three things that make **conditions**, and one place that
+applies them. A condition is `{ id, dataset, column?, values? | range? }`
+(`sc_analytics::crossfilter::Condition`): some values of one column of one dataset (a click), or
+a range of them (a brush or a histogram's bin, either end open, `max_exclusive` for a bin's end).
+No `column` means the rows themselves, by their key: a feature clicked on a map of a table's
+rows. The browser makes conditions, because only it knows what was under the pointer; the server
+decides where they reach and what they do, because only it knows the stage shapes.
+
+| what makes it | where it lives | whom it filters |
+|---|---|---|
+| a **selection**: a click or a brush on a tile | the screen, not saved | every tile but its own |
+| a **drill-down**: a value picked on the way down a tile's drill path | the screen, not saved | its own tile only |
+| a **dashboard filter**, made in the filter bar | the state's `filters` (at most 20) | every tile |
+
+`conditionsFor(tile, …)` (`dashboard/filters.ts`) gathers a tile's conditions, and the tile is
+drawn by `renderPanel` with them as `filters`. Nothing about a condition is per panel kind: the
+browser does not know or care whether the tile is a plot, a card or a map.
+
+**Selections** (A6.3; `ui/analytics/src/plot/select.ts`). A plot spec's `selections` (§14.5)
+declare what a click (`point`) and a brush (`interval`) pick, and on which channels; a plot that
+declares none gets the defaults — a click picks the category or bin under the pointer on X or Y
+and its colour group, a brush picks a range along a continuous X. A selection picks only a
+**column of the dataset**: a value a stat computed (a count on Y) or a column a fold makes picks
+nothing, and a mosaic, a polar or parallel plot, or a fit's output data offer no selection at
+all. What was clicked is read back from what ECharts says about the item and from
+`selectionInfo`, which the option compiler returns beside the option: what each axis's
+categories stand for (a value, or a bin's range), and the colour groups. So a category's label
+maps back to its value (a foreign key's `"2"` to `2`, "(missing)" to `null`), a histogram's bar
+to its edges, a flipped plot the right way round. A brush on a time axis gives milliseconds,
+which the server writes as the column's type. On a map, a feature picks the key its geometry is
+found by (a layer drawn through `districtⱵoutline` picks the district) or, on a layer of a
+table's rows, the row by its key — `featurePicks`, from the layer data's `keyed`.
+
+A tile holds one selection at a time: a new click replaces it, Shift or Ctrl-click adds or
+removes a value, clicking the one selected value again or clearing the brush lets it go
+(`select`). The tile it was made on keeps showing everything, so that something else can be
+picked there.
+
+**Propagation** (A6.4; `crossfilter::scope`). For each dataset a panel reads
+(`Panel::datasets`), each condition is worked out against the last stage shapes of its own
+dataset and of the panel's:
+
+1. **The same dataset**: the condition's column, which must still be there.
+2. **Another dataset**: only through a table both refer to. The condition's column identifies
+   rows of a table — it is a foreign key, or it is the key of a dataset whose grain is that
+   table's rows (`identifies`) — and the other dataset either *is* that table's rows (filtered by
+   its key) or has a foreign key to it. A foreign key column stays one through every operation
+   (§14.4, the stage shapes), and a Spatial join brings the joined table's key across as one,
+   so "the incidents with their district" is reached by a district clicked anywhere.
+3. Two columns of the other dataset that refer to the table are a choice not made for the
+   person, unless one has the condition's column's name.
+
+Anything else is skipped with a sentence ("`Incidents` has no column that refers to
+`districts`"). Columns with the same *name* in two datasets are deliberately not matched: a
+`category` in a dataset derived from the incidents is not known to mean the same thing, and a
+filter that silently applied to the wrong column would be worse than one that says it did not
+apply. `renderPanel` answers, beside what it drew, `filters`: for each condition and each of the
+panel's datasets, the column it filtered or why not, which the tile's badge shows ("by
+category"; "not filtered", with each reason in its tooltip).
+
+**Execution.** The conditions that reach a dataset are one formula — values `||`-ed, the two ends
+of a range `&&`-ed, the conditions `&&`-ed — appended as one Filter operation with the id
+`_fd_dashboard_filter` after the dataset's own operations (`Scope::extend`). It is compiled,
+validated and translated like any Filter (§14.4), so the cross-filtered panel is the dataset
+with one more operation, not a second code path: `render_plot_in`, `render_table_in`,
+`run_tests_in`, `render_card_in` and `render_map_in` are the renderers with a `Scope`, and
+`render_plot` and the rest are those with `Scope::none()`. Values are written as formula
+literals of the column's type (`literal`): a number for an integer or float, a date as
+`"2025-03-01"` from a date, an instant or milliseconds, an instant as RFC 3339 in UTC, a time,
+a UUID, `true` or `false`. A value that is not one of the column's type is skipped with a
+sentence rather than compared and matching nothing; a geometry, JSON or bytes column is not
+compared at all. For the string literals to compare with dates, times, timestamps and UUIDs
+on Postgres as they do on SQLite, a formula's string literal compared with such a column binds
+as that type (`sc-db-postgres`'s `value.rs`). When the Filter is the operation that fails, the
+panel says "the dashboard's filters do not work on `…`" (`filter_failure`), not that its dataset
+is broken. A map layer takes the conditions into its own `filter`
+(`Scope::and_filter`), so its vector tiles, fetched by URL, carry them too; a stat card's
+`unfiltered` comparison leaves them out with its own filter, so "34 % of all" is of every row.
+
+**Drill paths** (A6.5; `dashboard/drill.ts`). A plot tile may have `drill: { channel, path }`:
+X, Y or Color, and 2 to 8 different columns, outermost first, the first being the plot's own.
+At the top the plot is as it was made. A click that picks one value of the level's column goes
+down a level: `drilledPanel` puts the next column on the channel (unbinned, without the first
+column's fixed domain), and `drillConditions` filters the tile to the values picked so far, as
+conditions with ids `drill:<tile>:<level>`. These are ordinary conditions on the tile's own
+dataset, so a drill-down is a Filter on the server like everything else; they are only kept out
+of the other tiles. A breadcrumb goes back up; at the last level a click selects. The path is
+saved on the tile and travels with it into another dashboard; where someone is on it is not
+saved.
+
+**The filter bar** (A6.6; `FilterBar.tsx`) shows a chip per condition — the dashboard's filters
+filled, selections outlined — each removable, and *Clear all*. **+ Filter** makes a dashboard
+filter on a column of any dataset (the dashboard's own first): ticked values for a text,
+true-or-false or key column (offered most frequent first, by `datasetColumnValues`), a from–to
+range for a number, date or timestamp. **Refresh** redraws every tile every 30 s to an hour
+(the state's `refresh`, in seconds; 10 to 86,400 accepted), so a dashboard left on a screen
+follows its data. `check_state` checks a dashboard's `drill`s, `filters` (each a condition,
+different ids) and `refresh` before they are stored.
+
+
+### 14.9 Analytics applications (analytics milestone A9)
+
+An admin publishes a restricted part of the Analytics UI to end users as an **application** whose
+framework is `analytics` (§13.2, §13.3). There are two halves, and both are needed:
+
+- **Authority** (A9.1). Every analytics read is made *as the caller*, through the table
+  permissions and ownership formulas of §7.3. This holds on the admin host too, where the caller
+  happens to be the admin. It decides **which rows** come back.
+- **The framework** (A9.2–A9.4). An application's settings say what may be asked for: which
+  workspaces, which tables, which kinds of workspace, whether datasets may be made. The server
+  enforces them on every request. This decides **what may be asked for**.
+
+Neither replaces the other. A self-serve application over `houses` lets a person build on
+`houses`, and then the ownership formula of `houses` decides which houses they count.
+
+#### Reading as the caller (`sc_dataset::access`)
+
+**Who reads** is a `Caller`: a role, the user's fields as an ownership formula's `user` sees them
+(`id`, `role` and every other column), and, in an application, the tables it may read at all
+(`tables`, `None` for every table). `Caller::of_user` is the request's user, or the public role
+for nobody. `Caller::admin()` is the server reading on its own authority. `within(tables)`
+narrows a caller to an application's tables.
+
+**One guard, after the statement is built.** A dataset compiles to one `sc-query` statement
+(§14.4), and that statement may read many tables: the base, a Join's or a Union's other side, a Ⱶ
+path's target, a Ↄ aggregation's children, the rows a Complete takes its values from. None of
+the operations knows about authority. Instead, `Reader::guard` walks the finished statement (its
+`FROM`, joins, unions, derived tables and the subqueries inside expressions) and replaces every
+`Source::Table` with the rows of that table the caller may read:
+
+```sql
+-- what the statement read           -- what the guard makes of it
+FROM houses AS houses                 FROM (SELECT * FROM houses AS houses
+                                            WHERE <formula for this caller>) AS houses
+```
+
+The replacement keeps the alias the statement already used, so nothing else in the statement
+changes. Each table is answered in this order:
+
+| the table | what the caller reads |
+|---|---|
+| not one of the caller's `tables` | refused: "`t` is not one of the tables this application reads" |
+| `rls_enabled` | the table, with the database's policies deciding inside a **read-only transaction carrying the caller** (`set_caller_context`, §7.3) |
+| the caller meets `min_role_read` | the table as it is |
+| an ownership formula that translates | the rows it grants: the formula translated for this caller (`UserEnv::Inline`) with `translate_rooted` under the alias, the same translation the REST provider ANDs into its reads |
+| a formula that does not translate | refused, with a sentence saying why |
+| anything else | refused: "you may not read `t`" |
+
+The guard makes a **derived table** rather than adding a `WHERE`, because a `WHERE` would not
+reach a Ⱶ path's correlated subquery. A joined value from a row the caller may not read is
+therefore missing, as it is under row-level security. A formula that only the JavaScript
+evaluator can decide is refused rather than filtered after the read. The REST provider can
+fetch a page and filter it. A count, a histogram's bins or a mean are computed by the database,
+and a number over rows nobody could filter would leak them behind a plausible number. The users
+table is read without its password hash by anybody but the admin: its derived table names the
+other columns one by one. A refusal is an error naming the table, the same whether the table is
+the base or three joins away, and it appears under the plot that did not draw.
+
+**Every read goes through it.** `read_stage`, `read_page`, `count`, `read_rows` and
+`column_values` take a `Caller`. So do the renderers: `render_plot`, `render_table`, `run_tests`,
+`render_card`, `render_map`, `render_panel`, their `_in` forms (§14.8), and the layer and
+selection functions of §14.6–§14.7. A plot's rows say where they run (`RowsDb`): on the primary
+database through a `Reader`, or in a fit's private in-memory database.
+
+**Models are the admin's.** A fit, a prediction and the model editor read as `Caller::admin()`.
+A fit's outputs come from rows read on the server's authority, which are not narrowed to anyone,
+so a fit's output data or table in a panel is refused to everybody else, with a sentence ("shown
+only in the unrestricted Analytics UI"). The model endpoints are not among an application's at
+all.
+
+**A consequence for the admin.** The admin's reads of a table with row-level security now run
+inside a caller transaction at role 1, as the admin endpoints' row reads already did. Before,
+the policies of a `FORCE`d table met an unset caller and showed the Analytics UI no rows.
+
+**Owners and sharing.** A dataset and a workspace have an owner and may be shared with a role
+(`Sharing { owner, share_role }`). Sharing is by **role floor**, the way this system already says
+"these people": shared with 40, a thing is seen by every user at 40 or more privileged, as a
+table's `min_role_read` admits them. The admin and the owner see it (`admits`). Only they rename
+it, change it, delete it or share it (`may_change`). A thing with no owner was made by the admin
+before owners existed, and is the admin's. `_fd_datasets` gained `owner` and `share_role`; they
+are not part of the definition, so no fit's snapshot hash changes when a dataset is shared.
+`_fd_workspaces` gained `share_role` and `application`, and its `created_by` is the owner. The
+columns are nullable, so the bootstrap adds them; nothing goes in `TABLES_RENAME.sql`.
+`shareDataset` and `shareWorkspace` set the role. Dataset summaries and workspaces carry
+`share_role` and `may_change`, so a list offers only what the caller may do. Sharing a dataset
+shares its *definition*. Each reader still reads their own rows of it.
+
+#### The framework (`sc_analytics::app`)
+
+The settings, in the `FormField` vocabulary every framework uses (`analytics_config_spec`),
+each mode's shown only in that mode (`show_if`):
+
+| setting | mode | what it is |
+|---|---|---|
+| `mode` | both | `fixed` or `self_serve` (default `fixed`) |
+| `min_role` | both | the role floor: the least privileged role that may use it. Defaults to 1, so an application nobody has thought about yet is shown to nobody else |
+| `workspaces` | fixed | the workspaces shown, in order, each by name or id |
+| `dataset_editor` | self-serve | whether users may create and edit datasets |
+| `workspace_kinds` | self-serve | the kinds they may open (default `["data_explorer"]`) |
+| `create_workspaces` | self-serve | whether they may create workspaces of those kinds (default yes) |
+
+**The tables a self-serve application builds on are the application's own `tables`**, the
+subset every application already declares (§13.2) and the application form already has a
+picker for. They are not a second list in the framework's settings: two lists that had to agree
+would eventually not. (The milestone's plan had a list in the settings. Using `tables` is a
+deliberate deviation, recorded in the CHANGELOG.) In fixed mode `tables` is not read. What a
+fixed application grants is the datasets its workspaces read.
+
+`AnalyticsConfig::read` checks everything that can be checked without the database. It refuses
+an unknown mode, a role outside 1–100, a fixed application with no workspaces, a kind that has
+not arrived (A7's Simulation), and a self-serve application with nothing to do (no kinds and no
+Dataset editor). `check_config_against`, the factory hook of §13.3, runs on save. Each workspace
+named must exist, be the only one of its name (otherwise it is named by id), belong to the
+unrestricted UI rather than to an application, and be of a kind that can be opened.
+
+#### Mounting (`sc_server::analytics_app`)
+
+`AnalyticsFactory` is installed into `sc-app`'s registry beside Saltcorn UI. A mount
+(`AnalyticsFramework`) has nothing to build. It serves the same `ui/analytics` bundle the admin
+host serves: the document at `/` (and `/analytics/`, so a link copied from one host works on the
+other), with `Cache-Control: no-cache`, and the content-hashed assets at `/analytics/…`, the paths
+the bundle already links them by, as immutable. `serve` hands the bundle's directory to
+`AppMounts::with_analytics_dir`. The default policy (`analytics_app_csp`) is the admin host's
+Analytics UI policy with the default base map's origins. A base map from elsewhere is the
+admin's to add to the application's own policy.
+
+**The router** sends an Analytics application's `/api/…` paths to `dispatch_analytics_api`. They
+come after its API providers and static directories, which the admin stated and so win, and
+before the framework, whose document would otherwise answer. The dispatch is the admin
+dispatcher's, with three differences:
+
+1. **Only `APP_ENDPOINTS`.** These are the Analytics UI's endpoints minus what is the admin's
+   alone: models and their outputs, public datasets, Settings → Maps (`allowMapHost`). Anything
+   else under `/api/` is a 404 there, as any endpoint an application does not expose is.
+2. **The application's role floor** replaces the admin's. The endpoints are declared admin-only
+   for the admin host, and here the floor is `min_role`. `authStatus`, `login` and `logout` keep
+   their own requirement, so a visitor can find out who they are and sign in. Below the floor
+   the answer is 403, and nobody signed in gets 401.
+3. **The handler is told the application** (`HandlerCtx::analytics_app`, an `AppScope`). It is
+   loaded on each request from the stored application and the workspaces as they are now, so
+   what the application allows is always the server's answer.
+
+The session is the application's own cookie on its own host, made by the same `login` endpoint.
+On an application's host `login` signs in any user with the right password, and the role floor
+decides from then on. `analyticsShell` tells the bundle what it is running as: the application
+(its name, mode, what it allows, a fixed application's workspaces) and the roles, for the Share
+select. On the admin host `application` is `null`.
+
+**Workspaces belong to an application or to the unrestricted UI** (`application`). One made
+through a self-serve application belongs to it. The admin host's lists show the unrestricted
+UI's own, though the admin can open any workspace by its id. A fixed application shows the
+unrestricted UI's workspaces, which is why `check_config_against` refuses one that belongs to an
+application.
+
+#### Enforcement (`AppScope`, and `Access` in `sc-server`'s `analytics.rs`)
+
+Every analytics handler starts with `Access::of(ctx)`: the caller, narrowed by `AppScope::narrow`
+to the application's tables in self-serve mode, and the application, if any. It asks before it
+does anything, whatever the client sent:
+
+| | fixed | self-serve |
+|---|---|---|
+| datasets seen | those the shown workspaces read (`workspace_datasets`: their panels', an explorer's chosen dataset, a map's layers) | the caller's own and those shared with their role, whose chain of bases starts at one of the application's tables (`root_table`) |
+| the base picker, a formula's completions | nothing | the application's tables |
+| a definition sent to be read | the stored one, **as stored**, whatever operations came with it | with the Dataset editor on, as sent: a stored one must be seen, an unsaved one needs a base that may be built on. With it off, a stored one as stored, and nothing unsaved |
+| creating, changing, sharing, deleting datasets | never | with the Dataset editor on; changing only by the owner |
+| `saveSelection`, `runMapTool` (they make datasets) | never | as creating a dataset |
+| workspaces seen | those shown | the application's, of a kind it allows, the caller's own or shared with them |
+| creating workspaces | never | of an allowed kind, if `create_workspaces` |
+| changing a workspace (rename, share, state, delete) | never | by its owner |
+
+Plots, tables, tests, cards, layers, tiles, maps and panels check every dataset they read,
+including the datasets of a dashboard's conditions (§14.8). A dataset or workspace the caller does
+not see is a 404, answered as one that is not there. A refused action is the 401 of
+`Error::auth`, because there is no 403 kind of error yet. In fixed mode the reads are not
+narrowed to a table list. The grant is the shown workspaces' datasets, read as stored, and the
+caller's table permissions still decide their rows.
+
+#### The restricted shell (`ui/analytics/src/shell.tsx`)
+
+The bundle reads `analyticsShell` before it draws anything and keeps the answer in a context
+(`useShell`). A screen that would offer something an application does not allow asks the context
+first. In an application:
+
+- a visitor gets a sign-in form, and a role below the floor gets "this application is not open
+  to your role";
+- the header shows the application's name and a Sign out button, with no Admin link, and in
+  fixed mode there is no Split;
+- a fixed application showing one workspace opens on it. One showing several has a front page
+  of those workspaces alone (`FixedHome`);
+- models are hidden. A route to one, or to anything a fixed application does not show, says
+  "This application does not show that";
+- a workspace the caller may not change saves nothing. The dashboard hides its editing (Add,
+  move, resize, rename, remove) and keeps filtering and drilling;
+- the dataset and workspace lists hide what the caller may not do, and offer a Share select
+  (`share.tsx`) to whoever may change a row.
+
+None of this is a defence: the server enforces all of it whatever the bundle does. The shell only
+avoids offering what would be refused.
+
+**Not yet.** A report, a map and an explorer shown read-only still offer their editing controls.
+Nothing they change is saved, but only the dashboard hides them. Refusals are 401s until there
+is a 403 kind.
+
+**Tests.** `sc-dataset`'s guard tests find every table at any depth. `sc-analytics`'s `app` tests
+cover the settings and both modes' policy. `sc-server`'s `analytics_apps.rs` runs both modes and
+row-level security over a small schema. `analytics_done::the_try_it_of_milestone_a9` is the
+milestone's Try it over the demo data, with both applications at once: what a `staff` user sees
+and reads in each, before and after an ownership formula narrows `houses`, against the admin's
+reads of every row.
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
@@ -9286,6 +10428,14 @@ dependency — both detailed in §13.5.
 (no inline handlers) rather than a server markup model; framework-level XSS escaping in the
 React layer; structural SQL-injection safety in `sc-query`; per-CRUD authorization enforced
 at the query layer or via RLS; passwords argon2id; optional OAuth2 IdP; new-device detection.
+
+**Response compression.** Every response the client accepts it for is compressed with brotli or
+gzip (`tower-http`'s `CompressionLayer`, just inside the request log in `build_router`). The
+default predicate leaves out Server-Sent Events, images, gRPC and bodies under 32 bytes. Zip
+archives are left out too. Already-encoded and range responses are skipped, and
+`Vary: accept-encoding` is added. Quality is tower-http's default (brotli and gzip at 4), which
+suits dynamic JSON. About BREACH: the secrets a cross-site attacker wants, the CSRF token and
+the session, travel in cookies, and headers are not compressed.
 
 **Clear all** (Settings → Development, `sc-server`'s `clear_all.rs`) resets a running
 installation to the empty state, as Saltcorn 1's button of the same name did. Every table the

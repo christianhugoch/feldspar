@@ -142,12 +142,18 @@ pub async fn available(catalog: &Catalog) -> Result<Available> {
         workspaces,
         fits,
         llm_providers: if has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
-            count(sc_llm::list_llm_providers(catalog).await?.len())
+            count(stored_llm_providers(catalog).await?.len())
         } else {
             0
         },
         agents: i64::try_from(sc_agent::list_agents(catalog).await?.len()).unwrap_or(i64::MAX),
-        triggers: i64::try_from(sc_action::list_triggers(catalog).await?.len()).unwrap_or(i64::MAX),
+        // Bootstrapped by `serve` rather than at connect, so a database no server
+        // has run on yet — one a `feldspar backup` can be pointed at — has none.
+        triggers: if has_table(catalog, sc_action::TRIGGERS_TABLE)? {
+            count(sc_action::list_triggers(catalog).await?.len())
+        } else {
+            0
+        },
         views: i64::try_from(views).unwrap_or(i64::MAX),
         pages: i64::try_from(pages).unwrap_or(i64::MAX),
         // There is always an SSL section to include, even when every value in it
@@ -440,7 +446,7 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
     // validates, and a provider without its key does not.
     if selection.llm_providers && has_table(catalog, sc_llm::LLM_PROVIDERS_TABLE)? {
         let mut providers = Vec::new();
-        for def in sc_llm::list_llm_providers(catalog).await? {
+        for def in stored_llm_providers(catalog).await? {
             let models = sc_llm::list_llm_models(catalog, &def).await?;
             providers.push(backup_llm_provider_json(&def, &models));
         }
@@ -513,7 +519,14 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
             .filter(|section| section.name != SSL_SECTION)
         {
             let mut values = Map::new();
-            for field in &section.fields {
+            // Where the admin UI is served is this host's, as its TLS settings
+            // are: restored onto another host it would move that host's admin
+            // UI to a name nobody pointed at it.
+            for field in section
+                .fields
+                .iter()
+                .filter(|field| field.key() != sc_config::ADMIN_SUBDOMAIN)
+            {
                 if let Some(value) = stored.get(field.key()) {
                     values.insert(field.key().to_owned(), value.clone());
                 }
@@ -761,12 +774,16 @@ fn file_mode(_store: &dyn sc_files::FileStore, _path: &str) -> Option<u32> {
 ///
 /// Directories are not recorded: an empty directory carries no information a
 /// restore could not recreate, and every non-empty one is implied by the paths of
-/// the files in it.
+/// the files in it. A `node_modules` is not descended into
+/// ([`super::is_installed_dependency`]).
 async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut pending = vec![dir.to_owned()];
     while let Some(dir) = pending.pop() {
         for entry in store.list(&dir).await? {
+            if super::is_installed_dependency(&entry.path) {
+                continue;
+            }
             if entry.is_dir {
                 pending.push(entry.path);
             } else {
@@ -827,4 +844,17 @@ impl ZipBuilder {
 
 fn zip_error(path: &str, message: &str) -> Error {
     Error::msg(format!("could not write {path} into the backup: {message}"))
+}
+
+/// The LLM providers the admin added — not the one the configuration file
+/// supplies, whose key is the operator's and stays in that file. An agent
+/// naming it is restored onto an installation whose file supplies the same
+/// name, and is reported unrestorable elsewhere, like any agent whose provider
+/// is missing.
+async fn stored_llm_providers(catalog: &Catalog) -> Result<Vec<sc_llm::LlmProviderDef>> {
+    Ok(sc_llm::list_llm_providers(catalog)
+        .await?
+        .into_iter()
+        .filter(|def| !sc_llm::is_host_llm_provider(catalog, def.id))
+        .collect())
 }

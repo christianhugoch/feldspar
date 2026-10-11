@@ -156,6 +156,16 @@ pub struct Catalog {
     /// `feldspar.toml` environment. `None` where nobody said, which is a normal
     /// state: a server with no base domain serves no applications.
     public_origin: RwLock<Option<crate::PublicOrigin>>,
+    /// Configuration values this **host** pins over `_fd_config` — the TLS keys
+    /// an `[environments.*]` section of `feldspar.toml` may give. Set once at
+    /// boot by the process that read the file, and read by `sc-config`, which
+    /// is what gives the values their meaning; empty where nothing is pinned.
+    host_config: RwLock<sc_types::Attrs>,
+    /// The LLM provider this **host** supplies — an `[environments.*]`
+    /// section's `llm_provider` in `feldspar.toml` — held here and never in
+    /// `_fd_llm_providers`. Opaque at this layer, like the hosts above it: `sc-llm`
+    /// sets it and is the only reader that knows its type.
+    host_llm_provider: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     /// How many times this catalog has been (re)loaded — the **generation
     /// stamp**, bumped by [`reload`](Catalog::reload) and by nothing else.
     ///
@@ -259,11 +269,18 @@ impl Catalog {
             table_providers: RwLock::new(None),
             provided_table_issues: RwLock::new(Vec::new()),
             public_origin: RwLock::new(None),
+            host_config: RwLock::new(sc_types::Attrs::new()),
+            host_llm_provider: RwLock::new(None),
             table_events: RwLock::new(None),
             generation: AtomicU64::new(0),
             code_schema: RwLock::new(None),
             run_wakeups: crate::RunWakeups::new(),
         };
+        // Whether the database has PostGIS (analytics TODO A5.1). Asking is not
+        // installing it — `bootstrap_spatial` does that, on a server's boot —
+        // and a database that cannot say is one without geometry, not a
+        // catalog that cannot start.
+        let _ = catalog.primary.detect_spatial().await;
         catalog.reload().await?;
         Ok(catalog)
     }
@@ -983,6 +1000,40 @@ impl Catalog {
             .read()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Replace the configuration values this host pins over `_fd_config`.
+    ///
+    /// Not checked here: this layer does not know what a setting is.
+    /// `sc_config::set_host_config` checks each against its declaration and is
+    /// the way to call this.
+    pub fn set_host_config(&self, values: sc_types::Attrs) {
+        if let Ok(mut guard) = self.host_config.write() {
+            *guard = values;
+        }
+    }
+
+    /// The configuration values this host pins, empty where it pins none.
+    pub fn host_config(&self) -> sc_types::Attrs {
+        self.host_config
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace the LLM provider this host supplies, or remove it with `None`.
+    ///
+    /// Not checked here: `sc_llm::set_host_llm_provider` is the way to call
+    /// this, and what it stores is that crate's type.
+    pub fn set_host_llm_provider(&self, provider: Option<Arc<dyn std::any::Any + Send + Sync>>) {
+        if let Ok(mut guard) = self.host_llm_provider.write() {
+            *guard = provider;
+        }
+    }
+
+    /// The LLM provider this host supplies, if it supplies one.
+    pub fn host_llm_provider(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.host_llm_provider.read().ok()?.clone()
     }
 
     /// What this process believes about workflow runs that want the engine.

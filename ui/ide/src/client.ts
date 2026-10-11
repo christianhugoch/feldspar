@@ -15,6 +15,8 @@ export type CreateTableRequest = { name: string; database?: string | null };
 export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type CreateTableFromCsvRequest = { name: string; csv: string; database?: string | null };
 export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number };
+export type CreateTableFromGeoFileRequest = { name: string; file_name: string; content_base64: string; layer?: string | null; database?: string | null };
+export type CreateTableFromGeoFileResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number; warnings: Array<string> };
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean };
 export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; database: string; metadata: boolean; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DropTableResponse = { dropped: string };
@@ -75,12 +77,13 @@ export type RunBackendOperationRequest = { name: string; config: unknown; input:
 export type RunBackendOperationResponse = { config: unknown; output: string; data?: unknown | null };
 export type RunFileStoreOperationRequest = { input: unknown };
 export type RunFileStoreOperationResponse = { config: unknown; output: string; data?: unknown | null; connected: boolean };
-export type ListLlmProvidersResponse = Array<{ id: string; name: string; description: string; backend: string; config: unknown }>;
+export type ListLlmProvidersResponse = Array<{ id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean }>;
 export type CreateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
-export type CreateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type CreateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type UpdateLlmProviderRequest = { name: string; description: string; backend: string; config: unknown };
-export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown };
+export type UpdateLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type DeleteLlmProviderResponse = { deleted: boolean };
+export type SetDefaultLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
 export type CreateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
@@ -249,7 +252,7 @@ export type SaveModelRequest = { id?: string | null; name: string; description?:
 export type SaveModelResponse = { id: string; name: string; description: string; provider: string; table_name: string; dataset: unknown; related: unknown; configuration: unknown; hyperparameters: unknown; split: unknown; attributes: unknown; error?: string | null; instances: number; last_fit?: { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null; progress?: unknown | null; cancel_requested: boolean; warnings: Array<string>; dataset_changed?: boolean | null } | null; active_instance?: { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null; progress?: unknown | null; cancel_requested: boolean; warnings: Array<string>; dataset_changed?: boolean | null } | null; program_check?: unknown | null; view_state?: unknown | null };
 export type CloneModelRequest = { name?: string | null };
 export type CloneModelResponse = { id: string; name: string; description: string; provider: string; table_name: string; dataset: unknown; related: unknown; configuration: unknown; hyperparameters: unknown; split: unknown; attributes: unknown; error?: string | null; instances: number; last_fit?: { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null; progress?: unknown | null; cancel_requested: boolean; warnings: Array<string>; dataset_changed?: boolean | null } | null; active_instance?: { id: string; model: string; name: string; description: string; status: string; created: string; active: boolean; error?: string | null; hyperparameters: unknown; outcome?: unknown | null; metrics: unknown; rows?: unknown | null; progress?: unknown | null; cancel_requested: boolean; warnings: Array<string>; dataset_changed?: boolean | null } | null; program_check?: unknown | null; view_state?: unknown | null };
-export type ModelUsageResponse = { fields: Array<{ table: string; field: string }>; triggers: Array<{ id: string; name: string; how: string }> };
+export type ModelUsageResponse = { fields: Array<{ table: string; field: string }>; triggers: Array<{ id: string; name: string; how: string }>; workspaces: Array<{ id: string; name: string; kind: string; panels: number }> };
 export type PatchModelViewStateRequest = { patch: unknown };
 export type PatchModelViewStateResponse = { view_state: unknown };
 export type DeleteModelResponse = { deleted: boolean };
@@ -284,27 +287,40 @@ export type SaveStreamRequest = { id?: string | null; name: string; description?
 export type SaveStreamResponse = { id: string; name: string; description: string; provider: string; configuration: unknown; min_role?: number | null; attributes: unknown; enabled: boolean; element_type?: unknown | null; error?: string | null; status?: unknown | null; counters?: unknown | null };
 export type DeleteStreamResponse = { deleted: boolean };
 export type StreamStatusResponse = { id: string; name: string; running: boolean; status?: unknown | null; counters?: unknown | null; element_type?: unknown | null; listeners: number };
-export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown };
+export type GetSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown; host_keys: Array<string> };
 export type UpdateSettingsRequest = { values: unknown };
-export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown };
+export type UpdateSettingsResponse = { sections: Array<{ name: string; label: string; description: string; fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; show_if: Array<{ name: string; values: Array<unknown> }>; help: string }> }>; values: unknown; host_keys: Array<string> };
+export type GetAdminAddressResponse = { base_domain?: string | null; admin_subdomain?: string | null; admin_host?: string | null; ready: boolean; certificate?: { state: string; message?: string | null } | null };
+export type CreateAdminHandoffResponse = { host: string; path: string };
 export type SendTestEmailRequest = { to?: string | null };
 export type SendTestEmailResponse = { sent_to: string };
 export type GetPythonStatusResponse = { state: string; version?: string | null; explanation: string; dir?: string | null; site_packages?: string | null; bin?: string | null; packages: Array<{ name: string; version?: string | null }>; max_inflight: number; resident: number; threads: number; stuck: number; max_stuck: number; env_error?: string | null };
 export type GetBackupOptionsResponse = { available: { tables: Array<{ name: string; label: string; count?: number | null }>; applications: Array<{ name: string; label: string; count?: number | null }>; file_stores: Array<{ name: string; label: string; count?: number | null }>; users: number; modules: number; db_connections: number; streams: number; datasets: number; models: number; workspaces: number; fits: number; llm_providers: number; agents: number; triggers: number; views: number; pages: number; ssl: boolean; settings: boolean }; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean } };
 export type RestoreBackupRequest = { id: string; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean } };
 export type RestoreBackupResponse = { restored: Array<string>; warnings: Array<string> };
+export type ListBackupSchedulesResponse = Array<{ id: string; destination: { kind: string; directory?: string | null; host?: string | null; port?: number | null; username?: string | null; password?: string | null; host_key?: string | null; endpoint?: string | null; bucket?: string | null; region?: string | null; access_key?: string | null; secret_key?: string | null }; frequency: string; retention_days: number; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean }; location: string; last_attempt_at?: string | null; last_success_at?: string | null; last_error?: string | null; last_file?: string | null }>;
+export type CreateBackupScheduleRequest = { destination: { kind: string; directory?: string | null; host?: string | null; port?: number | null; username?: string | null; password?: string | null; host_key?: string | null; endpoint?: string | null; bucket?: string | null; region?: string | null; access_key?: string | null; secret_key?: string | null }; frequency: string; retention_days: number; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean } };
+export type CreateBackupScheduleResponse = { id: string; destination: { kind: string; directory?: string | null; host?: string | null; port?: number | null; username?: string | null; password?: string | null; host_key?: string | null; endpoint?: string | null; bucket?: string | null; region?: string | null; access_key?: string | null; secret_key?: string | null }; frequency: string; retention_days: number; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean }; location: string; last_attempt_at?: string | null; last_success_at?: string | null; last_error?: string | null; last_file?: string | null };
+export type UpdateBackupScheduleRequest = { destination: { kind: string; directory?: string | null; host?: string | null; port?: number | null; username?: string | null; password?: string | null; host_key?: string | null; endpoint?: string | null; bucket?: string | null; region?: string | null; access_key?: string | null; secret_key?: string | null }; frequency: string; retention_days: number; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean } };
+export type UpdateBackupScheduleResponse = { id: string; destination: { kind: string; directory?: string | null; host?: string | null; port?: number | null; username?: string | null; password?: string | null; host_key?: string | null; endpoint?: string | null; bucket?: string | null; region?: string | null; access_key?: string | null; secret_key?: string | null }; frequency: string; retention_days: number; include: { tables: Array<string>; table_data: Array<string>; applications: Array<string>; file_stores: Array<string>; users: boolean; modules: boolean; db_connections: boolean; streams: boolean; analytics: boolean; fits: boolean; llm_providers: boolean; agents: boolean; triggers: boolean; views: boolean; pages: boolean; ssl: boolean; settings: boolean }; location: string; last_attempt_at?: string | null; last_success_at?: string | null; last_error?: string | null; last_file?: string | null };
+export type DeleteBackupScheduleResponse = { deleted: boolean };
 export type GetClearAllPreviewResponse = { file_stores: Array<{ name: string; backend: string; directory?: string | null }> };
 export type ClearAllRequest = { delete_from_disk: Array<string> };
 export type ClearAllResponse = { cleared: Array<string>; warnings: Array<string> };
-export type ListDatasetsResponse = Array<{ id: string; name: string; description: string; base: unknown; table: string; operations: number; columns: Array<unknown>; error?: string | null; grain?: unknown | null }>;
+export type ListDatasetsResponse = Array<{ id: string; name: string; description: string; base: unknown; table: string; operations: number; columns: Array<unknown>; error?: string | null; grain?: unknown | null; share_role?: number | null; may_change: boolean }>;
 export type GetDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CreateDatasetRequest = { name: string; description?: string | null; base: unknown; operations?: unknown | null };
 export type CreateDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type UpdateDatasetRequest = { name: string; description?: string | null; base: unknown; operations?: unknown | null };
 export type UpdateDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
+export type ShareDatasetRequest = { share_role?: number | null };
+export type ShareDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
 export type CloneDatasetRequest = { name?: string | null };
 export type CloneDatasetResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
-export type DatasetUsageResponse = { datasets: Array<{ id: string; name: string }>; models: Array<{ id: string; name: string }> };
+export type ListPublicDatasetsResponse = Array<{ key: string; title: string; category: string; description: string; homepage: string; licence: string; licence_url: string; attribution: string; tables: Array<string>; rows: number; download_bytes: number; installed: boolean; unavailable?: string | null; dataset_id?: string | null; job?: { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null } | null }>;
+export type InstallPublicDatasetResponse = { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null };
+export type GetPublicDatasetInstallResponse = { key: string; status: string; stage?: string | null; subject?: string | null; done: number; total: number; started_at: string; finished_at?: string | null; dataset_id?: string | null; dataset_name?: string | null; rows?: number | null; error?: string | null };
+export type DatasetUsageResponse = { datasets: Array<{ id: string; name: string }>; models: Array<{ id: string; name: string }>; workspaces: Array<{ id: string; name: string; kind: string; panels: number }> };
 export type DatasetShapesRequest = { dataset: unknown };
 export type DatasetShapesResponse = { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown };
 export type ValidateDatasetOperationRequest = { dataset: unknown; position: number; replace?: boolean | null; operation: unknown };
@@ -323,17 +339,41 @@ export type RunTestsRequest = { spec: unknown };
 export type RunTestsResponse = { error?: string | null; problems?: Array<string> | null; design?: string | null; y?: Array<string> | null; x?: string | null; by?: string | null; mu?: number | null; level?: number | null; sections?: Array<unknown> | null };
 export type SuggestPlotRequest = { dataset: string; assignment?: unknown | null; preset?: string | null; mark?: string | null };
 export type SuggestPlotResponse = { spec?: unknown | null; assignment?: unknown | null; error?: string | null };
+export type LayerDataRequest = { layer: unknown };
+export type LayerDataResponse = { delivery: string; error?: string | null; count?: number | null; vertices?: number | null; bounds?: Array<number> | null; geometry?: Array<string> | null; properties?: Array<unknown> | null; data?: unknown | null; tiles?: string | null; source_layer?: string | null; keyed?: boolean | null };
+export type LayerTileQuery = { layer: string };
+export type LayerRowsRequest = { layer: unknown; sort?: unknown | null; limit?: number | null };
+export type LayerRowsResponse = { error?: string | null; columns?: Array<unknown> | null; rows?: Array<unknown> | null; ids?: Array<unknown> | null; total?: number | null; keyed?: boolean | null; sorted?: boolean | null };
+export type SelectFeaturesRequest = { layer: unknown; by: unknown };
+export type SelectFeaturesResponse = { error?: string | null; ids?: Array<unknown> | null; count?: number | null; truncated?: boolean | null; condition?: string | null };
+export type SaveSelectionRequest = { layer: unknown; name: string; ids?: Array<unknown> | null; condition?: string | null };
+export type SaveSelectionResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
+export type MapSettingsResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string> };
+export type AllowMapHostRequest = { url: string };
+export type AllowMapHostResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string> };
+export type ListMapToolsResponse = Array<{ id: string; group: string; label: string; description: string; params: Array<unknown>; module?: string | null }>;
+export type RunMapToolRequest = { tool: string; params: unknown; name?: string | null };
+export type RunMapToolResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown }; layer: unknown };
+export type SuggestMapRequest = { dataset: string; assignment?: unknown | null; geometry?: unknown | null };
+export type SuggestMapResponse = { spec?: unknown | null; sources: Array<unknown>; error?: string | null };
+export type RenderMapRequest = { spec: unknown };
+export type RenderMapResponse = { layers: Array<unknown> };
+export type RenderPanelRequest = { panel: unknown; filters?: Array<unknown> | null };
+export type RenderPanelResponse = { kind: string; error?: string | null; plot?: unknown | null; table?: unknown | null; tests?: unknown | null; output?: unknown | null; map?: unknown | null; card?: unknown | null; categorical?: Array<string> | null; filters?: Array<unknown> | null };
 export type GetModelOutputsQuery = { fit?: string; include?: string };
 export type GetModelOutputsResponse = { model: string; fit?: unknown | null; outputs: Array<unknown> };
+export type AnalyticsShellResponse = { application?: unknown | null; roles: Array<{ role: number; name: string }> };
 export type ListWorkspaceKindsResponse = Array<{ kind: string; label: string; available: boolean; arrives_in?: string | null }>;
-export type ListWorkspacesResponse = Array<{ id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string }>;
-export type GetWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type ListWorkspacesResponse = Array<{ id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean }>;
+export type GetWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type CreateWorkspaceRequest = { name: string; kind: string };
-export type CreateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type CreateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type UpdateWorkspaceRequest = { name: string };
-export type UpdateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type UpdateWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
+export type ShareWorkspaceRequest = { share_role?: number | null };
+export type ShareWorkspaceResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 export type SaveWorkspaceStateRequest = { state: unknown };
-export type SaveWorkspaceStateResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string };
+export type SaveWorkspaceStateResponse = { id: string; name: string; kind: string; state: unknown; created_by?: string | null; updated_at: string; share_role?: number | null; application?: string | null; may_change: boolean };
 
 export interface ApiClient {
   authStatus(): Promise<AuthStatusResponse>;
@@ -343,6 +383,7 @@ export interface ApiClient {
   listTables(): Promise<ListTablesResponse>;
   createTable(body: CreateTableRequest): Promise<CreateTableResponse>;
   createTableFromCsv(body: CreateTableFromCsvRequest): Promise<CreateTableFromCsvResponse>;
+  createTableFromGeoFile(body: CreateTableFromGeoFileRequest): Promise<CreateTableFromGeoFileResponse>;
   updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
   dropTable(table: string): Promise<DropTableResponse>;
   listMetadataTables(): Promise<ListMetadataTablesResponse>;
@@ -388,6 +429,7 @@ export interface ApiClient {
   createLlmProvider(body: CreateLlmProviderRequest): Promise<CreateLlmProviderResponse>;
   updateLlmProvider(id: string, body: UpdateLlmProviderRequest): Promise<UpdateLlmProviderResponse>;
   deleteLlmProvider(id: string): Promise<DeleteLlmProviderResponse>;
+  setDefaultLlmProvider(id: string): Promise<SetDefaultLlmProviderResponse>;
   listLlmProviderBackends(): Promise<ListLlmProviderBackendsResponse>;
   listLlmModels(id: string): Promise<ListLlmModelsResponse>;
   createLlmModel(id: string, body: CreateLlmModelRequest): Promise<CreateLlmModelResponse>;
@@ -523,10 +565,16 @@ export interface ApiClient {
   streamStatus(id: string): Promise<StreamStatusResponse>;
   getSettings(): Promise<GetSettingsResponse>;
   updateSettings(body: UpdateSettingsRequest): Promise<UpdateSettingsResponse>;
+  getAdminAddress(): Promise<GetAdminAddressResponse>;
+  createAdminHandoff(): Promise<CreateAdminHandoffResponse>;
   sendTestEmail(body: SendTestEmailRequest): Promise<SendTestEmailResponse>;
   getPythonStatus(): Promise<GetPythonStatusResponse>;
   getBackupOptions(): Promise<GetBackupOptionsResponse>;
   restoreBackup(body: RestoreBackupRequest): Promise<RestoreBackupResponse>;
+  listBackupSchedules(): Promise<ListBackupSchedulesResponse>;
+  createBackupSchedule(body: CreateBackupScheduleRequest): Promise<CreateBackupScheduleResponse>;
+  updateBackupSchedule(id: string, body: UpdateBackupScheduleRequest): Promise<UpdateBackupScheduleResponse>;
+  deleteBackupSchedule(id: string): Promise<DeleteBackupScheduleResponse>;
   getClearAllPreview(): Promise<GetClearAllPreviewResponse>;
   clearAll(body: ClearAllRequest): Promise<ClearAllResponse>;
   listDatasets(): Promise<ListDatasetsResponse>;
@@ -534,7 +582,11 @@ export interface ApiClient {
   createDataset(body: CreateDatasetRequest): Promise<CreateDatasetResponse>;
   updateDataset(id: string, body: UpdateDatasetRequest): Promise<UpdateDatasetResponse>;
   deleteDataset(id: string): Promise<void>;
+  shareDataset(id: string, body: ShareDatasetRequest): Promise<ShareDatasetResponse>;
   cloneDataset(id: string, body: CloneDatasetRequest): Promise<CloneDatasetResponse>;
+  listPublicDatasets(): Promise<ListPublicDatasetsResponse>;
+  installPublicDataset(key: string): Promise<InstallPublicDatasetResponse>;
+  getPublicDatasetInstall(key: string): Promise<GetPublicDatasetInstallResponse>;
   datasetUsage(id: string): Promise<DatasetUsageResponse>;
   datasetShapes(body: DatasetShapesRequest): Promise<DatasetShapesResponse>;
   validateDatasetOperation(body: ValidateDatasetOperationRequest): Promise<ValidateDatasetOperationResponse>;
@@ -546,12 +598,26 @@ export interface ApiClient {
   plotGallery(): Promise<PlotGalleryResponse>;
   runTests(body: RunTestsRequest): Promise<RunTestsResponse>;
   suggestPlot(body: SuggestPlotRequest): Promise<SuggestPlotResponse>;
+  layerData(body: LayerDataRequest): Promise<LayerDataResponse>;
+  layerTile(z: number, x: number, y: number, query: LayerTileQuery): Promise<Blob>;
+  layerRows(body: LayerRowsRequest): Promise<LayerRowsResponse>;
+  selectFeatures(body: SelectFeaturesRequest): Promise<SelectFeaturesResponse>;
+  saveSelection(body: SaveSelectionRequest): Promise<SaveSelectionResponse>;
+  mapSettings(): Promise<MapSettingsResponse>;
+  allowMapHost(body: AllowMapHostRequest): Promise<AllowMapHostResponse>;
+  listMapTools(): Promise<ListMapToolsResponse>;
+  runMapTool(body: RunMapToolRequest): Promise<RunMapToolResponse>;
+  suggestMap(body: SuggestMapRequest): Promise<SuggestMapResponse>;
+  renderMap(body: RenderMapRequest): Promise<RenderMapResponse>;
+  renderPanel(body: RenderPanelRequest): Promise<RenderPanelResponse>;
   getModelOutputs(id: string, query?: GetModelOutputsQuery): Promise<GetModelOutputsResponse>;
+  analyticsShell(): Promise<AnalyticsShellResponse>;
   listWorkspaceKinds(): Promise<ListWorkspaceKindsResponse>;
   listWorkspaces(): Promise<ListWorkspacesResponse>;
   getWorkspace(id: string): Promise<GetWorkspaceResponse>;
   createWorkspace(body: CreateWorkspaceRequest): Promise<CreateWorkspaceResponse>;
   updateWorkspace(id: string, body: UpdateWorkspaceRequest): Promise<UpdateWorkspaceResponse>;
+  shareWorkspace(id: string, body: ShareWorkspaceRequest): Promise<ShareWorkspaceResponse>;
   saveWorkspaceState(id: string, body: SaveWorkspaceStateRequest): Promise<SaveWorkspaceStateResponse>;
   deleteWorkspace(id: string): Promise<void>;
 }
@@ -619,6 +685,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("createTableFromCsv", res);
       return (await res.json()) as CreateTableFromCsvResponse;
+    },
+    async createTableFromGeoFile(body) {
+      const res = await doFetch(`${baseUrl}/api/tables/geo`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createTableFromGeoFile", res);
+      return (await res.json()) as CreateTableFromGeoFileResponse;
     },
     async updateTable(table, body) {
       const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}`, {
@@ -1008,6 +1083,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteLlmProvider", res);
       return (await res.json()) as DeleteLlmProviderResponse;
+    },
+    async setDefaultLlmProvider(id) {
+      const res = await doFetch(`${baseUrl}/api/llm-providers/${encodeURIComponent(id)}/default`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", false),
+      });
+      if (!res.ok) throw await clientError("setDefaultLlmProvider", res);
+      return (await res.json()) as SetDefaultLlmProviderResponse;
     },
     async listLlmProviderBackends() {
       const res = await doFetch(`${baseUrl}/api/llm-provider-backends`, {
@@ -2192,6 +2275,22 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("updateSettings", res);
       return (await res.json()) as UpdateSettingsResponse;
     },
+    async getAdminAddress() {
+      const res = await doFetch(`${baseUrl}/api/settings/admin-address`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getAdminAddress", res);
+      return (await res.json()) as GetAdminAddressResponse;
+    },
+    async createAdminHandoff() {
+      const res = await doFetch(`${baseUrl}/api/settings/admin-address/handoff`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("createAdminHandoff", res);
+      return (await res.json()) as CreateAdminHandoffResponse;
+    },
     async sendTestEmail(body) {
       const res = await doFetch(`${baseUrl}/api/settings/email/test`, {
         method: "POST",
@@ -2225,6 +2324,40 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("restoreBackup", res);
       return (await res.json()) as RestoreBackupResponse;
+    },
+    async listBackupSchedules() {
+      const res = await doFetch(`${baseUrl}/api/backup/schedules`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listBackupSchedules", res);
+      return (await res.json()) as ListBackupSchedulesResponse;
+    },
+    async createBackupSchedule(body) {
+      const res = await doFetch(`${baseUrl}/api/backup/schedules`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createBackupSchedule", res);
+      return (await res.json()) as CreateBackupScheduleResponse;
+    },
+    async updateBackupSchedule(id, body) {
+      const res = await doFetch(`${baseUrl}/api/backup/schedules/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateBackupSchedule", res);
+      return (await res.json()) as UpdateBackupScheduleResponse;
+    },
+    async deleteBackupSchedule(id) {
+      const res = await doFetch(`${baseUrl}/api/backup/schedules/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteBackupSchedule", res);
+      return (await res.json()) as DeleteBackupScheduleResponse;
     },
     async getClearAllPreview() {
       const res = await doFetch(`${baseUrl}/api/clear-all`, {
@@ -2285,6 +2418,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("deleteDataset", res);
       return;
     },
+    async shareDataset(id, body) {
+      const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/share`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("shareDataset", res);
+      return (await res.json()) as ShareDatasetResponse;
+    },
     async cloneDataset(id, body) {
       const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/clone`, {
         method: "POST",
@@ -2293,6 +2435,30 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("cloneDataset", res);
       return (await res.json()) as CloneDatasetResponse;
+    },
+    async listPublicDatasets() {
+      const res = await doFetch(`${baseUrl}/api/public-datasets`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listPublicDatasets", res);
+      return (await res.json()) as ListPublicDatasetsResponse;
+    },
+    async installPublicDataset(key) {
+      const res = await doFetch(`${baseUrl}/api/public-datasets/${encodeURIComponent(key)}/install`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("installPublicDataset", res);
+      return (await res.json()) as InstallPublicDatasetResponse;
+    },
+    async getPublicDatasetInstall(key) {
+      const res = await doFetch(`${baseUrl}/api/public-datasets/${encodeURIComponent(key)}/install`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getPublicDatasetInstall", res);
+      return (await res.json()) as GetPublicDatasetInstallResponse;
     },
     async datasetUsage(id) {
       const res = await doFetch(`${baseUrl}/api/datasets/${encodeURIComponent(id)}/usage`, {
@@ -2390,6 +2556,114 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("suggestPlot", res);
       return (await res.json()) as SuggestPlotResponse;
     },
+    async layerData(body) {
+      const res = await doFetch(`${baseUrl}/api/layers`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("layerData", res);
+      return (await res.json()) as LayerDataResponse;
+    },
+    async layerTile(z, x, y, query) {
+      const search = new URLSearchParams();
+      search.append("layer", String(query.layer));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/layers/tiles/${encodeURIComponent(z)}/${encodeURIComponent(x)}/${encodeURIComponent(y)}${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("layerTile", res);
+      return await res.blob();
+    },
+    async layerRows(body) {
+      const res = await doFetch(`${baseUrl}/api/layers/rows`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("layerRows", res);
+      return (await res.json()) as LayerRowsResponse;
+    },
+    async selectFeatures(body) {
+      const res = await doFetch(`${baseUrl}/api/layers/select`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("selectFeatures", res);
+      return (await res.json()) as SelectFeaturesResponse;
+    },
+    async saveSelection(body) {
+      const res = await doFetch(`${baseUrl}/api/layers/selection`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveSelection", res);
+      return (await res.json()) as SaveSelectionResponse;
+    },
+    async mapSettings() {
+      const res = await doFetch(`${baseUrl}/api/maps/settings`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("mapSettings", res);
+      return (await res.json()) as MapSettingsResponse;
+    },
+    async allowMapHost(body) {
+      const res = await doFetch(`${baseUrl}/api/maps/hosts`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("allowMapHost", res);
+      return (await res.json()) as AllowMapHostResponse;
+    },
+    async listMapTools() {
+      const res = await doFetch(`${baseUrl}/api/maps/tools`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listMapTools", res);
+      return (await res.json()) as ListMapToolsResponse;
+    },
+    async runMapTool(body) {
+      const res = await doFetch(`${baseUrl}/api/maps/tools/run`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("runMapTool", res);
+      return (await res.json()) as RunMapToolResponse;
+    },
+    async suggestMap(body) {
+      const res = await doFetch(`${baseUrl}/api/maps/suggest`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("suggestMap", res);
+      return (await res.json()) as SuggestMapResponse;
+    },
+    async renderMap(body) {
+      const res = await doFetch(`${baseUrl}/api/maps/render`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("renderMap", res);
+      return (await res.json()) as RenderMapResponse;
+    },
+    async renderPanel(body) {
+      const res = await doFetch(`${baseUrl}/api/panels/render`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("renderPanel", res);
+      return (await res.json()) as RenderPanelResponse;
+    },
     async getModelOutputs(id, query) {
       const search = new URLSearchParams();
       if (query?.fit !== undefined && query?.fit !== null) search.append("fit", String(query?.fit));
@@ -2401,6 +2675,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("getModelOutputs", res);
       return (await res.json()) as GetModelOutputsResponse;
+    },
+    async analyticsShell() {
+      const res = await doFetch(`${baseUrl}/api/analytics/shell`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("analyticsShell", res);
+      return (await res.json()) as AnalyticsShellResponse;
     },
     async listWorkspaceKinds() {
       const res = await doFetch(`${baseUrl}/api/workspace-kinds`, {
@@ -2443,6 +2725,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("updateWorkspace", res);
       return (await res.json()) as UpdateWorkspaceResponse;
+    },
+    async shareWorkspace(id, body) {
+      const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/share`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("shareWorkspace", res);
+      return (await res.json()) as ShareWorkspaceResponse;
     },
     async saveWorkspaceState(id, body) {
       const res = await doFetch(`${baseUrl}/api/workspaces/${encodeURIComponent(id)}/state`, {

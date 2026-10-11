@@ -19,8 +19,10 @@
 //! [`admin_handlers`]; they are resolved by name against the [`sc_api`] admin
 //! endpoint set at dispatch time.
 
+mod admin_host;
 mod agents;
 mod analytics;
+mod analytics_app;
 mod apps;
 mod backup;
 mod browser;
@@ -49,17 +51,23 @@ mod serve;
 mod streams;
 mod systemd;
 // Build targets as background jobs the admin UI polls (§13.3).
+pub mod public_datasets;
 pub mod target_builds;
 mod tls;
 pub mod translations;
 mod triggers;
 
+pub use admin_host::{AdminHost, HANDOFF_ROUTE, HANDOFF_TTL};
 pub use agents::{AgentServices, install_agents, install_agents_on};
 pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, subdomain_of};
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
-    RestoreReport, Selection as BackupSelection,
+    BackupScheduler, RestoreReport, Selection as BackupSelection, available as backup_available,
+    inspect as inspect_backup, restore_backup, start_backup_scheduler, write_backup,
 };
+// The S3 request signer, for the fake S3 server the automated-backup tests
+// check every request's signature against.
+pub use backup::s3::{Signing as S3Signing, authorization as s3_authorization};
 pub use browser::{BROWSER_NAMES, ChromiumDriver, DriverConfig, detect_browser};
 pub use chat::AGENT_CHAT_ROUTE;
 pub use sc_agent::{ProviderConnector, StoredProviders};
@@ -139,7 +147,7 @@ pub use config::{
 pub use handler::{
     BoxFuture, HandlerCtx, HandlerFn, HandlerRegistry, HandlerResponse, SessionAction,
 };
-pub use handlers::admin_handlers;
+pub use handlers::{admin_handlers, admin_handlers_with};
 pub use i18n::{LANG_COOKIE, LANG_QUERY};
 pub use logging::log_requests;
 pub use lsp::{LSP_ROUTE, MAX_LANGUAGE_SERVERS};
@@ -163,7 +171,10 @@ pub use sc_expr::CodeAdapter;
 /// Where the bundled modules are in the checkout, re-exported: `sc-cli` needs to
 /// name the fallback and `sc-module` is not otherwise its dependency.
 pub use sc_module::BUNDLED_IN_CHECKOUT;
-pub use security::{ANALYTICS_CONTENT_SECURITY_POLICY, IDE_CONTENT_SECURITY_POLICY};
+pub use security::{
+    ANALYTICS_CONTENT_SECURITY_POLICY, IDE_CONTENT_SECURITY_POLICY,
+    analytics_content_security_policy,
+};
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{
     CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, PREVIEW_COOKIE, SESSION_COOKIE,
@@ -172,8 +183,9 @@ pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};
 pub use systemd::ServiceManager;
 pub use tls::{
-    AcmeCertificate, Certificate, TlsHandle, TlsNames, TlsSettings, check_certificate, https_addr,
-    install_crypto_provider, redirect_router, serve_https, tls_domains,
+    AcmeCertificate, Certificate, CertificateStatus, PastedCertificate, TlsHandle, TlsNames,
+    TlsSettings, check_certificate, https_addr, install_crypto_provider, redirect_router,
+    serve_https, tls_domains,
 };
 pub use translations::{LlmTranslator, parse_answer};
 pub use triggers::{

@@ -1557,6 +1557,54 @@ async fn rows_are_never_backed_up_without_their_table() -> sc_error::Result<()> 
     Ok(())
 }
 
+/// A TLS key this host pins in `feldspar.toml` is not restored over: the file
+/// wins, so the backup's value is reported as kept from the file and the rest
+/// of the section is restored beside it. The settings screen is told which keys
+/// are pinned, so it can show them read-only.
+#[tokio::test]
+async fn a_restore_leaves_the_tls_keys_the_host_pins_alone() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": {
+                SSL_MODE: sc_config::MODE_LETSENCRYPT,
+                sc_config::ACME_CONTACT_EMAIL: "ops@example.com",
+            }})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let archive = backup_everything(&mut source).await;
+    assert!(has_entry(&archive, "settings/ssl.json"));
+
+    let mut target = setup().await?;
+    sc_config::set_host_config(
+        &target.catalog,
+        json!({ SSL_MODE: sc_config::MODE_OFF })
+            .as_object()
+            .unwrap()
+            .clone(),
+    )?;
+    let (_, settings) = target.client.send("GET", "/api/settings", None).await;
+    assert_eq!(settings["host_keys"], json!([SSL_MODE]), "{settings}");
+    assert_eq!(settings["values"][SSL_MODE], json!(sc_config::MODE_OFF));
+
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "kept from this host's feldspar.toml"),
+        "{report}"
+    );
+    assert!(!report_has(&report, "warnings", "SSL"), "{report}");
+    assert_eq!(stored_config(&target.catalog, SSL_MODE).await?, None);
+    assert_eq!(
+        stored_config(&target.catalog, sc_config::ACME_CONTACT_EMAIL).await?,
+        Some(json!("ops@example.com"))
+    );
+    Ok(())
+}
+
 /// A zip that is not a backup is refused where the admin can see it, rather than
 /// restored as nothing.
 #[tokio::test]
@@ -1959,6 +2007,33 @@ async fn furnish_llm(server: &mut Server) -> sc_error::Result<()> {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    Ok(())
+}
+
+/// The provider the configuration file supplies is the operator's, and so is
+/// its key: a backup leaves it out, beside the admin's provider it carries.
+#[tokio::test]
+async fn the_configuration_files_llm_provider_is_not_backed_up() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    furnish_llm(&mut source).await?;
+    let def = sc_llm::LlmProviderDef::new("hosted", sc_llm::ANTHROPIC_BACKEND)
+        .with(sc_llm::CFG_API_KEY, "sk-operator");
+    let host = sc_llm::HostLlmProvider::new(def, vec![], "claude-sonnet-5")?;
+    sc_llm::set_host_llm_provider(&source.catalog, Some(host)).await?;
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["available"]["llm_providers"], json!(1), "{options}");
+    let archive = backup_everything(&mut source).await;
+    let text = entry(&archive, "llm-providers.json");
+    let providers: Value = serde_json::from_str(&text).unwrap();
+    let names: Vec<&str> = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["house"]);
+    assert!(!text.contains("sk-operator"), "{text}");
     Ok(())
 }
 
@@ -2596,3 +2671,475 @@ async fn a_calculated_field_reading_through_a_reference_is_restored() -> sc_erro
     );
     Ok(())
 }
+
+/// A table's ownership formula comes back, whether it reads one of the table's
+/// own columns (`therapist`) or reads through a reference
+/// (`assignmentⱵassigned_by`), and with row-level security on.
+///
+/// The table is created with no columns (they go in on later passes), and the
+/// formula is checked against the columns it reads. So the formula and RLS are
+/// applied only after the columns and the rows are in.
+#[tokio::test]
+async fn an_ownership_formula_is_restored_after_the_columns_it_reads() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    let users_key = |name: &str| {
+        json!({ "name": name, "kind": { "type": "key", "target_table": "users",
+                "target_field": "id", "summary_field": "email" } })
+    };
+    for (table, field) in [
+        (
+            "assignment",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        ("assignment", users_key("assigned_by")),
+        (
+            "run",
+            json!({ "name": "id", "type": "int", "primary_key": true }),
+        ),
+        (
+            "run",
+            json!({ "name": "assignment", "kind": { "type": "key",
+                    "target_table": "assignment", "target_field": "id",
+                    "summary_field": "id" } }),
+        ),
+    ] {
+        if field["name"] == json!("id") {
+            let (status, body) = source
+                .client
+                .send("POST", "/api/tables", Some(json!({ "name": table })))
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+        let (status, body) = source
+            .client
+            .send("POST", &format!("/api/tables/{table}/fields"), Some(field))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    for (table, formula, rls) in [
+        ("assignment", "assigned_by === user.id", true),
+        ("run", "assignmentⱵassigned_by === user.id", false),
+    ] {
+        let (status, body) = source
+            .client
+            .send(
+                "PUT",
+                &format!("/api/tables/{table}"),
+                Some(json!({
+                    "label": table,
+                    "description": "",
+                    "min_role_read": 100,
+                    "min_role_write": 100,
+                    "ownership_formula": formula,
+                    "rls_enabled": rls,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/tables/assignment/rows",
+            Some(json!({ "id": 1, "assigned_by": null })),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let archive = backup_everything(&mut source).await;
+
+    let mut target = setup().await?;
+    let report = restore_everything(&mut target, &archive).await;
+    for table in ["assignment", "run"] {
+        assert!(
+            report_has(
+                &report,
+                "restored",
+                &format!("the ownership rule of `{table}`")
+            ),
+            "`{table}`'s ownership rule should be restored: {report}"
+        );
+    }
+    assert!(
+        report_has(&report, "restored", "1 rows into `assignment`"),
+        "the row should go in before RLS is switched on: {report}"
+    );
+    let (status, tables) = target.client.send("GET", "/api/tables", None).await;
+    assert_eq!(status, StatusCode::OK, "{tables}");
+    for (table, formula, rls) in [
+        ("assignment", "assigned_by === user.id", true),
+        ("run", "assignmentⱵassigned_by === user.id", false),
+    ] {
+        let body = tables
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == json!(table))
+            .unwrap_or_else(|| panic!("`{table}` should be restored: {tables}"));
+        assert_eq!(body["ownership_formula"], json!(formula), "{body}");
+        assert_eq!(body["rls_enabled"], json!(rls), "{body}");
+    }
+    Ok(())
+}
+
+/// The id an account has on one server.
+async fn user_id(server: &Server, email: &str) -> uuid::Uuid {
+    server
+        .db
+        .client()
+        .await
+        .unwrap()
+        .query_one("SELECT id FROM users WHERE email = $1", &[&email])
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A row that refers to an account the other server already has, under its
+/// own id, refers to that account there.
+///
+/// The restore keeps an account that is already on the server, matched by email.
+/// Its id there is not the backup's, so a row keeping the backup's id broke the
+/// foreign key, and so did every row that referred to that row.
+#[tokio::test]
+async fn a_row_referring_to_a_kept_account_refers_to_it_by_its_id_here() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    for field in [
+        json!({ "name": "id", "type": "int", "primary_key": true }),
+        json!({ "name": "owner", "kind": { "type": "key", "target_table": "users",
+                "target_field": "id", "summary_field": "email" } }),
+    ] {
+        if field["name"] == json!("id") {
+            let (status, body) = source
+                .client
+                .send("POST", "/api/tables", Some(json!({ "name": "notes" })))
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+        let (status, body) = source
+            .client
+            .send("POST", "/api/tables/notes/fields", Some(field))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let there = user_id(&source, "admin@example.com").await;
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/tables/notes/rows",
+            Some(json!({ "id": 1, "owner": there.to_string() })),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let archive = backup_everything(&mut source).await;
+
+    let mut target = setup().await?;
+    let here = user_id(&target, "admin@example.com").await;
+    assert_ne!(
+        there, here,
+        "two servers should give their admin different ids"
+    );
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "1 rows into `notes`"),
+        "the row should go in: {report}"
+    );
+    let owner: uuid::Uuid = target
+        .db
+        .client()
+        .await
+        .unwrap()
+        .query_one("SELECT owner FROM notes WHERE id = 1", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(owner, here);
+    Ok(())
+}
+
+/// `node_modules` is neither backed up nor restored.
+///
+/// Its `.bin` entries are symlinks, which a backup held as copies of their
+/// targets, so the restored `tsc` imported `../lib/tsc.js` from the wrong place.
+/// And with a `node_modules` there, the build does not install, so the broken
+/// copy stayed. A backup taken before this change still carries one, and the
+/// restore leaves it out.
+#[tokio::test]
+async fn node_modules_is_neither_backed_up_nor_restored() -> sc_error::Result<()> {
+    let mut source = setup().await?;
+    sc_catalog::save_file_store(
+        &source.catalog,
+        &FileStoreDef::local("code", source.files.to_string_lossy()),
+    )
+    .await?;
+    sc_catalog::connect_file_store_def(
+        &source.catalog,
+        &sc_catalog::load_file_store_by_name(&source.catalog, "code")
+            .await?
+            .expect("the store just saved"),
+    )?;
+    std::fs::create_dir_all(source.files.join("web/src")).unwrap();
+    std::fs::create_dir_all(source.files.join("web/node_modules/.bin")).unwrap();
+    std::fs::write(source.files.join("web/src/main.ts"), "export {}\n").unwrap();
+    std::fs::write(
+        source.files.join("web/node_modules/.bin/tsc"),
+        "import \"../lib/tsc.js\";\n",
+    )
+    .unwrap();
+    let archive = backup_everything(&mut source).await;
+    assert!(has_entry(
+        &archive,
+        "file-stores/code/files/web/src/main.ts"
+    ));
+    assert!(!has_entry(
+        &archive,
+        "file-stores/code/files/web/node_modules/.bin/tsc"
+    ));
+
+    // A backup from before: the same, with the `node_modules` entry in it.
+    let old = {
+        let mut source = zip::ZipArchive::new(std::io::Cursor::new(&archive)).expect("a zip");
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..source.len() {
+            out.raw_copy_file(source.by_index_raw(i).unwrap()).unwrap();
+        }
+        out.start_file(
+            "file-stores/code/files/web/node_modules/.bin/tsc",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut out, b"import \"../lib/tsc.js\";\n").unwrap();
+        out.finish().unwrap().into_inner()
+    };
+    let mut target = setup().await?;
+    sc_catalog::save_file_store(
+        &target.catalog,
+        &FileStoreDef::local("code", target.files.to_string_lossy()),
+    )
+    .await?;
+    sc_catalog::connect_file_store_def(
+        &target.catalog,
+        &sc_catalog::load_file_store_by_name(&target.catalog, "code")
+            .await?
+            .expect("the store just saved"),
+    )?;
+    let report = restore_everything(&mut target, &old).await;
+    assert!(
+        report_has(&report, "warnings", "1 file in `node_modules` of `code`"),
+        "{report}"
+    );
+    assert!(target.files.join("web/src/main.ts").is_file());
+    assert!(!target.files.join("web/node_modules").exists());
+    Ok(())
+}
+
+/// What the automated backup in the test below includes: the books table's
+/// definition but not its rows, the file store, the triggers — and no users.
+fn schedule_include() -> Value {
+    json!({
+        "tables": ["books"],
+        "table_data": [],
+        "applications": [],
+        "file_stores": ["assets"],
+        "users": false,
+        "triggers": true,
+        "ssl": true,
+    })
+}
+
+/// `body` with [`schedule_include`] as its `include`.
+fn with_include(mut body: Value) -> Value {
+    body["include"] = schedule_include();
+    body
+}
+
+/// A destination in a directory on the server.
+fn local(dir: impl AsRef<std::path::Path>) -> Value {
+    json!({ "kind": "local", "directory": dir.as_ref().to_string_lossy() })
+}
+
+/// Automated backups, end to end: a schedule is created through the API the card
+/// uses, with a selection of its own; the backup task's tick writes a real backup
+/// into its directory holding exactly that selection, prunes what is past its
+/// retention, and records what it did where the list reads it. Editing and
+/// deleting go through the same API, and the checks the dialog relies on refuse
+/// what they should.
+#[tokio::test]
+async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    furnish(&mut server).await?;
+    let dest = temp_dir().join("nightly");
+
+    // Refused: a relative path, an unknown frequency, a zero retention, and no
+    // word on what to include.
+    for bad in [
+        with_include(
+            json!({ "destination": local("backups"), "frequency": "daily", "retention_days": 7 }),
+        ),
+        with_include(
+            json!({ "destination": local(&dest), "frequency": "hourly", "retention_days": 7 }),
+        ),
+        with_include(
+            json!({ "destination": local(&dest), "frequency": "daily", "retention_days": 0 }),
+        ),
+        json!({ "destination": local(&dest), "frequency": "daily", "retention_days": 7 }),
+    ] {
+        let (status, body) = server
+            .client
+            .send("POST", "/api/backup/schedules", Some(bad))
+            .await;
+        assert!(status.is_client_error(), "{status} {body}");
+    }
+
+    // Created; the directory did not exist and is made on save.
+    let created = ok(
+        &mut server,
+        "POST",
+        "/api/backup/schedules",
+        Some(with_include(json!({
+            "destination": local(format!("{}/", dest.to_string_lossy())),
+            "frequency": "daily",
+            "retention_days": 7,
+        }))),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["destination"], local(&dest));
+    assert_eq!(created["location"], json!(dest.to_string_lossy()));
+    // Read back as the selection it means now, the shape the dialog's pickers take.
+    assert_eq!(created["include"]["tables"], json!(["books"]));
+    assert_eq!(created["include"]["table_data"], json!([]));
+    assert_eq!(created["include"]["users"], json!(false));
+    assert_eq!(created["last_success_at"], Value::Null);
+    assert!(dest.is_dir());
+
+    // A second schedule into the same directory would prune the first's files.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/schedules",
+            Some(with_include(
+                json!({ "destination": local(&dest), "frequency": "weekly", "retention_days": 30 }),
+            )),
+        )
+        .await;
+    assert!(status.is_client_error(), "{status} {body}");
+
+    // An old backup past its retention, a recent one, and a file that is not a
+    // backup at all.
+    let old = "feldspar-backup-2000-01-01-020000.zip";
+    let now = chrono::Utc::now();
+    let recent = format!(
+        "feldspar-backup-{}.zip",
+        (now - chrono::Duration::days(2)).format("%Y-%m-%d-%H%M%S")
+    );
+    for name in [old, recent.as_str(), "README.txt"] {
+        std::fs::write(dest.join(name), b"x").unwrap();
+    }
+
+    let scheduler = sc_server::BackupScheduler::new(server.catalog.clone());
+    let ran = scheduler.tick(now).await;
+    assert_eq!(ran.len(), 1);
+    // Not due again a minute later.
+    assert!(
+        scheduler
+            .tick(now + chrono::Duration::minutes(1))
+            .await
+            .is_empty()
+    );
+
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    let entry = &list.as_array().unwrap()[0];
+    assert_eq!(entry["last_error"], Value::Null, "{entry}");
+    assert!(entry["last_success_at"].is_string());
+    let written = std::path::PathBuf::from(entry["last_file"].as_str().unwrap());
+    assert_eq!(written.parent(), Some(dest.as_path()));
+    // The schedule's own selection, not the Backup card's (which still has
+    // everything ticked).
+    let archive = std::fs::read(&written).unwrap();
+    assert!(has_entry(&archive, "tables/books/table.json"));
+    assert!(!has_entry(&archive, "tables/books/rows.json"));
+    assert!(!has_entry(&archive, "users.json"));
+    assert!(has_entry(&archive, "triggers.json"));
+    let (_, options) = server.client.send("GET", "/api/backup", None).await;
+    assert_eq!(options["include"]["users"], json!(true));
+    assert_eq!(options["include"]["table_data"], json!(["books"]));
+
+    // Stored as what was left out: a table created later is in the schedule,
+    // rows and all, while the books' rows stay out.
+    server
+        .catalog
+        .create_table(
+            "reviews",
+            &[DataField::plain("id", TypeRef::Basic(BasicType::Int))
+                .required()
+                .primary_key()],
+        )
+        .await?;
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    assert_eq!(list[0]["include"]["tables"], json!(["books", "reviews"]));
+    assert_eq!(list[0]["include"]["table_data"], json!(["reviews"]));
+
+    assert!(!dest.join(old).exists(), "the old backup should be pruned");
+    assert!(dest.join(&recent).exists());
+    assert!(dest.join("README.txt").exists());
+    // No temporary file left behind.
+    assert!(std::fs::read_dir(&dest).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".partial")
+    }));
+
+    // Edited: weekly, longer retention, and the users ticked. What it last did
+    // is kept.
+    let mut include = list[0]["include"].clone();
+    include["users"] = json!(true);
+    let updated = ok(
+        &mut server,
+        "PUT",
+        &format!("/api/backup/schedules/{id}"),
+        Some(json!({
+            "destination": local(&dest),
+            "frequency": "weekly",
+            "retention_days": 30,
+            "include": include,
+        })),
+    )
+    .await;
+    assert_eq!(updated["frequency"], json!("weekly"));
+    assert_eq!(updated["retention_days"], json!(30));
+    assert_eq!(updated["include"]["users"], json!(true));
+    assert_eq!(updated["include"]["table_data"], json!(["reviews"]));
+    assert!(updated["last_success_at"].is_string());
+
+    // Deleted: gone from the list, and the backups it wrote stay.
+    let deleted = ok(
+        &mut server,
+        "DELETE",
+        &format!("/api/backup/schedules/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(deleted["deleted"], json!(true));
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    assert_eq!(list, json!([]));
+    assert!(written.exists());
+
+    // Admin-only, like the rest of the Backup tab.
+    let (status, _) = server.client.send("POST", "/api/logout", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server
+        .client
+        .send("GET", "/api/backup/schedules", None)
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// Automated backups sent to an S3-compatible bucket and to an SFTP server,
+/// each played by a server in this process.
+#[path = "backup_remote.rs"]
+mod remote;

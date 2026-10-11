@@ -1,7 +1,8 @@
 //! The Analytics UI's API against a real Postgres (analytics TODO A1.8, A1.9,
-//! A1.13): datasets and workspaces through their endpoints, and what named
+//! A1.13, A4.2): datasets and workspaces through their endpoints, and what named
 //! datasets change for models — a fit that notices its dataset was edited, and
-//! a model of an aggregate that `predict("…")` refuses on the table.
+//! a model of an aggregate that `predict("…")` refuses on the table; and panels,
+//! drawn live, and the usage index that finds them.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -421,8 +422,8 @@ async fn datasets_are_created_read_edited_and_deleted_through_the_api() -> sc_er
 async fn workspaces_are_listed_renamed_saved_and_deleted() -> sc_error::Result<()> {
     let (mut client, db) = setup().await?;
 
-    // Six kinds, of which A2's Data explorer is the first here; the
-    // Dataset editor and the model editor are not kinds of workspace.
+    // Six kinds, of which A2's Data explorer, A4's Report and A5's Map are
+    // here; the Dataset editor and the model editor are not kinds of workspace.
     let kinds = client.ok("GET", "/api/workspace-kinds", None).await;
     let kinds = kinds.as_array().unwrap();
     assert_eq!(kinds.len(), 6);
@@ -430,8 +431,11 @@ async fn workspaces_are_listed_renamed_saved_and_deleted() -> sc_error::Result<(
         .iter()
         .filter(|k| k["available"] == json!(true))
         .collect();
-    assert_eq!(here.len(), 1);
+    assert_eq!(here.len(), 4);
     assert_eq!(here[0]["kind"], json!("data_explorer"));
+    assert_eq!(here[1]["kind"], json!("report"));
+    assert_eq!(here[2]["kind"], json!("map"));
+    assert_eq!(here[3]["kind"], json!("dashboard"));
     assert_eq!(here[0]["arrives_in"], Value::Null);
     assert!(!kinds.iter().any(|k| k["kind"] == "dataset_editor"));
     assert!(!kinds.iter().any(|k| k["kind"] == "model_fit"));
@@ -440,10 +444,10 @@ async fn workspaces_are_listed_renamed_saved_and_deleted() -> sc_error::Result<(
         .refused(
             "POST",
             "/api/workspaces",
-            Some(json!({ "name": "Draft", "kind": "report" })),
+            Some(json!({ "name": "Draft", "kind": "simulation" })),
         )
         .await;
-    assert!(err.contains("milestone A4"), "{err}");
+    assert!(err.contains("milestone A7"), "{err}");
     // Models open in the model editor, not in a workspace.
     let err = client
         .refused(
@@ -660,6 +664,469 @@ async fn a_model_of_an_aggregate_fits_and_predict_on_the_table_refuses_it() -> s
         err.contains("cannot predict a row of `houses`")
             && err.contains("each row is one combination of `bedrooms`"),
         "{err}"
+    );
+    Ok(())
+}
+
+/// A panel as a report keeps it: `{ id, title, kind, content }`.
+fn panel(kind: &str, content: Value) -> Value {
+    json!({ "id": uuid::Uuid::new_v4(), "title": kind, "kind": kind, "content": content })
+}
+
+/// A report's state with these panels as its blocks.
+fn report_of(panels: &[Value]) -> Value {
+    json!({ "blocks": panels
+        .iter()
+        .map(|p| json!({ "id": p["id"], "kind": "panel", "panel": p }))
+        .collect::<Vec<_>>() })
+}
+
+#[tokio::test]
+async fn dashboards_hold_tiles_of_panels_and_stat_cards() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+    let dataset = client
+        .ok("POST", "/api/datasets", Some(prices("prices")))
+        .await;
+    let dataset_id = dataset["dataset"]["id"].as_str().unwrap().to_owned();
+
+    // A stat card: the mean price of one-bedroom houses, against every house.
+    let card = panel(
+        "stat_card",
+        json!({ "dataset": dataset_id, "value": { "function": "mean", "column": "price" },
+                "filter": "bedrooms == 1", "comparison": "unfiltered",
+                "format": { "style": "currency", "currency": "EUR", "compact": true } }),
+    );
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(json!({ "panel": card })))
+        .await;
+    assert_eq!(drawn["kind"], json!("stat_card"));
+    assert_eq!(drawn["card"]["value"], json!(102_500.0), "{drawn}");
+    assert_eq!(drawn["card"]["label"], json!("mean of price"));
+    assert_eq!(drawn["card"]["comparison"]["kind"], json!("unfiltered"));
+    assert_eq!(
+        drawn["card"]["comparison"]["value"],
+        json!(140_500.0),
+        "{drawn}"
+    );
+    // One that cannot be made says why in `card`; one that is not a card is refused.
+    let wrong = panel(
+        "stat_card",
+        json!({ "dataset": dataset_id, "value": { "function": "sum", "column": "nope" } }),
+    );
+    let drawn = client
+        .ok(
+            "POST",
+            "/api/panels/render",
+            Some(json!({ "panel": wrong })),
+        )
+        .await;
+    assert!(
+        drawn["card"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no column `nope`"),
+        "{drawn}"
+    );
+    let err = client
+        .refused(
+            "POST",
+            "/api/panels/render",
+            Some(
+                json!({ "panel": panel("stat_card", json!({ "dataset": dataset_id,
+                "value": { "function": "count" }, "sparkline": true })) }),
+            ),
+        )
+        .await;
+    assert!(err.contains("sparkline needs a date column"), "{err}");
+
+    // The dashboard: a plot and the card side by side.
+    let dashboard = client
+        .ok(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Overview", "kind": "dashboard" })),
+        )
+        .await;
+    let id = dashboard["id"].as_str().unwrap().to_owned();
+    let plot = panel(
+        "plot",
+        json!({ "spec": { "data": { "kind": "dataset", "dataset": dataset_id },
+            "layers": [{ "mark": "point", "encoding": {
+                "x": { "field": "area" }, "y": { "field": "price" } } }] } }),
+    );
+    let tiles = json!({ "tiles": [
+        { "id": "a", "panel": plot, "x": 0, "y": 0, "w": 8, "h": 5 },
+        { "id": "b", "panel": card, "x": 8, "y": 0, "w": 4, "h": 2 },
+    ] });
+    let saved = client
+        .ok(
+            "PUT",
+            &format!("/api/workspaces/{id}/state"),
+            Some(json!({ "state": tiles })),
+        )
+        .await;
+    assert_eq!(saved["state"]["tiles"][1]["w"], json!(4));
+    let err = client
+        .refused(
+            "PUT",
+            &format!("/api/workspaces/{id}/state"),
+            Some(json!({ "state": { "tiles": [
+                { "id": "a", "panel": plot, "x": 0, "y": 0, "w": 8, "h": 5 },
+                { "id": "b", "panel": card, "x": 6, "y": 4, "w": 4, "h": 2 },
+            ] } })),
+        )
+        .await;
+    assert!(err.contains("overlap"), "{err}");
+
+    // The usage index finds both of its panels.
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{dataset_id}/usage"), None)
+        .await;
+    assert_eq!(
+        usage["workspaces"][0]["kind"],
+        json!("dashboard"),
+        "{usage}"
+    );
+    assert_eq!(usage["workspaces"][0]["panels"], json!(2));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dashboards_panels_are_drawn_with_its_selections_and_filters() -> sc_error::Result<()> {
+    let (mut client, _db) = setup().await?;
+    let made = |name: &str, table: &str| {
+        json!({ "name": name, "base": { "kind": "table", "table": table }, "operations": [] })
+    };
+    let areas = client
+        .ok("POST", "/api/datasets", Some(made("Areas", "neighbourhoods")))
+        .await;
+    let areas = areas["dataset"]["id"].as_str().unwrap().to_owned();
+    let houses = client
+        .ok("POST", "/api/datasets", Some(made("Houses", "houses")))
+        .await;
+    let houses = houses["dataset"]["id"].as_str().unwrap().to_owned();
+    let count = panel(
+        "stat_card",
+        json!({ "dataset": houses, "value": { "function": "count" } }),
+    );
+    let draw = |filters: Value| json!({ "panel": count, "filters": filters });
+
+    // North clicked on a map of the neighbourhoods (its rows, by their key)
+    // filters the houses through their foreign key: the even ones.
+    let north = json!({ "id": "map", "dataset": areas, "values": [1] });
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(draw(json!([north]))))
+        .await;
+    assert_eq!(drawn["card"]["value"], json!(30.0), "{drawn}");
+    assert_eq!(
+        drawn["filters"],
+        json!([{ "id": "map", "dataset": houses, "column": "neighbourhood" }])
+    );
+    // A brushed range of areas as well: houses 10 to 19, the even ones.
+    let brushed = json!({ "id": "brush", "dataset": houses, "column": "area",
+                          "range": { "min": 60, "max": 69 } });
+    let drawn = client
+        .ok(
+            "POST",
+            "/api/panels/render",
+            Some(draw(json!([north, brushed]))),
+        )
+        .await;
+    assert_eq!(drawn["card"]["value"], json!(5.0), "{drawn}");
+    // Without filters, every house; a filter that is not one is refused.
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(json!({ "panel": count })))
+        .await;
+    assert_eq!(drawn["card"]["value"], json!(60.0));
+    assert!(drawn.get("filters").is_none_or(Value::is_null), "{drawn}");
+    let err = client
+        .refused(
+            "POST",
+            "/api/panels/render",
+            Some(draw(json!([{ "id": "x", "dataset": houses, "column": "area" }]))),
+        )
+        .await;
+    assert!(
+        err.contains("filter 1: a filter keeps some values or a range"),
+        "{err}"
+    );
+
+    // The dashboard keeps its own filters, a drill path and a refresh.
+    let dashboard = client
+        .ok(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Houses board", "kind": "dashboard" })),
+        )
+        .await;
+    let id = dashboard["id"].as_str().unwrap().to_owned();
+    let bars = panel(
+        "plot",
+        json!({ "spec": { "data": { "kind": "dataset", "dataset": houses },
+            "layers": [{ "mark": "bar", "stat": { "kind": "count" },
+                         "encoding": { "x": { "field": "neighbourhood" } } }] } }),
+    );
+    let state = json!({
+        "tiles": [{ "id": "a", "panel": bars, "x": 0, "y": 0, "w": 6, "h": 5,
+                    "drill": { "channel": "x", "path": ["neighbourhood", "bedrooms"] } }],
+        "filters": [brushed],
+        "refresh": 60,
+    });
+    let saved = client
+        .ok(
+            "PUT",
+            &format!("/api/workspaces/{id}/state"),
+            Some(json!({ "state": state })),
+        )
+        .await;
+    assert_eq!(saved["state"]["refresh"], json!(60));
+    assert_eq!(saved["state"]["filters"][0]["id"], json!("brush"));
+    let mut wrong = state.clone();
+    wrong["refresh"] = json!(1);
+    let err = client
+        .refused(
+            "PUT",
+            &format!("/api/workspaces/{id}/state"),
+            Some(json!({ "state": wrong })),
+        )
+        .await;
+    assert!(err.contains("refreshes every 10 to 86400 seconds"), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn panels_render_live_and_the_usage_index_finds_what_they_read() -> sc_error::Result<()> {
+    let (mut client, db) = setup().await?;
+    let dataset = client
+        .ok("POST", "/api/datasets", Some(prices("prices")))
+        .await;
+    let dataset_id = dataset["dataset"]["id"].as_str().unwrap().to_owned();
+    let model = client
+        .ok(
+            "POST",
+            "/api/models",
+            Some(json!({
+                "name": "House prices",
+                "provider": "linear_regression",
+                "dataset": { "dataset_id": dataset_id },
+                "configuration": { "label": "price" },
+                "split": { "train": 1.0, "validation": 0.0, "test": 0.0, "seed": 7 },
+            })),
+        )
+        .await;
+    let model_id = model["id"].as_str().unwrap().to_owned();
+    let fit = client.fit(&model_id).await;
+    let fit_id = fit["id"].as_str().unwrap().to_owned();
+
+    // The panels A4.3's sources make: the explorer's plot, its plot with its
+    // tests, its summary table; the model editor's coefficient table and its
+    // residual plot, copied by spec from the outputs.
+    let data = json!({ "kind": "dataset", "dataset": dataset_id });
+    let scatter = json!({ "data": data, "layers": [{ "mark": "point", "encoding": {
+        "x": { "field": "area" }, "y": { "field": "price" } } }] });
+    let outputs = client
+        .ok(
+            "GET",
+            &format!("/api/models/{model_id}/outputs?fit={fit_id}"),
+            None,
+        )
+        .await;
+    let residuals = outputs["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["name"] == "residuals_fitted")
+        .unwrap()["spec"]
+        .clone();
+    let plot = panel("plot", json!({ "spec": scatter }));
+    let tested = panel(
+        "test_result",
+        json!({ "tests": { "data": data, "y": [{ "field": "price" }], "x": { "field": "area" } },
+                "plot": scatter }),
+    );
+    let table = panel(
+        "summary_table",
+        json!({ "spec": { "data": data, "cells": [{ "function": "count" }], "totals": false } }),
+    );
+    let coefficients = panel(
+        "fit_table",
+        json!({ "fit": fit_id, "output": "coefficients" }),
+    );
+    let fitted = panel("plot", json!({ "spec": residuals }));
+    let text = panel("text", json!({ "markdown": "Prices rose." }));
+    let custom = panel("custom", json!({ "renderer": "gauge" }));
+
+    let render = |p: &Value| json!({ "panel": p });
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&plot)))
+        .await;
+    assert_eq!(drawn["kind"], json!("plot"));
+    assert_eq!(drawn["plot"]["layers"][0]["total"], json!(60), "{drawn}");
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&tested)))
+        .await;
+    assert_eq!(drawn["tests"]["design"], json!("two_numbers"), "{drawn}");
+    assert_eq!(drawn["plot"]["layers"][0]["total"], json!(60));
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&table)))
+        .await;
+    assert_eq!(drawn["table"]["total"], json!(60), "{drawn}");
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&coefficients)))
+        .await;
+    let terms: Vec<&str> = drawn["output"]["table"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str().unwrap())
+        .collect();
+    assert!(
+        terms.contains(&"area") && terms.contains(&"bedrooms"),
+        "{drawn}"
+    );
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&fitted)))
+        .await;
+    assert!(drawn["plot"]["layers"].is_array(), "{drawn}");
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&text)))
+        .await;
+    assert_eq!(drawn, json!({ "kind": "text" }));
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&custom)))
+        .await;
+    assert!(
+        drawn["error"].as_str().unwrap().contains("`gauge`"),
+        "{drawn}"
+    );
+    let err = client
+        .refused(
+            "POST",
+            "/api/panels/render",
+            Some(json!({ "panel": { "id": uuid::Uuid::new_v4(), "kind": "pie", "content": {} } })),
+        )
+        .await;
+    assert!(err.contains("not a panel"), "{err}");
+
+    // Live: a row added to the table is in the panel the next time it is drawn.
+    db.client()
+        .await?
+        .batch_execute("INSERT INTO houses VALUES (61, 111, 2, 151000, 1)")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&plot)))
+        .await;
+    assert_eq!(drawn["plot"]["layers"][0]["total"], json!(61));
+
+    // A report holding them, and an explorer with the dataset chosen.
+    let report = client
+        .ok(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Quarterly", "kind": "report" })),
+        )
+        .await;
+    let report_id = report["id"].as_str().unwrap().to_owned();
+    let state = report_of(&[
+        plot.clone(),
+        tested,
+        table,
+        coefficients.clone(),
+        fitted,
+        text,
+    ]);
+    client
+        .ok(
+            "PUT",
+            &format!("/api/workspaces/{report_id}/state"),
+            Some(json!({ "state": state })),
+        )
+        .await;
+    let explorer = client
+        .ok(
+            "POST",
+            "/api/workspaces",
+            Some(json!({ "name": "Exploring", "kind": "data_explorer" })),
+        )
+        .await;
+    client
+        .ok(
+            "PUT",
+            &format!("/api/workspaces/{}/state", explorer["id"].as_str().unwrap()),
+            Some(json!({ "state": { "dataset": dataset_id } })),
+        )
+        .await;
+
+    // A state whose panel does not read is refused, naming it.
+    let err = client
+        .refused(
+            "PUT",
+            &format!("/api/workspaces/{report_id}/state"),
+            Some(json!({ "state": report_of(&[plot.clone(), json!({ "id": "x", "kind": "plot" })]) })),
+        )
+        .await;
+    assert!(err.contains("panel 2"), "{err}");
+
+    // The usage index: the delete warnings list the report and the explorer.
+    let usage = client
+        .ok("GET", &format!("/api/datasets/{dataset_id}/usage"), None)
+        .await;
+    let found: Vec<(&str, &str, i64)> = usage["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                w["name"].as_str().unwrap(),
+                w["kind"].as_str().unwrap(),
+                w["panels"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("Exploring", "data_explorer", 0),
+            ("Quarterly", "report", 3)
+        ]
+    );
+    let usage = client
+        .ok("GET", &format!("/api/models/{model_id}/usage"), None)
+        .await;
+    assert_eq!(usage["workspaces"][0]["id"], json!(report_id), "{usage}");
+    assert_eq!(usage["workspaces"][0]["panels"], json!(2));
+
+    // What a panel reads is gone: it says so rather than failing.
+    let other = client
+        .ok("POST", "/api/datasets", Some(prices("short-lived")))
+        .await;
+    let other_id = other["dataset"]["id"].as_str().unwrap().to_owned();
+    let orphan = panel(
+        "plot",
+        json!({ "spec": { "data": { "kind": "dataset", "dataset": other_id },
+                          "layers": [{ "mark": "point", "encoding": {
+                              "x": { "field": "area" }, "y": { "field": "price" } } }] } }),
+    );
+    client
+        .ok("DELETE", &format!("/api/datasets/{other_id}"), None)
+        .await;
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&orphan)))
+        .await;
+    assert_eq!(
+        drawn["error"],
+        json!("The dataset this panel shows has been deleted.")
+    );
+    client
+        .ok("DELETE", &format!("/api/model-instances/{fit_id}"), None)
+        .await;
+    let drawn = client
+        .ok("POST", "/api/panels/render", Some(render(&coefficients)))
+        .await;
+    assert_eq!(
+        drawn["error"],
+        json!("The model fit this panel shows has been deleted.")
     );
     Ok(())
 }

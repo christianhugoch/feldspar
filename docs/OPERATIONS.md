@@ -23,6 +23,7 @@ Contents:
 7. [Claude Code over the MCP server](#7-claude-code-over-the-mcp-server)
 8. [Day-to-day operations](#8-day-to-day-operations)
 9. [Bayesian models with Stan](#9-bayesian-models-with-stan)
+10. [Geometry with PostGIS](#10-geometry-with-postgis)
 
 ---
 
@@ -563,6 +564,7 @@ Every key an environment may hold:
 | `stan_max_draws_response` | integer | `--stan-max-draws-response` (§9.4) |
 | `stan_summary_max_elements` | integer | `--stan-summary-max-elements` (§9.4) |
 | `test_template` | string | the template per-test databases are cloned from. Read by the integration-test harness, **not** by the server |
+| `llm_provider` | table | an LLM provider this host supplies, read-only in the admin UI (§4.4) |
 
 `environments` is an ordinary TOML table: define as many as you have databases,
 named whatever you like. `--environment NAME` (or `--env NAME`, or `FELDSPAR_ENV`)
@@ -611,6 +613,108 @@ though it is the file's default.
 on every start. If the database is unreachable or misconfigured it exits
 immediately with an error naming the target — the password is never printed — and
 will not boot in a half-working state.
+
+### 4.4 An LLM provider from the file
+
+An environment can supply an **LLM provider**: an API key and the models it may be used
+with. Use this when the operator of the host pays for the model and the admin of the
+instance should be able to use it, but not see the key or change it. Managed hosting is
+the usual case.
+
+```toml
+[environments.production.llm_provider]
+name          = "hosted"             # what agents call it
+backend       = "anthropic"          # anthropic, openai_responses or openai_chat
+api_key       = "sk-ant-…"
+# base_url    = "https://gateway.internal/v1"   # when it is not the backend's own endpoint
+# description = "Paid for by the hosting provider"
+default_model = "claude-sonnet-5"
+
+[[environments.production.llm_provider.models]]
+name         = "claude-sonnet-5"
+price_input  = 3.0                   # per million tokens, as on the admin form
+price_output = 15.0
+
+[[environments.production.llm_provider.models]]
+name = "claude-haiku-4-5"
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `name` | string | the provider's name, which agents use to refer to it. No provider the admin adds may use the same name |
+| `backend` | string | `anthropic`, `openai_responses` or `openai_chat` |
+| `api_key` | string | required, except for `openai_chat` against a local host that takes none |
+| `base_url` | string | the endpoint. Defaults to the backend's own; required for `openai_chat` |
+| `description` | string | shown under the name in the admin UI |
+| `default_model` | string | the model used by an agent that names this provider but no model. Can be left out when exactly one model is listed; when any models are listed, it must be one of them |
+| `models` | array of tables | the models agents may use. Each has a `name` plus any of the backend's model settings, the same ones the admin form's model dialog shows. With no list, `default_model` is the only model, with built-in settings |
+
+A model's settings, and the values they take:
+
+| Setting | Value |
+|---|---|
+| `price_input`, `price_cached_input`, `price_cache_write`, `price_output` | number, per million tokens |
+| `context_window`, `working_budget` | integer, in tokens |
+| `edit_format` | `"str_replace"`, `"apply_patch"` or `"whole_file"` |
+| `parallel_tool_calls`, `vision`, `supports_temperature`, `reasoning_replay`, `native_apply_patch` | `"yes"` or `"no"` |
+| `parallel_tool_calls_default` | `"on"` or `"off"` |
+| `prompt_caching` | one of the choices the model dialog offers for that backend |
+
+Not every backend has every setting. For example, `native_apply_patch` exists only
+for `openai_responses`. A setting the backend does not have is refused at startup,
+and the message lists the ones it does have.
+
+A setting left out means the built-in default, as a blank does on the form. A missing
+price means the price is unknown, not zero. The yes/no and on/off values are strings,
+not TOML booleans, because blank is a third value meaning "built-in".
+
+What the admin sees and can do:
+
+- **Agents → LLM providers** lists it with a *configuration file* badge. It opens as
+  *View*: the form is disabled, the key shows as `••••••••`, and there is no Save or
+  Remove. Its models can be **tested** but not added, edited, deleted or fetched from
+  the host.
+- **It is the default provider until the admin picks another.** The default is used
+  wherever nothing names a provider: a new application's builder agent, the first
+  choice in a new agent's form, translation, and `feldspar eval`. The admin can add
+  providers of their own and press **Make default** on any of them, including this
+  one. Without a pick, the default is this provider, and with no file provider it is
+  the first provider by name.
+- **Test sends the file's settings exactly as they are.** It ignores any base URL or
+  key typed into the form, and it only tests the models the file lists. So the admin
+  cannot send the key anywhere else.
+
+What the server does with it:
+
+- **It never writes it to the database.** The provider and its models are held in
+  memory and added to every provider lookup. As a result:
+  - the key is not in `_fd_llm_providers`, a database dump, or a backup;
+  - Clear all does not remove it;
+  - a restore cannot overwrite it.
+
+  The file is the only copy, so keep it `0640`/`0600` as §4.1 says.
+- **Its ids are derived from its name.** Agents, runs and the admin UI's links keep
+  working across restarts. Renaming the provider in the file changes its id, so
+  agents that name the old name stop working until they are pointed at the new one.
+- **It is checked at startup, like a save in the admin UI.** Each of these stops the
+  server with a message naming the problem:
+  - an unknown backend;
+  - a missing key;
+  - a model setting the backend does not have (a typo such as `price_inptu` is listed
+    against the valid names);
+  - a model listed twice;
+  - no clear default model;
+  - a provider the admin already added under the same `name`.
+
+  The server does not replace the admin's provider with the file's, because that
+  would silently change which key the admin's agents are billed to. Rename one of
+  them.
+- **Changes need a restart.** The section is read at boot, like the TLS settings.
+  `SIGHUP` does not re-read it (§6.2). The startup log has the line
+  ``feldspar: LLM provider `hosted` set by the configuration file``.
+
+To stop supplying it, delete the section and restart. Agents that named it then
+report the provider as missing until the admin points them at another one.
 
 ---
 
@@ -691,6 +795,7 @@ Only relevant on a development machine (README §11).
 |---|---|
 | `DATABASE_URL` | the maintenance connection per-test databases are created and dropped from. Overrides the `test` environment in `feldspar.toml` |
 | `SC_TEST_TEMPLATE` | the template each per-test database is cloned from; it must be **empty**, since every test inherits whatever is in it. Overrides `test_template` in the file. Leave it unset to use Postgres's `template1`; set it on a machine whose `template1` has a stale collation version |
+| `SC_TEST_POSTGIS_TEMPLATE` | the database a **PostGIS** test database is cloned from (default `feldspar_postgis_template`, §10.3). A test that needs PostGIS skips with a message when it does not exist |
 | `SC_TSC` | path to a TypeScript compiler for the generated-client type-check tests |
 | `SC_TEST_NPM`, `SC_TEST_MQTT_BROKER` | opt in to the tests that need a real npm registry and a real MQTT broker |
 | `SC_PRINT_SKILL` | print the generated `SKILL.md` during its test, for reading it |
@@ -744,7 +849,8 @@ admin API that updates the live set in place, so the restart is rarely what you
 want:
 
 - the **trigger set** and the **agents**,
-- the **LLM providers**,
+- the **LLM providers** — and the one in `feldspar.toml` (§4.4) is not re-read at
+  all: change it with a restart,
 - **file-store connections** — a store's *contents* are read live, but a store
   definition added since boot is not connected here,
 - **database connections** — a connected database is re-introspected with the
@@ -1006,7 +1112,8 @@ from tagged endpoints:
 | `describe_triggers`, `describe_action`, `save_trigger`, `delete_trigger` | the trigger half |
 | `describe_code_api` | the JavaScript API a `run_js_code` body or a `javascript` API query can call — `db`, `fetch`, `fs`, `trigger` |
 | `describe_applications`, `save_api_query`, `delete_api_query` | applications and their custom SQL |
-| `create_application`, `create_file_store`, `set_application_tables` | a new application (React and a new local store by default; a git store on request), and the tables it serves |
+| `create_application`, `create_file_store` | a new application (React and a new local store by default; a git store on request) |
+| `update_application` | an application's connected tables, the store folders it serves as files, and its CSP (the `csp` section needs `allow_access_changes`) |
 
 Or start from nothing — the tools create the application and hand back its scaffolded
 `project_dir`, and the agent builds it there:
@@ -1202,6 +1309,94 @@ setting takes effect is the setting's own business: the logging switches are
 immediate, the SMTP transport is read per message, and the TLS settings are read
 at boot.
 
+#### Users from a terminal
+
+A forgotten admin password on a server with no SMTP has no reset email to send.
+These two commands write the users table directly, through the same create and
+update code the admin UI uses, so the password is hashed and the role checked
+the same way:
+
+```bash
+feldspar modify-user admin@example.com --password          # asks, twice, without echo
+feldspar modify-user admin@example.com --role admin        # a role name or number
+feldspar add-user ops@example.com --role admin             # asks for the password
+feldspar add-user ops@example.com --role 1 --password VALUE
+echo "$PW" | feldspar modify-user admin@example.com --password   # not a terminal: one line of stdin
+```
+
+Leave the password off the command line when you can, because it ends up in the
+shell history and in `ps`. A password that starts with `--` is written
+`--password=VALUE`. Sessions the user already holds are not ended.
+
+#### Backup and restore from a terminal
+
+The zip **Settings → Backup** downloads can be written and restored from a terminal:
+
+```bash
+sudo -u feldspar feldspar backup /var/backups/feldspar/site.zip --environment production
+sudo -u feldspar feldspar restore /var/backups/feldspar/site.zip --environment staging
+```
+
+`backup` includes everything — tables and their rows, applications with their views
+and pages, file stores and their files, users, modules, database connections,
+streams, analytics, LLM providers, agents, triggers and settings — **except the SSL /
+TLS settings** and **the LLM provider `feldspar.toml` supplies** (§4.4). The
+certificate, its key and the names it covers belong to the machine, not to the
+installation, and so does the operator's API key. An agent that names the file's
+provider is restored only where the target's file supplies a provider of that name. The dialog still offers them if you want to move
+them. The file is written beside its final name and renamed into place, so an
+interrupted backup leaves the previous file whole.
+
+`restore` restores everything the file holds. The file can come from `feldspar
+backup`, from the dialog, or from Saltcorn 1. It behaves like the Restore dialog with
+nothing unticked: it adds to what is there and does not drop, delete or replace.
+Each thing it restored is printed on stdout, and each thing it left alone is printed
+on stderr with the reason. Modules are reinstalled and applications are built, so
+give it the same server flags or `--environment` the server runs with. That matters
+most for `--modules-dir`. **Restart a server that is already running on that
+database** afterwards, because it loaded its tables, applications and triggers when
+it started.
+
+#### Automated backups off the server
+
+**Settings → Backup → Automated backups** takes a backup every day or every week and
+sends it to one of three destinations:
+
+- **Local files**: a directory on the server. This is only as safe as the disk it
+  is on, so copy it elsewhere or use one of the two below.
+- **SFTP**: a host, a port (22 by default), a user name, a password and a
+  directory. A relative directory is relative to where the login starts.
+- **S3**: any S3-compatible service. Give the endpoint URL (empty for Amazon S3),
+  the bucket, the region (empty for `us-east-1`; Cloudflare R2 uses `auto`), an
+  access key and a secret key. Requests use path-style addresses
+  (`https://endpoint/bucket/key`), and backups are written at the top of the bucket.
+
+Saving a schedule tests the destination by doing what a run does: it logs in,
+creates the directory if it is missing, writes a test file, lists, and deletes the
+test file. A wrong password or a read-only bucket is reported in the dialog. The
+server must be able to reach the destination: outbound TCP to the SFTP port, or
+HTTPS to the endpoint.
+
+- **SFTP host keys are trusted on first use.** Saving records the server's key
+  fingerprint (`SHA256:…`, shown under the destination). Every run refuses a server
+  presenting a different key, so the password is never sent to whatever answers on
+  that address. Compare the fingerprint with `ssh-keygen -lf
+  /etc/ssh/ssh_host_ed25519_key.pub` on the SFTP server. If the server's key was
+  changed on purpose, open the schedule and save it to accept the new one.
+- **Credentials** are stored in the database (`_fd_config`, key
+  `backup_schedules`), like the SMTP password. They are never sent back to the
+  browser, and a backup that includes the settings includes them. Give the
+  schedule credentials that can do only this:
+  - for S3, a key limited to the one bucket, with `s3:PutObject`, `s3:ListBucket`
+    and `s3:DeleteObject`;
+  - for SFTP, a chrooted account.
+- **Retention** deletes only files named `feldspar-backup-YYYY-MM-DD-HHMMSS.zip`,
+  and judges their age by the time in the name. Two schedules may not share a
+  directory or a bucket, because each would prune the other's backups.
+- Each backup is built in memory and sent whole. Over SFTP it is written under a
+  temporary `.partial` name and renamed into place. An S3 upload is a single
+  `PUT`, which limits one backup to 5 GB on Amazon S3.
+
 ### 8.3 The bound on a model dataset
 
 A model's dataset is a `SELECT` an administrator wrote, and a fit holds the whole
@@ -1246,6 +1441,12 @@ looking hung. Ctrl-C does the same interactively.
 | `error while loading shared libraries: libpython3.x.so` | a Python-feature binary on a host with no matching `libpython`. Install it, or run a binary built without the feature. `abi3` means any CPython 3.11+ will do, but the *soname* is version-specific |
 | login does not stick behind HTTPS | add `--secure-cookies` (or `secure_cookies = true`). Conversely, do **not** set it for plain-HTTP local development, or the browser drops the cookies |
 | an application 404s after an update | it failed to build at boot and was skipped rather than taking the server down. `feldspar build-app <subdomain> --environment production` prints the bundler's own diagnostics |
+| after setting **Admin subdomain** (Settings → Development) the dialog stays on "Obtaining a certificate" | the CA cannot reach the new name: point a DNS record for `<subdomain>.<base domain>` (or a wildcard) at this server. The CA's last error is shown under the step. The old address keeps serving the admin UI meanwhile |
+| the dialog's certificate step says "No certificate covers …" | the certificate pasted in Settings → SSL / TLS does not name the admin host. Paste one that does — a wildcard for the base domain covers it — or move the admin UI back by emptying the box |
+| the admin UI is unreachable after moving it, and the old address redirects | the redirect is sent only once the new host's certificate is ready, but the browser may still not resolve the name. Reach the server on any other host that names no application (an IP address works) and empty **Admin subdomain**, or delete the `admin_subdomain` row from `_fd_config` and restart |
+| startup stops with "reading the LLM provider in the configuration file" | the `llm_provider` section (§4.4) is not accepted. The next line says why: an unknown backend, a missing `api_key`, an unknown model setting (the valid names are listed), a model listed twice, or a `default_model` that is not one of the listed models |
+| startup stops with "the admin has already added one by that name" | a provider stored in the database has the `name` the file gives its provider. Rename the one in the file, or have the admin rename or remove theirs |
+| an admin cannot edit or remove an LLM provider ("set by the server's configuration file") | it comes from `feldspar.toml` (§4.4). Change it there and restart. The admin can add another provider and make that the default |
 | `POST /mcp` answers 404 with a valid token | `mcp_enabled` is off, and off means absent (§7.1) |
 | MCP calls refused from another machine | `mcp_loopback_only` is on, which is its default |
 | a model fit says "the server restarted while this fit was running" | it did. A fit is a spawned job whose only record is its instance row, so boot marks a `fitting` row failed rather than leaving it running for ever (§3.5). Press **Fit** again |
@@ -1275,6 +1476,19 @@ data is synthetic and generated from a fixed seed, so every run on every machine
 rows, on Postgres or SQLite. It also makes three datasets for the Data explorer — `Houses`,
 `Measurements` and `Events` — unless a dataset of that name is already there. It takes the same
 database flags as `feldspar serve` and writes where the server would read.
+
+Where the database has PostGIS (§10), it also makes the map demo's `districts` (12 polygons of an
+invented city laid over Lyon) and `incidents` (2,400 points with a category and a date), with the
+datasets `Districts` and `Incidents`. Like `feldspar serve`, it first tries to install the
+extension where its role may. Where PostGIS is not there it makes everything else and says
+why:
+
+```
+the map demo's tables (`districts`, `incidents`) were not made: geometry needs the PostGIS
+extension, … (docs/OPERATIONS.md §10 says how to install PostGIS)
+```
+
+Install PostGIS as §10.1 says, then run the demo again with `--replace`.
 
 It refuses to touch a table that is already there, naming it. `--replace` drops and remakes
 the demo's six tables — and only those, so anything else in the database, including datasets
@@ -1476,3 +1690,96 @@ program cannot do is reach past Stan:
 Fits, compiles, draws, write-back and **Download run** are admin-only, as every model
 endpoint is.
 
+---
+
+## 10. Geometry with PostGIS
+
+Geometry fields (a point, a line, a polygon or their multi variants, in WGS84 longitude and
+latitude), importing GeoJSON, Shapefiles and GeoPackages, and the `Geo.…` formula functions all
+need **PostgreSQL with the PostGIS extension** in Feldspar's database. Everything else works
+without it: a geometry field is then refused with a sentence saying why, and so is a dataset
+formula that calls a `Geo` function. SQLite has no geometry (SpatiaLite is out of scope).
+
+### 10.1 Installing it
+
+PostGIS is a package for the PostgreSQL server, matching its major version:
+
+```sh
+sudo apt install postgresql-17-postgis-3      # Debian 13; postgresql-16-postgis-3 on Ubuntu 24.04
+```
+
+Installing an extension **into a database** needs a superuser, which Feldspar's role should not
+be. So add it once, as `postgres`:
+
+```sh
+sudo -u postgres psql -d feldspar -c 'CREATE EXTENSION IF NOT EXISTS postgis'
+```
+
+On every start the server looks for it, and tries `CREATE EXTENSION postgis` itself when its role
+may (a superuser, or an installation that marked the extension trusted). It says which it found:
+
+```
+feldspar: PostGIS 3.5.2; geometry fields are available
+feldspar: geometry fields are unavailable: geometry needs the PostGIS extension, which this
+          PostgreSQL server has but this database does not; a superuser can add it with
+          CREATE EXTENSION postgis
+```
+
+Beside the extension the server creates three SQL functions of its own, `_fd_utm_srid`,
+`_fd_square_cell` and `_fd_hex_cell`, which `Geo.squareCell` and `Geo.hexCell` call. PostGIS's
+own table `spatial_ref_sys` is not listed among the tables.
+
+A database **connection** (§5.0 of the design) can hold geometry too when its database has
+PostGIS; the server only looks, and never installs anything in a database that is not its own.
+
+### 10.2 Coordinate systems and datum grids
+
+Geometry is stored in WGS84. An imported file in another coordinate system — a Shapefile's
+`.prj`, a GeoPackage's EPSG code, an old GeoJSON `crs` member — is reprojected by PostGIS, so no
+projection library is needed beside it. How accurately depends on the transformation data PROJ
+has: without a datum grid, British National Grid is converted with no datum shift and lands
+about 100 m from where it should. For metre accuracy install the grids (`apt install proj-data`
+has some; `projsync --all` downloads the rest) or let PROJ fetch them (`PROJ_NETWORK=ON` in the
+PostgreSQL server's environment).
+
+### 10.3 For the test suite
+
+The tests that need PostGIS clone their database from a template that already has it, since the
+test role is not a superuser either. Make it once:
+
+```sh
+sudo -u postgres createdb -O <test role> feldspar_postgis_template
+sudo -u postgres psql -d feldspar_postgis_template -c 'CREATE EXTENSION postgis'
+```
+
+Without it those tests print `skipped: this test needs PostGIS…` and pass. Among them are
+the map demo's test in `sc-cli` and milestone A5's definition of done in `sc-server`.
+`SC_TEST_POSTGIS_TEMPLATE` names another template (§5.4).
+
+### 10.4 The base map
+
+The Analytics UI draws map layers over a base map: a [MapLibre style](https://maplibre.org/maplibre-style-spec/)
+fetched by the browser. **Settings → Maps** names it:
+
+| setting | default | |
+|---|---|---|
+| Base map style | `https://tiles.openfreemap.org/styles/positron` | for a light page |
+| Base map style (dark) | `https://tiles.openfreemap.org/styles/dark` | for a dark page; empty uses the light one |
+| Other map hosts | empty | comma-separated origins the style's tiles, fonts or icons come from, when not the style's own host |
+
+[OpenFreeMap](https://openfreemap.org) needs no account or key. The browser fetches the style,
+tiles, fonts and icons straight from the host, never through Feldspar. The Analytics UI's
+Content-Security-Policy allows the hosts these settings name and no others. So a style whose
+tiles are on a second host draws an empty base map until that host is added under *Other map
+hosts*. A value that is not an `http` or `https` URL is refused when it is saved.
+
+**Reference layers.** A Map workspace can draw a tile or map service (satellite imagery, a
+cadastral map) under its layers. Its host must be allowed in the same way: the workspace says
+when it is not, and **Allow it** adds the host to *Other map hosts* — what an admin would type
+there — after which the page is reloaded so the browser applies the new policy. Remove the host
+from *Other map hosts* to stop it again.
+
+**Without internet access**, or to keep map views off a third party, leave both styles empty.
+The layers are then drawn on a plain background, and labels are left off, because the fonts
+come from the base map. Or serve a style and its tiles yourself (for example with
+[Martin](https://martin.maplibre.org) or a PMTiles file behind a web server) and name its URL.

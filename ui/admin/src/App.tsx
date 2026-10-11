@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import Spinner from "react-bootstrap/Spinner";
 
 import { api } from "./api";
+import { setServedBaseDomain } from "./adminAddress";
 import { splitRoute, stepParam } from "./builder";
 import { PoppedChats } from "./PoppedChats";
 import { useChatWindows } from "./chatWindows";
@@ -291,6 +292,21 @@ function Shell({
   // shows it as a toast everywhere else — so news already read on the list is
   // cleared on the way out rather than following the admin to the next screen.
   // A build still running then reports when it finishes, wherever that is.
+  // Where applications are served, for the links to them: the base domain,
+  // which stops being this page's own host once the admin UI moves to a
+  // subdomain of its own (Settings → Development). Held in state as well so
+  // the screens re-render with the right links once it arrives.
+  const [, setBaseDomain] = useState<string | null>(null);
+  useEffect(() => {
+    void api
+      .getAdminAddress()
+      .then((address) => {
+        setServedBaseDomain(address.base_domain ?? null);
+        setBaseDomain(address.base_domain ?? null);
+      })
+      .catch(() => {});
+  }, []);
+
   const { path } = splitRoute(route);
   const previousPath = useRef(path);
   useEffect(() => {

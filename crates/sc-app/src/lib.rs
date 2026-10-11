@@ -79,7 +79,7 @@ pub use api::{
 };
 pub use application::{
     ApiConfig, AppId, Application, CspPolicy, FRAME_ANCESTORS, FrameworkRef, StaticDir, StreamRef,
-    TriggerRef, allow_admin_framing,
+    TriggerRef, allow_admin_framing, follow_admin_host,
 };
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,

@@ -9,6 +9,17 @@ models, draw maps and write reports. Its design is in
 - **Part 2 — The data explorer:** plots, summary tables and hypothesis tests.
 - **Part 3 — Models:** the model editor, a fit's outputs, comparing models, and a model from a
   box plot.
+- **Part 4 — Reports:** split view, dragging plots and model outputs into a report, and printing
+  it to PDF.
+- **Part 5 — Maps:** importing a map file, a map in the explorer, the Map workspace with its
+  layers, styles, attribute table, selections, reference layers and toolbox, and a map in a
+  report.
+- **Part 6 — Dashboards:** tiles from any source, stat cards, and filtering every tile by a
+  click, a brush or a district on a map, with drill paths and a filter bar.
+- **Part 9 — Applications:** publishing part of the Analytics UI to your users, as a
+  dashboard they can use but not change, or a small Analytics UI of their own over the tables
+  you pick, each reading only the rows their permissions allow. (Parts 7 and 8, simulation and
+  spatial statistics, come with their milestones.)
 
 You need a server and an admin login. Nothing else: the data comes from a command.
 
@@ -52,7 +63,7 @@ which the demo made for part 2. **Models** are part 3's. **Workspaces** are plac
 each of one kind and remembering where you were: a Data explorer, a Report, a Map and so on.
 There are none yet.
 Look at the kinds under **New workspace**: all are listed, and all but the Data explorer
-(part 2) are disabled, each labelled with the milestone that brings it.
+(part 2) and the Report (part 4) are disabled, each labelled with the milestone that brings it.
 
 ### Step 3 — A dataset on a table
 
@@ -444,4 +455,539 @@ prices")`. Its fits go with it.
 - **The editor remembers** how you left it, in the model's view state, which no fit reads.
 - **A clone shares its dataset**; *Use a copy* gives it one of its own to change.
 - **Compare** puts models side by side; **Open as model** turns a box plot into one.
+
+---
+
+## Part 4 — Reports
+
+A **Report** workspace is a document: headings, text and **panels** — plots, summary tables,
+tests and model outputs — on a page that prints. You do not build its plots in it. You make them
+where they are made, in the Data explorer and the model editor, and drag them in. A panel in a
+report keeps what made the plot, not a picture of it, so it is redrawn from the data each time
+the report is opened.
+
+### Step 1 — Two screens side by side
+
+Open `Exploring houses`, the Data explorer workspace from part 2, and pick `Houses`. Press
+**Split** in the header: a second screen opens on the right, showing the front page. There, under
+**New workspace**, call it `House prices report`, choose *Report* and press **Create**. The report
+opens on the right, the explorer stays on the left, and the divider between them can be dragged
+(or moved with the arrow keys once it has the focus).
+
+The address now records both sides, so a reload or a bookmark brings both back. Each side has its
+own bar, with a way back to the front page and **×** to close it. Press **Split** again to close
+the right side.
+
+### Step 2 — Drag a plot in
+
+In the explorer, put `area` on X, `price` on Y and `neighbourhood` on Color: the scatter plot of
+part 2, with the tests beside it. The explorer's toolbar has a **⠿ Drag** handle. Drag it onto the
+report. The plot and its tests arrive as one panel, titled *price by area — Houses*.
+
+Now change the explorer: drop `bedrooms` on Y. The explorer's plot changes and the report's does
+not. A drop is always a **copy**, taken as the plot was when you started dragging, and nothing the
+explorer does afterwards reaches it. (Had **Summary table** been showing, the table would have
+been dragged instead.)
+
+The report draws its plots **still**: no tooltips, no highlighting on hover and no legend to
+click, because a report is for reading and printing. They are drawn as vector graphics on white
+paper, even in the dark theme.
+
+### Step 3 — Headings, text, and model outputs
+
+The report's toolbar has an **Add** menu: add a **Heading**, type `House prices`, press Enter.
+Add **Text** and write in Markdown:
+
+```markdown
+Prices rise with **area** in every neighbourhood. The model below puts a number on it:
+- about 2,100 a square metre,
+- and little difference between the neighbourhoods.
+```
+
+Ctrl+Enter (or a click outside) finishes. Click either block to edit it again. New blocks go at
+the end; each block's own menu (**⋯**, shown when you point at it) inserts one above it, moves it
+up or down, or sets a heading's level. Add a **Page break** too.
+
+On the left side, go to the front page and open the `House prices` model from part 3. Each output
+card has a **⠿ Drag** handle in its header. Drag the **Coefficients** table and the **Residuals
+against fitted values** plot into the report. The table is the fit's own table. The plot is drawn
+from the fit's scored rows, by the same code as the explorer's.
+
+Arrange the blocks: drag each by its grip (**⠿** at its left) to where it belongs. Put the heading
+first, then the text and the scatter plot, then the page break, and the model's outputs after it.
+**×** removes a block.
+
+### Step 4 — The report follows the data
+
+In the admin UI, add a row to `houses`: a sold house, with a price. Come back to the report and
+reload it. The scatter plot has the new house, because a panel is a **live view** of its dataset.
+The residual plot does not. It shows the rows the model was fitted on, and changes when the model
+is fitted again.
+
+A report never breaks because what it shows has gone. Delete a dataset or a fit that a panel
+reads, and the panel says so in a sentence where its plot was.
+
+### Step 5 — Print it
+
+Set **Page size** to *A4* and **Orientation** to *Landscape*. The paper on the screen widens to
+the width it will print at, so lines break and plots are sized as they will be on paper. Dashed
+**Page 2** markers show where the pages will break, and the toolbar shows how many pages there are.
+A block is never split across pages. A heading moves with the block after it. A page break starts
+a new page.
+
+Press **Export PDF**. The report waits until every panel has drawn, then opens the browser's print
+dialog showing the report and nothing else: no toolbar, no markers, no other side of the split.
+Choose **Save as PDF**. The file is named after the report, and its plots are vectors, sharp at any
+zoom. The PDF is made by your browser, not by the server.
+
+### Step 6 — From one report into another
+
+Make a second report, `Summary for the board`, on the right side (front page → New workspace), and
+open `House prices report` on the left. Drag the scatter plot's grip from the first report into the
+second. Dragged within a report, a block moves. Dragged into another report, it is copied, and the
+two copies are independent from then on.
+
+### Step 7 — What uses a dataset
+
+On the front page, press **Delete** on the `Houses` dataset, and read the warning without
+confirming. Under *These workspaces show it* it lists the explorer and both reports, each with the
+number of its panels that read `Houses`. The model's delete warning likewise lists `House prices
+report`, whose two panels show its fit. Press **Cancel**.
+
+### What to remember
+
+- **Make plots where they are made, and drag them in.** The explorer and the model editor are the
+  sources, a report is where they go, and a drop is always a copy.
+- **A panel is a live view.** It keeps what made the plot, so it shows the data as it is now. A fit's
+  outputs show the fit.
+- **What you see is what prints.** The page is drawn at its paper width, the page markers are where
+  the pages will break, and Export PDF is the browser's print dialog.
+- **Split view** puts any two screens side by side, and a change on one side reaches the other.
+
+---
+
+## Part 5 — Maps
+
+A map in the Analytics UI is a stack of **layers**, and a layer is a dataset, the place its rows
+are on the ground, and a style. The map never computes anything itself. Counting incidents per
+district, finding what is near a point and saving a selection all make ordinary datasets, which
+you can open in the Dataset editor, plot in the explorer and use in a model.
+
+Maps need **PostgreSQL with PostGIS** in Feldspar's database ([OPERATIONS.md](OPERATIONS.md)
+§10 says how to install it). On SQLite, or on Postgres without the extension, the demo skips its
+map tables and says why, and the rest of this part is not available.
+
+### Step 1 — The demo's map tables
+
+Run the demo again with `--replace`:
+
+```sh
+feldspar demo analytics --replace
+```
+
+On a database with PostGIS it now also makes two tables:
+
+- `districts`: twelve districts of an invented city, each with a `name`, a `population` and an
+  `outline` (a polygon). They are the Voronoi cells of twelve seeded points, so every place in
+  the city is in exactly one district.
+- `incidents`: 2,400 incidents reported in 2025, each with a `category` (theft, burglary,
+  vehicle crime, vandalism, antisocial behaviour), a `reported_on` date and a `location` (a
+  point). Most gather around a few hot spots in the north and east of the city, where burglary
+  is commoner. The rest are scattered everywhere.
+
+It also makes the datasets `Districts` and `Incidents`. The city is laid over Lyon so that the
+base map has streets under it, but the districts and incidents are made up. As before, the rows
+are the same on every run.
+
+### Step 2 — Import a map file
+
+In the admin UI, go to **Tables → + New table → Create from a map file** and choose
+[`docs/tutorial-data/police-stations.geojson`](tutorial-data/police-stations.geojson) from the
+Feldspar source tree. Call the table `police_stations`. The import finds a point geometry, a
+`name`, a number of `officers` and a flag `open_all_hours`, and the file's ids become the key.
+A Shapefile (zipped) or a GeoPackage is imported the same way. If it is in another coordinate
+system, PostGIS converts it to longitude and latitude.
+
+In the Analytics UI, make a dataset `Police stations` on the new table, then a Data explorer
+workspace on it, and press **Map** in the gallery: four points over the city.
+
+### Step 3 — Incidents on a map
+
+Make a Data explorer workspace `Exploring incidents`, pick `Incidents` and press **Map** in the
+gallery. The explorer finds the geometry by itself: the **Geometry** picker says *Automatic
+(`location`)*. It would also find longitude and latitude columns, or a foreign key to a table
+with geometry. Drop `category` on **Color**. Each category gets the colour it has in a bar
+chart, and the legend lists them.
+
+The hot spots stand out at once. Zoom in and out. A layer this size is sent to the browser
+whole. One with more than 5,000 features, or very detailed outlines, is sent as vector tiles,
+so only what is in view is loaded.
+
+### Step 4 — Open in map
+
+Press **Open in map**. A Map workspace opens with the incidents as its first layer, named after
+the dataset. Its left side lists the layers, with the top layer first. Each layer can be shown
+or hidden with its check box, moved with the arrows or by dragging, and opened in the Dataset
+editor or removed from its **⌄** menu. Click a layer's name to open its settings below the
+list: the name, geometry, a filter, the style, the Color/Size/Shape/Label columns, the opacity,
+whether it is in the legend, and the fields its popup shows when you click a feature.
+
+Add the districts too: **Add layer → Districts**. Set its style to *Single symbol*.
+
+### Step 5 — Count per district
+
+Open **Toolbox → Aggregate → Count per region**. For *Features* pick the incidents layer, for
+*Regions* the districts, and press **Run**. The tool makes a dataset, `Incidents per
+Districts`, and adds it to the map as a new layer on top. It is an ordinary dataset with three
+operations: a **Spatial join** (which district each incident is within), an **Aggregate** by
+district with a count, and a **Complete** that gives every district a row, with 0 if it has no
+incidents. Open it in the Dataset editor from the layer's menu to see them.
+
+The new layer is drawn by each district's outline, found through its `district` key. Set its
+style to **Graduated colours**, **Natural breaks**, **5 classes**. The server works out the
+classes from the counts, and the legend shows them: from 73–107 for the quiet south and west,
+to 574 for the busiest district on its own.
+
+### Step 6 — The attribute table
+
+Press **Table**. The rows of the picked layer appear below the map: each district's key and its
+count. Click the `count` header twice to sort by it, descending. Click the first row, then
+Shift-click the third: the three busiest districts (Kingsmead, Larkspur and Highbury) are
+selected and outlined on the map. Selection works the other way too. Click a district on the map
+and its row is selected, and Ctrl-click adds another. **Selected only** shows just the selected
+rows.
+
+### Step 7 — What is near a point
+
+Pick the incidents layer, set the distance next to **Near a point** to `1000` m, press **Near a
+point** and click the middle of Kingsmead. Every incident within 1 km is selected. The database
+measures the distances on the Earth's surface, in metres.
+
+Now press **Save selection as dataset**. The new dataset is based on `Incidents`, with a Filter
+that keeps the incidents within 1 km of that point. Because it keeps the condition, not the
+ids, it stays right when incidents are added. It is added as a layer, and you can open it in
+the explorer like any other dataset. A selection made by clicking is saved by its keys instead.
+**Lasso** draws a shape to select by, and the box next to it selects by a condition such as
+`category == "burglary"`.
+
+### Step 8 — A reference layer
+
+Under **Reference layers**, press **Add reference layer**. Choose *Tiles*, call it
+`OpenStreetMap` and give the address `https://tile.openstreetmap.org/{z}/{x}/{y}.png`, with the
+attribution `© OpenStreetMap contributors`. A browser may only load images from hosts the
+server allows. So the layer first says its host is blocked, and **Allow it** adds the host to
+Settings → Maps and reloads the page. A Web Map Service and an ArcGIS map service work the same
+way. Reference layers are drawn under your data. Lower their opacity with their slider, and the
+incidents' opacity with theirs, until both can be read.
+
+### Step 9 — A map in a report
+
+Press **Split**, and open the `House prices report` of part 4 on the right, or make a new report.
+Drag the map's **⠿ Drag** handle into the report. The whole map, with its layers, styles,
+reference layers and view, becomes a panel. Like a plot, it is a live view, redrawn from the
+datasets when the report is opened. In a report a map is still: it is drawn once and turned into
+an image, which is what a browser can print. Press **Export PDF**.
+
+Finally, on the front page, press **Delete** on the `Incidents` dataset and read the warning
+without confirming. Among what uses it are the explorer, the map (with the number of its layers
+that show it) and the report. Press **Cancel**.
+
+### What to remember
+
+- **A layer is a dataset.** Its geometry is a column, longitude and latitude, or a key to a
+  table that has one. Its style decides how it looks, and the map computes nothing else.
+- **Tools make datasets.** Count per region is a Spatial join, an Aggregate and a Complete,
+  which you can open, change and reuse. Saving a selection makes a dataset too.
+- **Selections are conditions.** Near a point, a lasso or a condition is evaluated by the
+  database, and the attribute table and the map share one selection.
+- **Maps need PostGIS.** Everything else in the Analytics UI works without it.
+
+
+---
+
+## Part 6 — Dashboards
+
+A **Dashboard** workspace is a page of **tiles**: plots, maps, summary tables and stat cards
+side by side. Like a report, it is made of panels dragged in from where they were made. Unlike a
+report, it is for using rather than reading. Its tiles keep their tooltips and legends, and they
+work together: a click on a bar, a brush along a time axis or a district picked on a map
+**filters every other tile**. This part uses the map tables of part 5, so it needs PostGIS.
+
+### Step 1 — A dashboard, and what goes in it
+
+On the front page, under **New workspace**, call it `Incidents dashboard`, choose *Dashboard*
+and press **Create**. It opens empty. Press **Split**, and on the left open `Exploring
+incidents`, the explorer of part 5.
+
+In the explorer, pick `Incidents`, clear the drop zones and drop `category` on **X**: a bar chart
+of the incidents in each category. Drag its **⠿ Drag** handle onto the dashboard. The tile
+appears where you drop it. Now drop `reported_on` on **X** instead of `category`: a line of the
+incidents reported each day. Drag it into the `House prices report` of part 4 (or any report),
+then open the report on the left and drag the line from there into the dashboard. A tile can come
+from anywhere that has a drag handle: the explorer, the model editor, a map, a report or another
+dashboard. A tile dragged from a report is a copy, as a report's is.
+
+Then open the `Incidents map` of part 5 on the left and drag its **⠿ Drag** handle in. The whole
+map comes, with its layers and styles. On a dashboard it stays a real map: zoom, pan, popups.
+
+### Step 2 — Two more datasets
+
+The tiles so far all read `Incidents`. Two more datasets will show how a filter crosses from one
+dataset to another. Both are made by the map's toolbox, so stay in `Incidents map`:
+
+- **Toolbox → Aggregate → Count per region**, with the incidents as *Features* and the districts
+  as *Regions*, as in part 5. If that layer is still on the map from part 5, you can skip this.
+- **Toolbox → Overlay → Spatial join**, with the incidents as *Layer* and the districts as
+  *With*. It makes `Incidents with Districts`: each incident with the columns of the district it
+  is in. The district's key comes across as `id_right`, a **foreign key** to `districts`.
+
+Open `Incidents with Districts` in the Dataset editor from its layer's **⌄** menu. Add a
+**Select columns** operation that keeps `id`, `category`, `reported_on` and `location`, and
+renames `id_right` to `district`. A renamed foreign key is still a foreign key.
+
+In the explorer, pick `Incidents with Districts`, drop `district` on **X**, and drag the bar chart
+of incidents per district into the dashboard.
+
+### Step 3 — A stat card
+
+Press **+ Add → Stat card**. Choose the dataset `Incidents` and the value *Count*. Under
+**Period**, choose *Month*, from *The latest*: the card shows the latest month that has any
+incidents, so a year-old demo still has a "this month". Compare with *The previous period* and
+tick **Sparkline**, 12 periods. **Preview** shows it as it will be. Press **Add**.
+
+The card shows 189, the incidents in December 2025, with the change since November and a line
+of the last twelve months. If a rise were good news you would leave **Higher is
+better** ticked. For incidents, untick it, so a rise is shown in red.
+
+Add a second card on `Incidents per Districts`, the *Sum* of `count`, with no period. It shows
+2,400: every incident is counted in one district.
+
+### Step 4 — Arrange the tiles
+
+Drag a tile by its grip (**⠿** in its header) to move it. The cell it will land on is outlined,
+and the tiles in the way move down to make room. Drag the corner handle at its bottom right to
+resize it, in whole cells. The grid is twelve columns wide. Put the two cards on the left, the
+bar chart and the line beside them, and the map and the per-district bars below. Each tile's
+**⋯** menu also moves and resizes it one cell at a time, and renames it.
+
+On a narrow screen, such as a phone, the tiles are stacked one per row, and moving and resizing
+wait for a wider screen.
+
+### Step 5 — Click, brush, and the filter bar
+
+Click the **burglary** bar (726 incidents). The other tiles are drawn again with only the burglaries: the map's
+incidents layer, the line and the stat card, which now counts this month's burglaries against
+last month's. The bar chart itself keeps showing every category, so you can pick another. A
+click on another bar replaces the selection. Shift-click or Ctrl-click adds a bar to it, and a
+click on the selected bar again lets it go.
+
+Each tile's header says what filtered it: *by category* on the line and the card. The map's
+header says *by category* too, because its incidents layer was filtered. Point at the badge to
+see the rest: the districts and the counts per district are not incidents, so the burglary did
+not reach them. The per-district bars and the second card say *not filtered*. Their datasets
+do have a `category` column, or are made from the incidents, but a filter only crosses to
+another dataset through a **key to a table both refer to**. A column with the same name is not
+assumed to mean the same thing.
+
+Now drag across the line chart, from March to the end of May. The brushed range is selected, and
+every other tile filters to it too, the burglaries and the spring at once. The card now shows May
+against April, the latest month left.
+
+Above the tiles, the **filter bar** shows each selection as an outlined chip, *category:
+burglary* and *reported_on: 2025-03-01 – 2025-05-31*. Press **×** on one to remove it, or
+**Clear all**. Selections are not saved: they are where you are looking, not what the dashboard
+is.
+
+A filter that should stay is made with **+ Filter**. Choose `Incidents`, the column `category`,
+tick *burglary* and press **Add filter**. A filled chip appears, and this filter is saved with the
+dashboard and filters every tile, the bar chart too. Remove it again with its **×**.
+
+Next to **+ Add**, **Refresh** draws every tile again every 30 seconds to every hour, for a
+dashboard left on a screen while its data changes. **↻** draws them now.
+
+### Step 6 — A district on the map
+
+On the map tile, click a district of the per-district layer, say Kingsmead, the busiest. The
+per-district bars now show only that district, and the second card shows its count, 574. Both datasets have a
+foreign key to `districts`: `district` in `Incidents with Districts`, and `district` in
+`Incidents per Districts`. Clicking the same district on the plain districts layer does the same.
+There, the district is picked by the row itself, and a row of `districts` is what those keys
+refer to.
+
+The first stat card is not filtered, and its badge says why: `Incidents` has no column that
+refers to `districts`. To make it follow the map, base it on `Incidents with Districts` instead
+(**⋯ → Edit**).
+
+### Step 7 — A drill path
+
+On the per-district bar chart, choose **⋯ → Add a drill path…**. Drill down along **X**. The
+first level is `district`, what the plot shows. Add `category` as the next level, and press
+**Save**. Above the plot it now says *district · click a value to drill down to category*.
+
+Click the busiest district's bar, 11 (Kingsmead). The tile shows that district's categories,
+with a breadcrumb above it: *district › 11 · category*. Only this tile is filtered, and the other
+tiles are left as they were. Click **district** in the breadcrumb to go back up. At the last level a
+click selects, as on any tile. A path can have up to eight levels, along X, Y or Color.
+
+Close the split, and reopen the dashboard from the front page: the tiles, their places, the
+drill path, the refresh and any filters of its own are as they were. On the front page, the
+delete warning for `Incidents` now lists the dashboard too.
+
+### What to remember
+
+- **A dashboard is for using.** Tiles come from anywhere with a drag handle and stay
+  interactive, and the grid keeps itself tidy as you move them.
+- **A click is a filter.** Clicking or brushing a tile filters every other tile. The filter bar
+  shows what is filtering. Selections are not saved, and filters made in the filter bar are.
+- **Filters cross datasets through keys.** A filter reaches its own dataset through its column,
+  and another dataset only through a foreign key to the same table. A tile's badge says what
+  filtered it, and why something did not.
+- **On the server, a filter is a Filter.** The dashboard's conditions become one more Filter
+  operation at the end of each dataset, so a plot, a card, a table, a test and a map are filtered
+  the same way.
+
+---
+
+## Part 9 — Applications
+
+Everything so far was the admin's. An **application** of the framework **Analytics** publishes
+part of the Analytics UI to other people, at its own address, in a shell with no admin links. It
+is one of two things:
+
+- **Fixed**: some workspaces you made, a dashboard or a report, and nothing else. People can use
+  them, clicking and filtering, but they cannot change them or see anything else.
+- **Self-serve**: a small Analytics UI of their own, over the tables you choose. They make their
+  own datasets and workspaces, and may share them with each other.
+
+Either way, people read **as themselves**. A plot, a count or a test in an application is made
+from the rows their table permissions and ownership formulas let them read. That is the same rule
+the REST API and the application's pages follow ([TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)
+§7.3). This part uses the dashboard of part 6, so it needs PostGIS. Any dashboard of yours will
+do instead.
+
+Applications are addressed by subdomain, so start the server with a base domain:
+
+```bash
+feldspar serve --base-domain localhost
+```
+
+Browsers send `*.localhost` to your own machine, so `board.localhost` needs no setup.
+
+### Step 1 — A role, some users, and a fixed application
+
+In the admin UI, under **Roles**, add a role `staff` at 40. Under **Users**, add two users with
+the role `staff`, say `sam@example.com` and `lee@example.com`, and one with a less privileged
+role (80, `member`), say `pat@example.com`.
+
+The dashboard reads the `incidents` and `districts` tables, and `staff` may not read them yet:
+a new table is read by the admin alone. Under **Tables**, open each and, in **Edit table
+properties**, set **Minimum role for full read access** to `staff`.
+
+Under **Applications → New application**:
+
+- call it `Incidents board`, with the subdomain `board`;
+- choose the framework **Analytics**. Its settings appear below it.
+- Set **What it shows** to `fixed`. Set **Least privileged role** to 40, so `staff` and anyone
+  more privileged may use it. Set **Workspaces shown** to `["Incidents dashboard"]`.
+
+Press **Save**. A name that is not a workspace is refused here, by name, while you are still
+looking at the form. So is a name two workspaces share: name that one by its id.
+
+### Step 2 — What `staff` sees
+
+Open `http://board.localhost:3032/` in a private window, so that you are not signed in as the
+admin there. The Analytics UI asks you to sign in. Sign in as `sam@example.com`.
+
+The dashboard opens: its stat cards, the bar chart, the line and the map, with the 2,400
+incidents of part 6. It is interactive. Click the **burglary** bar and the other tiles filter to
+its 726 incidents, as they did for you. Brush the line, click a district, use the filter bar.
+What is not there:
+
+- **no front page of workspaces.** An application showing one workspace opens on it. One
+  showing several lists them, and only them;
+- **no editing.** The dashboard's **+ Add**, moving, resizing, renaming and removing are gone.
+  Your clicks and filters are yours until you leave, and nothing is saved;
+- **no Dataset editor and no admin links.** The header has the application's name and a
+  **Sign out** button. The admin's own screens are not there to call: a request for
+  `/api/models` or `/api/users` on this address is answered *not found*.
+
+Sign out and sign in as `pat@example.com`: *this application is not open to your role*.
+
+### Step 3 — A self-serve application
+
+Back in the admin UI, set the minimum role to read `houses` and `neighbourhoods` to `staff` too.
+Then make a second application:
+
+- call it `Explore houses`, with the subdomain `explore` and the framework **Analytics**;
+- under **Tables**, pick `houses` and `neighbourhoods`. These are the tables its users may build
+  on. Every application has this list, and an Analytics application uses it rather than a
+  second one in its settings;
+- set **What it shows** to `self_serve` and **Least privileged role** to 40. Tick **Users may
+  create and edit datasets**, leave **Kinds of workspace** at `["data_explorer"]`, and leave
+  **Users may create workspaces** ticked.
+
+### Step 4 — A dataset of your own
+
+Open `http://explore.localhost:3032/` and sign in as `sam@example.com`. The front page has the
+two lists, both empty. The demo's datasets are the admin's, and Sam sees only what is theirs or
+shared with them.
+
+In the **New dataset** box, call it `My houses` and open **Based on**: only `houses` and
+`neighbourhoods` are offered. Choose `houses`, press **Create**, and add a calculated column
+`hood` = `neighbourhoodⱵname`, as in part 1. Then
+create a Data explorer workspace, `Exploring my houses` (it is the only kind offered), pick `My
+houses` and drop `neighbourhood` on **X**: 49, 28, 43, 42 and 38 houses, all 200. Drop `price`
+on **Y**: a box plot, and its tests count the 170 houses that have a price.
+
+`incidents` is not offered as a base. Nor can it be reached another way: a dataset sent to the
+API on `incidents`, or a Join from `My houses` to `viewings`, is refused with *`viewings` is not
+one of the tables this application reads*. The check is on the server, in the statement every
+read becomes, whatever the browser sends.
+
+In the datasets list, the **Share** select on `My houses` shares it with a role. Share it with
+`staff`, and sign in as `lee@example.com` in another private window: Lee sees `My houses`, can
+explore it, and cannot change it (*not yours to change; clone it to make one of your own*).
+
+Neither application sees the other's things. `Exploring my houses` belongs to `Explore houses`
+and is not on the admin's front page. On `board.localhost`, Sam's dataset is *not found*.
+
+### Step 5 — Only some rows
+
+Now give `staff` only some of the houses. In the admin UI, open `houses`. In **Edit table
+properties**, set **Minimum role for full read access** back to the admin, and give it the
+**Ownership formula**
+
+```js
+user && year_built >= 1990
+```
+
+so that below the admin, a signed-in user reads the houses built since 1990 (§7.3: the formula
+grants rows to those the role floor does not admit).
+
+Reload `Exploring my houses` as Sam. The bars now count 26, 14, 19, 20 and 18 houses, the 97
+newer ones, and the box plot's tests count the 81 of those that have a price. Nothing about the
+dataset or the workspace changed: the rows did, because every read is made as Sam. Lee, reading
+the dataset Sam shared, reads the same 97. Sam's reads are their own, not the dataset owner's.
+The admin still reads all 200 on the admin host.
+
+The same holds in a fixed application. A dashboard on `Houses` shown on `board` would draw
+Sam's 97 houses and the admin's 200 from the same tiles. Had `incidents` an ownership formula,
+the incidents dashboard would show each person their own incidents.
+
+A formula that only the JavaScript evaluator can decide, one that SQL cannot express, is
+refused in the Analytics UI with a sentence saying so. A plot or a count over rows the database
+could not filter would show what the person may not read.
+
+### What to remember
+
+- **An application is part of the Analytics UI, published to a role.** *Fixed* shows the
+  workspaces you name and nothing else. *Self-serve* is a small Analytics UI of its users' own,
+  over the application's tables.
+- **People read as themselves.** Table permissions and ownership formulas decide which rows a
+  plot, a count, a test or a map is made from. Each table a dataset reads is checked: its base,
+  a Join's other side, a Ⱶ path's target.
+- **The server decides.** What an application allows is enforced on every request, whatever
+  the browser asks for. The shell only hides what would be refused.
+- **Things have owners.** Datasets and workspaces belong to whoever made them. They can be shared
+  with a role, and only their owner and the admin change them.
 

@@ -436,33 +436,33 @@ Report workspace with PDF output.
 
 ## Phase 1 — Panels and split view
 
-- [ ] A4.1 Split view: two things side by side with a movable divider, each a workspace, the
+- [x] A4.1 Split view: two things side by side with a movable divider, each a workspace, the
       Dataset editor or the model editor, each with its own state; the URL records both. A
       dataset or model edited on one side refreshes what the other side shows of it (a
       model beside its dataset, an explorer beside the model being built from it). Tests.
-- [ ] A4.2 The panel model in `sc-analytics`: `Panel { id, kind, content }` with kinds plot,
+- [x] A4.2 The panel model in `sc-analytics`: `Panel { id, kind, content }` with kinds plot,
       summary table, test result, text and custom; panels reference datasets by id and render
       live. A usage index answers "what uses this dataset" for the delete warning, and a
       panel whose dataset is gone shows a sentence instead of failing. Tests.
-- [ ] A4.3 Drag and drop: a panel's JSON as the drag payload; sources are the explorer's
+- [x] A4.3 Drag and drop: a panel's JSON as the drag payload; sources are the explorer's
       current output and the model editor's output panels; the report is a sink; always a copy.
       Tests.
 
 ## Phase 2 — The Report workspace
 
-- [ ] A4.4 The Report workspace: a document of blocks (panel, heading, Markdown text, page
+- [x] A4.4 The Report workspace: a document of blocks (panel, heading, Markdown text, page
       break), added by dropping or from a menu, reordered by dragging, removed; page size and
       orientation. Panels render without interaction (no tooltips or brushing). Report blocks
       are themselves drag sources. Tests.
-- [ ] A4.5 PDF output: a print stylesheet with `@page` sizes and page breaks, ECharts' SVG
+- [x] A4.5 PDF output: a print stylesheet with `@page` sizes and page breaks, ECharts' SVG
       renderer for printing, **Export PDF** opening the print dialog. Tests of the pagination
       logic (vitest).
 
 ## Phase 3 — Documentation, definition of done
 
-- [ ] A4.6 `TECHNICAL_DESIGN.md` (panels, drag and drop, reports); `tutorial-analytics.md`
+- [x] A4.6 `TECHNICAL_DESIGN.md` (panels, drag and drop, reports); `tutorial-analytics.md`
       part 4.
-- [ ] A4.7 Definition of done: an `sc-server` test that builds a report through the API with a
+- [x] A4.7 Definition of done: an `sc-server` test that builds a report through the API with a
       copied explorer panel and a model output panel, and checks that the usage index finds
       it. Walk the Try it by hand, including the PDF.
 
@@ -493,58 +493,58 @@ selection, reference layers and the tools that dataset operations can express (g
 
 ## Phase 1 — Geometry in core
 
-- [ ] A5.1 A geometry field type in `sc-types` (point, line, polygon and the multi variants, in
+- [x] A5.1 A geometry field type in `sc-types` (point, line, polygon and the multi variants, in
       WGS84), stored as PostGIS `geometry(…, 4326)`. Bootstrap enables the `postgis`
       extension where the role may; otherwise, and on SQLite, a geometry field is refused
       with a sentence. REST and GraphQL represent geometry as GeoJSON. Tests.
-- [ ] A5.2 Importing GeoJSON, zipped Shapefiles and GeoPackage files into a new table: the
+- [x] A5.2 Importing GeoJSON, zipped Shapefiles and GeoPackage files into a new table: the
       geometry is loaded with its source coordinate system and transformed to WGS84 by
       PostGIS, so no projection library is needed. The admin's table import offers it.
       Tests with small fixture files.
-- [ ] A5.3 Geometry formula functions in `sc-expr`, translated to PostGIS: a point from
+- [x] A5.3 Geometry formula functions in `sc-expr`, translated to PostGIS: a point from
       longitude and latitude, buffer, centroid, area, length, distance, intersects, contains,
       within, and the square and hexagonal cell of a point. Distances and areas are in
       metres (geography casts). Tests.
 
 ## Phase 2 — Spatial operations and delivery
 
-- [ ] A5.4 The Spatial join operation (intersects, contains, within, within a distance,
+- [x] A5.4 The Spatial join operation (intersects, contains, within, within a distance,
       nearest by a lateral join), and geometry union as an Aggregate summary. Tests.
-- [ ] A5.5 Layer data for the browser: GeoJSON for small layers, and Mapbox vector tiles
+- [x] A5.5 Layer data for the browser: GeoJSON for small layers, and Mapbox vector tiles
       (`ST_AsMVT`) for large ones, with simplification by zoom level. Tests.
 
 ## Phase 3 — Map rendering and the map panel
 
-- [ ] A5.6 MapLibre GL JS and deck.gl in `ui/analytics`; the base map style URL as a setting
+- [x] A5.6 MapLibre GL JS and deck.gl in `ui/analytics`; the base map style URL as a setting
       (with a default), and the CSP entries its hosts need. The compiler from a map layer
       spec to MapLibre layers. Tests.
-- [ ] A5.7 The map panel in the Data explorer: the geometry source chosen automatically
+- [x] A5.7 The map panel in the Data explorer: the geometry source chosen automatically
       (geometry column, latitude and longitude columns, or a foreign key to a table with
       geometry), encodings colour, size, shape and label. Tests.
 
 ## Phase 4 — The Map workspace
 
-- [ ] A5.8 The Map workspace's state and layer list: dataset, geometry source, filter, popup
+- [x] A5.8 The Map workspace's state and layer list: dataset, geometry source, filter, popup
       fields, labels, visibility, opacity, order, legend. Tests.
-- [ ] A5.9 Symbology: single symbol, categories, graduated colours (quantile, equal interval,
+- [x] A5.9 Symbology: single symbol, categories, graduated colours (quantile, equal interval,
       natural breaks computed on the server), proportional symbols, heatmap style. Tests.
-- [ ] A5.10 The attribute table below the map with selection linked both ways; selection by
+- [x] A5.10 The attribute table below the map with selection linked both ways; selection by
       click, lasso, attribute condition and location; **Save selection as dataset**. Tests.
-- [ ] A5.11 Reference layers from tile or map service URLs. Tests.
-- [ ] A5.12 The toolbox, for what dataset operations can do: Proximity (buffer, distance to
+- [x] A5.11 Reference layers from tile or map service URLs. Tests.
+- [x] A5.12 The toolbox, for what dataset operations can do: Proximity (buffer, distance to
       nearest, within a distance), Overlay (spatial join, intersection), Aggregate (count and
       sum per region, dissolve). Each creates a global dataset and adds it as a layer, and
       the dataset opens in the Dataset editor. Plugins can register tools. Tests.
-- [ ] A5.13 **Open in map** from the explorer's map panel; a whole map as a draggable panel,
+- [x] A5.13 **Open in map** from the explorer's map panel; a whole map as a draggable panel,
       rendered as an image for reports. Tests.
 
 ## Phase 5 — Demo data, documentation, definition of done
 
-- [ ] A5.14 Demo data: synthetic `districts` (polygons generated from seeded points) and
+- [x] A5.14 Demo data: synthetic `districts` (polygons generated from seeded points) and
       `incidents`. `OPERATIONS.md`: installing PostGIS. `TECHNICAL_DESIGN.md` (geometry type,
       spatial functions and operations, layer delivery, the Map workspace);
       `tutorial-analytics.md` part 5.
-- [ ] A5.15 Definition of done: an `sc-server` test (skipped with a message without PostGIS)
+- [x] A5.15 Definition of done: an `sc-server` test (skipped with a message without PostGIS)
       that imports a GeoJSON fixture, runs the count-per-region tool through the API and
       checks the counts, and fetches a vector tile. Walk the Try it by hand.
 
@@ -570,28 +570,28 @@ drill-down.
 
 ## Phase 1 — Layout and cards
 
-- [ ] A6.1 The Dashboard workspace: a grid of tiles, dragged and resized, responsive to width;
+- [x] A6.1 The Dashboard workspace: a grid of tiles, dragged and resized, responsive to width;
       panels dropped in from any source. Tests.
-- [ ] A6.2 The stat card panel kind: an aggregate of a column, number formatting, a comparison
+- [x] A6.2 The stat card panel kind: an aggregate of a column, number formatting, a comparison
       (with the previous period, or unfiltered) and an optional sparkline. Tests.
 
 ## Phase 2 — Cross-filtering and drill-down
 
-- [ ] A6.3 Selections: clicks and brushes on ECharts and MapLibre panels become the spec's
+- [x] A6.3 Selections: clicks and brushes on ECharts and MapLibre panels become the spec's
       declared selections, and those become filter conditions on the encoded columns. Tests.
-- [ ] A6.4 Propagation: a condition applies to panels on the same dataset through the column,
+- [x] A6.4 Propagation: a condition applies to panels on the same dataset through the column,
       and to panels on other datasets through a column with a foreign key to the same table
       (from the stage shapes). On the server, it is an extra Filter at the end of the
       dataset's operations. Tests: selecting a district filters a panel on a dataset that
       only has a `district` foreign key.
-- [ ] A6.5 Drill paths on a panel, with a breadcrumb. Tests.
-- [ ] A6.6 The filter bar: the active filters, removing one or all, and dashboard-wide filters
+- [x] A6.5 Drill paths on a panel, with a breadcrumb. Tests.
+- [x] A6.6 The filter bar: the active filters, removing one or all, and dashboard-wide filters
       on a column; an optional refresh interval. Tests.
 
 ## Phase 3 — Documentation, definition of done
 
-- [ ] A6.7 `TECHNICAL_DESIGN.md` (selections and propagation); `tutorial-analytics.md` part 6.
-- [ ] A6.8 Definition of done: an `sc-server` test rendering a dashboard's panels with a
+- [x] A6.7 `TECHNICAL_DESIGN.md` (selections and propagation); `tutorial-analytics.md` part 6.
+- [x] A6.8 Definition of done: an `sc-server` test rendering a dashboard's panels with a
       selection applied and checking the filtered results across two datasets. Walk the
       Try it by hand.
 
@@ -736,6 +736,10 @@ years:
 The Analytics UI as an application framework: an admin publishes a restricted subset of it to
 end users (goals document, the introduction's "application").
 
+Taken ahead of A7 and A8 (2026-10-09), which are skipped for now: nothing here needs them. The
+tables a self-serve application may read are the application's own `tables` subset rather than a
+second list in the framework's settings (see the CHANGELOG).
+
 **Try it.**
 1. As the admin, create an application with the framework *Analytics*, in *fixed* mode,
    showing only the dashboard from A6, for the role `staff`.
@@ -750,7 +754,7 @@ end users (goals document, the introduction's "application").
 
 ## Phase 1 — Authority
 
-- [ ] A9.1 Every analytics endpoint takes the caller's authority. Datasets, stat queries,
+- [x] A9.1 Every analytics endpoint takes the caller's authority. Datasets, stat queries,
       tests and layer data read as the caller, through table permissions and ownership
       formulas; the admin keeps full access. Datasets and workspaces gain an owner and
       sharing with roles. Tests: a user without read access is refused; an ownership formula
@@ -758,21 +762,21 @@ end users (goals document, the introduction's "application").
 
 ## Phase 2 — The framework
 
-- [ ] A9.2 The *Analytics* `FrameworkFactory`: its configuration (mode fixed or self-serve,
+- [x] A9.2 The *Analytics* `FrameworkFactory`: its configuration (mode fixed or self-serve,
       the workspaces shown in fixed mode, the tables and workspace types allowed in
       self-serve mode, whether users may create workspaces) and validation. Tests.
-- [ ] A9.3 Mounting: the Analytics UI bundle served in an application with the application's
+- [x] A9.3 Mounting: the Analytics UI bundle served in an application with the application's
       CSP and session, in a restricted shell without admin links. Workspaces belong to an
       application or to the unrestricted UI. Tests.
-- [ ] A9.4 Enforcing the configuration on the server: base pickers, dataset reads and
+- [x] A9.4 Enforcing the configuration on the server: base pickers, dataset reads and
       workspace types limited to what the application allows, whatever the client asks.
       Tests.
 
 ## Phase 3 — Documentation, definition of done
 
-- [ ] A9.5 `TECHNICAL_DESIGN.md` (the framework, authority in analytics);
+- [x] A9.5 `TECHNICAL_DESIGN.md` (the framework, authority in analytics);
       `tutorial-analytics.md` part 9.
-- [ ] A9.6 Definition of done: an `sc-server` test with both applications, checking what a
+- [x] A9.6 Definition of done: an `sc-server` test with both applications, checking what a
       `staff` user can see and read in each. Walk the Try it by hand.
 
 ---
@@ -859,3 +863,69 @@ The items carried past milestone 31 are listed in
 prediction for new rows from a posterior (A7.1), geometry types (A5.1) and adjacency from
 geometry (A8.3). LOO and the comparison view, and the formula front end generating Stan, are
 part of the unscheduled Bayesian workflow above. The rest remain carried.
+
+# Feedback from an external MCP build ("Optino")
+
+An external coding agent built two applications through the administration MCP server with
+the grants `allow_create`, `allow_edit`, `allow_triggers` and `allow_applications`. What it
+could not do, and what we agree is missing:
+
+- [x] F.1 Response compression: gzip and brotli on every HTTP response the client accepts it
+  for (tower-http `CompressionLayer`, its default predicate, which already skips SSE, images
+  and tiny bodies; also skip zip archives). Test that an `/api` JSON response is compressed.
+- [x] F.2 `edit_schema` can create **File** fields: `file_store` (and optional `file_folder`,
+  `file_mime`) on `add_field` / `create_table` fields make a `DataFieldKind::File`. Say in
+  the tool description that `file` is not a `type`. Tests.
+- [x] F.3 MCP tool `update_application` (Applications area), replacing
+  `set_application_tables`: one tool with `tables`, `static_dirs` and `csp` sections, so the tool
+  count does not grow. `tables` and `static_dirs` need `allow_edit`; `csp` needs
+  `allow_access_changes` because a CSP is a security boundary. Every section's grant is checked
+  before anything changes. A store a static directory names is connected to the application.
+  Saved through the admin's own `updateApplication`, so the running app serves the change at
+  once. Tests.
+- [x] F.4 (merged into F.3) Static directories and the CSP were first two tools of their own.
+- [x] F.5 Update the module docs, TECHNICAL_DESIGN §13.6, OPERATIONS.md and the admin
+  copilot's name list.
+
+Not changed, by design: `save_api_query`'s `min_role` and `edit_schema`'s `min_role_*` stay
+behind `allow_access_changes`, and deleting tables and triggers stays behind `allow_drop`.
+
+# An LLM provider from the configuration file
+
+An operator can supply an LLM provider in `feldspar.toml`. The admin can use it but cannot edit
+it, and can still add other providers and make one of them the default.
+
+- [x] L.1 `[environments.NAME.llm_provider]` in `sc-config-file`: name, backend, key, base URL,
+  default model, and `[[…models]]` entries with each model's settings. Shape tests.
+- [x] L.2 `sc_llm::host`: a checked `HostLlmProvider` held on the `Catalog`, never stored.
+  Storage readers merge it in, and writers refuse it and its models. A clash with a stored
+  name stops the boot. Ids are derived from the name. Tests against Postgres.
+- [x] L.3 The default provider: `default_llm_provider` in `_fd_config` (internal), falling
+  back to the file's provider, then the first by name. Used by the app builder agent, `i18n
+  translate`, `eval` and the agent form. Tests.
+- [x] L.4 Admin API: `from_config_file` and `is_default` on a provider, and
+  `setDefaultLlmProvider`. *Test* uses the file's settings verbatim and only its models.
+  Backups leave the file's provider out. Tests.
+- [x] L.5 Admin UI: badges, *Make default*, and the file's provider and its models read-only.
+  OPERATIONS.md §4.4, README and TECHNICAL_DESIGN §11.1.
+
+# Public datasets ("Get datasets")
+
+The Analytics UI's Datasets card gets a *Get datasets* button beside *Create*. It lists well-known
+open datasets: tabular, hierarchical, time series and spatial. Picking one downloads it from its
+publisher, creates its tables and opens a dataset on them. Only the metadata (fields, types,
+references, sources, licence and credit) is in the codebase; the data is downloaded on request.
+
+- [x] PD.1 The catalogue (`sc-api/src/public_datasets/catalogue.toml`): 34 datasets with
+  licences checked, GitHub sources pinned to a commit, our own descriptions. Validated at
+  compile-test time.
+- [x] PD.2 Reading the files (CSV in its variants, JSON, GeoJSON) into typed rows, and
+  `install`: download everything first, create the tables with their references, write the rows
+  through the row layer in one transaction, create the dataset; drop the tables on failure.
+- [x] PD.3 Admin API: `listPublicDatasets`, `installPublicDataset` (a background job) and
+  `getPublicDatasetInstall`. The client regenerated in all four UIs.
+- [x] PD.4 The picker in the Analytics UI: categories, search, size and licence, progress while
+  it runs, open the dataset when done.
+- [x] PD.5 Tests: the reader's quirks, installs from synthetic fixtures (references, a tree,
+  missing references, rollback, PostGIS), the endpoints, and an `#[ignore]`d test that installs
+  every dataset from its real source.

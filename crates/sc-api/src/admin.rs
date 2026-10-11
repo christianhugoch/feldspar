@@ -136,6 +136,31 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Create a table **from a geographic file** (analytics TODO A5.2): GeoJSON,
+    // a zipped Shapefile or a GeoPackage, its geometry reprojected to WGS84 by
+    // PostGIS. The file travels as base64 because two of the three are binary;
+    // `layer` picks one of several Shapefiles in a zip or tables in a package.
+    set.register(
+        Endpoint::new(
+            "createTableFromGeoFile",
+            Method::Post,
+            api().lit("tables").lit("geo"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("name", TypeSchema::text()),
+            StructField::new("file_name", TypeSchema::text()),
+            StructField::new("content_base64", TypeSchema::text()),
+            StructField::new("layer", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("database", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("table", table_schema()),
+            StructField::new("inserted", TypeSchema::int()),
+            StructField::new("warnings", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Set a table's configuration: the `_fd_tables` overlay fields, and only
     // those (§9). A `PUT` on the table's own path rather than a nested
     // `…/settings` resource, because from the admin's side there is one table
@@ -950,6 +975,23 @@ pub fn admin_endpoints() -> EndpointSet {
             "deleted",
             TypeSchema::bool(),
         )]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Make a provider the installation's default: the one used where nothing
+    // names a provider (a new application's builder agent, a translation). The
+    // provider the configuration file supplies may be made the default like any
+    // other — choosing it is using it, not changing it.
+    set.register(
+        Endpoint::new(
+            "setDefaultLlmProvider",
+            Method::Put,
+            api()
+                .lit("llm-providers")
+                .param("id", ValueType::Uuid)
+                .lit("default"),
+        )
+        .output(llm_provider_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -3175,7 +3217,8 @@ pub fn admin_endpoints() -> EndpointSet {
 
     // What refers to a model by name (analytics TODO A3.5): the calculated
     // fields whose formula calls `predict("…")` on it, and the triggers and
-    // workflows that fit it (`fit_model`) or name it in their configuration.
+    // workflows that fit it (`fit_model`) or name it in their configuration,
+    // and the workspaces whose panels show one of its fits (A4.2).
     // The model list's delete warning lists them; deleting is not refused,
     // since each of them reports the missing model by name when it next runs.
     set.register(
@@ -3203,6 +3246,11 @@ pub fn admin_endpoints() -> EndpointSet {
                     // `fits` (a `fit_model` step) or `names` (any other mention).
                     StructField::new("how", TypeSchema::text()),
                 ])),
+            ),
+            // The workspaces whose panels show one of its fits (A4.2).
+            StructField::new(
+                "workspaces",
+                TypeSchema::array(crate::analytics::workspace_use_schema()),
             ),
         ]))
         .auth(AuthRequirement::admin()),
@@ -3734,6 +3782,54 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // Where the admin UI is served, and whether a browser can follow it there
+    // yet (Settings → Development → Admin subdomain). The dialog a move opens
+    // polls this until `ready`, and the screens that link to applications read
+    // `base_domain` from it, since the admin UI's own host stops being the base
+    // domain once it moves.
+    //
+    // `certificate` is `null` without a base domain; otherwise `state` is
+    // `plain_http`, `ready`, `ordering` or `not_covered`, and `message` is what
+    // the CA last said (or why the pasted certificate does not do).
+    set.register(
+        Endpoint::new(
+            "getAdminAddress",
+            Method::Get,
+            api().lit("settings").lit("admin-address"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("base_domain", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("admin_subdomain", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("admin_host", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("ready", TypeSchema::bool()),
+            StructField::new(
+                "certificate",
+                TypeSchema::optional(TypeSchema::struct_of([
+                    StructField::new("state", TypeSchema::text()),
+                    StructField::new("message", TypeSchema::optional(TypeSchema::text())),
+                ])),
+            ),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // A single-use token that signs the admin in on the admin UI's current host
+    // — the session cookie is host-only, so following a move would otherwise
+    // mean logging in again. `path` is opened on `host`, with the scheme and
+    // port the browser already uses.
+    set.register(
+        Endpoint::new(
+            "createAdminHandoff",
+            Method::Post,
+            api().lit("settings").lit("admin-address").lit("handoff"),
+        )
+        .output(TypeSchema::struct_of([
+            StructField::new("host", TypeSchema::text()),
+            StructField::new("path", TypeSchema::text()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Send one message through the **stored** email settings (§18.2).
     //
     // A section may have an *act* as well as fields, and this is the first one:
@@ -3854,6 +3950,66 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // **Automated backups**: any number of recurring backups, each sent to a
+    // directory on the server, an SFTP server or an S3-compatible bucket
+    // (Settings → Backup → Automated backups). Each has
+    // its own `include`, the same selection the backup dialog sends, and the
+    // server stores it as what was left out, as it does the Backup card's — so
+    // a table created later is in the next run. Read back, `include` is that
+    // resolved against what there is now. The `last_*` fields are what the
+    // schedule last did, written by the server's backup task and read-only.
+    set.register(
+        Endpoint::new(
+            "listBackupSchedules",
+            Method::Get,
+            api().lit("backup").lit("schedules"),
+        )
+        .output(TypeSchema::array(backup_schedule_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createBackupSchedule",
+            Method::Post,
+            api().lit("backup").lit("schedules"),
+        )
+        .input(backup_schedule_input_schema())
+        .output(backup_schedule_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateBackupSchedule",
+            Method::Put,
+            api()
+                .lit("backup")
+                .lit("schedules")
+                .param("id", ValueType::Uuid),
+        )
+        .input(backup_schedule_input_schema())
+        .output(backup_schedule_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Stops new backups; the ones already written stay where they were sent.
+    set.register(
+        Endpoint::new(
+            "deleteBackupSchedule",
+            Method::Delete,
+            api()
+                .lit("backup")
+                .lit("schedules")
+                .param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // **Clear all**: back to an empty installation (Settings → Development).
     //
     // Two calls because the dialog asks a question first: every file store and
@@ -3932,6 +4088,78 @@ fn api_token_schema() -> TypeSchema {
         // than recomputing the clock arithmetic in TypeScript.
         StructField::new("live", TypeSchema::bool()),
     ])
+}
+
+/// What an admin sets on an automated backup: where the backups go, `daily`,
+/// `weekly` or `monthly`, the days before a backup there is deleted, and what each
+/// backup includes.
+fn backup_schedule_input_schema() -> TypeSchema {
+    TypeSchema::struct_of(backup_schedule_input_fields())
+}
+
+fn backup_schedule_input_fields() -> Vec<StructField> {
+    vec![
+        StructField::new("destination", backup_destination_schema()),
+        StructField::new("frequency", TypeSchema::text()),
+        StructField::new("retention_days", TypeSchema::int()),
+        StructField::new("include", backup_selection_schema()),
+    ]
+}
+
+/// Where an automated backup goes. `kind` is `local`, `sftp` or `s3`, and
+/// says which of the other fields apply:
+///
+/// - `local`: `directory`, an absolute path on the server.
+/// - `sftp`: `host`, `port` (22 when null), `username`, `password` and
+///   `directory` (absolute, or relative to the login's directory; empty for
+///   that directory). `host_key` is the server's key fingerprint, recorded when
+///   the schedule is saved and checked on every run; it is read-only.
+/// - `s3`: `endpoint` (any S3-compatible service; empty for AWS), `bucket`,
+///   `region` (empty for `us-east-1`), `access_key` and `secret_key`.
+///
+/// `password` and `secret_key` are sent as a mask; handing the mask back on an
+/// update keeps what is stored.
+fn backup_destination_schema() -> TypeSchema {
+    let text = || TypeSchema::optional(TypeSchema::text());
+    TypeSchema::struct_of([
+        StructField::new("kind", TypeSchema::text()),
+        StructField::new("directory", text()),
+        StructField::new("host", text()),
+        StructField::new("port", TypeSchema::optional(TypeSchema::int())),
+        StructField::new("username", text()),
+        StructField::new("password", text()),
+        StructField::new("host_key", text()),
+        StructField::new("endpoint", text()),
+        StructField::new("bucket", text()),
+        StructField::new("region", text()),
+        StructField::new("access_key", text()),
+        StructField::new("secret_key", text()),
+    ])
+}
+
+/// An automated backup, with what it last did.
+fn backup_schedule_schema() -> TypeSchema {
+    let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
+    fields.extend(backup_schedule_input_fields());
+    fields.extend([
+        // Where the backups go, in one line: a path, an `sftp://` address or
+        // the bucket's URL.
+        StructField::new("location", TypeSchema::text()),
+        StructField::new(
+            "last_attempt_at",
+            TypeSchema::optional(TypeSchema::timestamp()),
+        ),
+        StructField::new(
+            "last_success_at",
+            TypeSchema::optional(TypeSchema::timestamp()),
+        ),
+        // Why the last attempt failed; null when it succeeded.
+        StructField::new("last_error", TypeSchema::optional(TypeSchema::text())),
+        // Where the last backup written is: a path, an `sftp://` address or a
+        // URL.
+        StructField::new("last_file", TypeSchema::optional(TypeSchema::text())),
+    ]);
+    TypeSchema::struct_of(fields)
 }
 
 /// One thing a backup can include or leave out: what it is called, what to show,
@@ -4512,9 +4740,11 @@ fn llm_provider_fields() -> Vec<StructField> {
 
 /// An LLM provider as reported to the admin UI.
 ///
-/// `id` is not optional here, unlike a file store's: there is no `--llm-provider`
-/// flag and no such thing as a provider without a row, so every provider in a
-/// listing is one that can be edited and deleted.
+/// `id` is not optional here, unlike a file store's: even the provider the
+/// configuration file supplies, which has no row, has an id derived from its
+/// name. That one is `from_config_file`, and neither it nor its models can be
+/// edited or deleted. `is_default` marks the installation's default provider —
+/// exactly one in a non-empty listing.
 ///
 /// There is no `connected` either, and its absence is the design: connecting a
 /// provider builds an HTTP client and sends nothing, so "connected" would be a
@@ -4524,6 +4754,10 @@ fn llm_provider_fields() -> Vec<StructField> {
 fn llm_provider_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(llm_provider_fields());
+    fields.extend([
+        StructField::new("from_config_file", TypeSchema::bool()),
+        StructField::new("is_default", TypeSchema::bool()),
+    ]);
     TypeSchema::Struct(fields)
 }
 
@@ -5863,6 +6097,9 @@ fn settings_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("sections", TypeSchema::array(settings_section_schema())),
         StructField::new("values", TypeSchema::json()),
+        // The keys pinned by this host's `feldspar.toml`, which win over the
+        // stored values and which a save cannot change.
+        StructField::new("host_keys", TypeSchema::array(TypeSchema::text())),
     ])
 }
 
@@ -6324,6 +6561,9 @@ mod tests {
             "writeFile",
             // Backup, restore and user management.
             "restoreBackup",
+            "createBackupSchedule",
+            "updateBackupSchedule",
+            "deleteBackupSchedule",
             "clearAll",
             "listUsers",
             "createUser",

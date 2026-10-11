@@ -437,6 +437,30 @@ pub fn allow_admin_framing(csp: CspPolicy, base_domain: Option<&str>) -> CspPoli
     )
 }
 
+/// Let the admin UI frame an application from wherever it is **now**, when the
+/// application's policy was widened for the base domain by
+/// [`allow_admin_framing`].
+///
+/// That widening is stored with the application, on create and update, and it
+/// names the base domain because that is where the admin UI was. An admin UI
+/// moved to `admin_host` (Settings → Development) would otherwise find every
+/// existing application's preview pane refusing it. So this is applied as the
+/// policy is served: where `frame-ancestors` lists the base domain, the admin
+/// host is listed beside it. A policy the admin wrote without the base domain
+/// in it is theirs and is returned untouched.
+pub fn follow_admin_host(csp: &CspPolicy, base_domain: &str, admin_host: &str) -> CspPolicy {
+    let Some(sources) = csp.directives.get(FRAME_ANCESTORS) else {
+        return csp.clone();
+    };
+    if !sources.iter().any(|s| s == base_domain) || sources.iter().any(|s| s == admin_host) {
+        return csp.clone();
+    }
+    let mut widened = sources.clone();
+    widened.push(admin_host.to_owned());
+    widened.push(format!("{admin_host}:*"));
+    csp.clone().directive(FRAME_ANCESTORS, widened)
+}
+
 /// An application: a UI framework plus an access subset of the shared data layer,
 /// served on its own subdomain (design §13.2).
 #[derive(Debug, Clone, PartialEq)]
@@ -628,6 +652,35 @@ impl Application {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An application created while the admin UI was on the base domain keeps
+    /// letting it frame the preview pane after it moves to `admin.example.com`;
+    /// a policy that never named the base domain is left as the admin wrote it.
+    #[test]
+    fn the_admin_framing_follows_the_admin_host() {
+        let widened = allow_admin_framing(CspPolicy::strict(), Some("example.com"));
+        let moved = follow_admin_host(&widened, "example.com", "admin.example.com");
+        assert_eq!(
+            moved.directives[FRAME_ANCESTORS],
+            [
+                "'self'",
+                "example.com",
+                "example.com:*",
+                "admin.example.com",
+                "admin.example.com:*"
+            ]
+        );
+        // Idempotent: following twice lists the host once.
+        assert_eq!(
+            follow_admin_host(&moved, "example.com", "admin.example.com"),
+            moved
+        );
+        let own = CspPolicy::strict().directive(FRAME_ANCESTORS, ["'none'"]);
+        assert_eq!(
+            follow_admin_host(&own, "example.com", "admin.example.com"),
+            own
+        );
+    }
 
     #[test]
     fn builds_an_application_with_access_subset() {

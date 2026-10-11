@@ -117,6 +117,7 @@ axum.workspace = true
 axum-server.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
+webpki.workspace = true
 rustls-acme.workspace = true
 # The chat socket's client protocol, parsed rather than hand-matched (§11.4).
 serde = { workspace = true }
@@ -142,6 +143,13 @@ rust_decimal.workspace = true
 # A Saltcorn 1 backup lists its files in `files.csv` (`backup::v1`), so importing
 # one means reading a CSV with the same parser the table import reads one with.
 csv.workspace = true
+# Automated backups sent off the server (`backup::destination`): an
+# S3-compatible bucket, signed by hand (`backup::s3`) with `sha2` over
+# `reqwest`, or an SFTP server through `russh` + `russh-sftp`.
+reqwest.workspace = true
+sha2.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
 
 [dev-dependencies]
 # The Saltcorn UI golden-HTML test normalises what legitimately differs between
@@ -161,16 +169,16 @@ tokio-tungstenite.workspace = true
 # must not reach a CA. `rcgen` is already in the tree — `rustls-acme` builds its
 # challenge certificates with it.
 rcgen.workspace = true
-# An HTTPS *client* for the end-to-end TLS test: the one thing a
-# `tower::oneshot` cannot exercise is the handshake, because the handshake
-# happens below the service.
-reqwest.workspace = true
+# (The end-to-end TLS test's HTTPS client is `reqwest`, a normal dependency.)
 # The scripted provider (`sc-agent`'s `testing` feature, decision 7): the chat
 # socket is driven through a whole turn without a vendor and without a token.
 sc-agent = { workspace = true, features = ["testing"] }
 # And `sc-stream`'s, for the same reason: the trigger bridge and the observe
 # sockets are driven through a whole stream without a broker.
 sc-stream = { workspace = true, features = ["testing"] }
+# Decompresses a gzip response in the router test that checks responses are
+# compressed for a client that accepts it.
+flate2.workspace = true
 
 [lints]
 workspace = true

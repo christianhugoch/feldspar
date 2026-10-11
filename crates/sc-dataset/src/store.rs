@@ -18,7 +18,7 @@
 //!   name, a base that does not exist or leads back to the dataset, a changed
 //!   base, and operation ids that are empty or repeated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::{Catalog, DataField, Table};
 use sc_db::Row;
@@ -27,6 +27,7 @@ use sc_query::{Assignment, Delete, Expr, Insert, Select, Source, Statement, Upda
 use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
+use crate::access::Sharing;
 use crate::compile::Library;
 use crate::def::{Base, DatasetDef, DatasetId, Operation};
 
@@ -39,6 +40,8 @@ const COL_DESCRIPTION: &str = "description";
 const COL_BASE: &str = "base";
 const COL_OPERATIONS: &str = "operations";
 const COL_ATTRIBUTES: &str = "attributes";
+const COL_OWNER: &str = "owner";
+const COL_SHARE_ROLE: &str = "share_role";
 
 /// The fields of `_fd_datasets`, in declaration order.
 fn dataset_fields() -> Vec<DataField> {
@@ -53,6 +56,11 @@ fn dataset_fields() -> Vec<DataField> {
         DataField::plain(COL_BASE, json()).required(),
         DataField::plain(COL_OPERATIONS, json()).required(),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
+        // Who made it and whom it is shared with (A9.1): nullable, so the
+        // bootstrap adds them to a table that already has rows. They are not
+        // part of the definition, so changing them changes no fit's hash.
+        DataField::plain(COL_OWNER, TypeRef::Basic(BasicType::Uuid)),
+        DataField::plain(COL_SHARE_ROLE, TypeRef::Basic(BasicType::Int)),
     ]
 }
 
@@ -297,6 +305,64 @@ pub async fn clone_dataset(
     };
     save_dataset(catalog, &copy).await?;
     Ok(copy)
+}
+
+/// Who owns the dataset with this id and whom it is shared with, or `None`
+/// when there is no such dataset (A9.1).
+pub async fn dataset_sharing(catalog: &Catalog, id: DatasetId) -> Result<Option<Sharing>> {
+    let select = Select::from(Source::table(DATASETS_TABLE))
+        .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+    Ok(rows(catalog, select).await?.first().map(sharing_from_row))
+}
+
+/// Every dataset's owner and sharing, by id.
+pub async fn list_dataset_sharing(catalog: &Catalog) -> Result<BTreeMap<DatasetId, Sharing>> {
+    let mut out = BTreeMap::new();
+    for row in rows(catalog, Select::from(Source::table(DATASETS_TABLE))).await? {
+        if let Some(Value::Uuid(id)) = row.get(COL_ID) {
+            out.insert(DatasetId(*id), sharing_from_row(&row));
+        }
+    }
+    Ok(out)
+}
+
+/// Set who owns a dataset and whom it is shared with.
+pub async fn set_dataset_sharing(catalog: &Catalog, id: DatasetId, sharing: Sharing) -> Result<()> {
+    sharing.check()?;
+    let update = Update::new(
+        DATASETS_TABLE,
+        vec![
+            Assignment::new(
+                COL_OWNER,
+                Expr::Lit(sharing.owner.map_or(Value::Null, Value::Uuid)),
+            ),
+            Assignment::new(
+                COL_SHARE_ROLE,
+                Expr::Lit(
+                    sharing
+                        .share_role
+                        .map_or(Value::Null, |r| Value::Int(i64::from(r))),
+                ),
+            ),
+        ],
+    )
+    .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
+    exec(catalog, update.into()).await
+}
+
+/// The owner and sharing columns of a row; a value of the wrong type reads as
+/// none, which shares nothing.
+fn sharing_from_row(row: &Row) -> Sharing {
+    Sharing {
+        owner: match row.get(COL_OWNER) {
+            Some(Value::Uuid(u)) => Some(*u),
+            _ => None,
+        },
+        share_role: match row.get(COL_SHARE_ROLE) {
+            Some(Value::Int(n)) => u8::try_from(*n).ok(),
+            _ => None,
+        },
+    }
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<Json> {

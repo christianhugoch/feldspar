@@ -17,6 +17,8 @@
 // browsed from introspection — which is this file and the screen over it.
 
 /** The GraphQL request body, exactly as the endpoint takes it. */
+import { appUrl } from "./adminAddress";
+
 export type ExplorerRequest = {
   query: string;
   variables?: unknown;
@@ -404,7 +406,7 @@ export function graphqlEndpointUrl(
   mount: string,
   location: { protocol: string; host: string },
 ): string {
-  return `${location.protocol}//${subdomain}.${location.host}${mount}`;
+  return `${appUrl(subdomain, location)}${mount}`;
 }
 
 /**

@@ -1,0 +1,1207 @@
+# The public datasets the Analytics UI's "Get datasets" offers (see `mod.rs`).
+#
+# Only the *metadata* lives here: what each table is called, its fields and
+# their types, where the file is and how to read it, and the licence and credit
+# that go with it. The data itself is downloaded when someone asks for it, so
+# nothing below redistributes anyone's data and the descriptions are our own
+# words. GitHub sources are pinned to a commit so a column cannot be renamed
+# under us; the live feeds (NOAA, USGS, OurAirports, Eurostat) cannot be pinned
+# and are read by column name, so a new column upstream is ignored.
+#
+# Shape of an entry:
+#
+#   [[dataset]]            key, title, category (tabular | hierarchical |
+#                          time_series | spatial), description, homepage,
+#                          licence, licence_url, attribution, and dataset_table:
+#                          the table the Analytics dataset is created on.
+#   [[dataset.table]]      in creation order: a table another one references
+#                          comes first. `distinct = true` keeps the first row of
+#                          each primary key value, which is how a lookup table
+#                          (countries, counties) is cut out of a flat file.
+#     sources = [{ url, format (csv | json | geojson), bytes, delimiter
+#                  ("," default, ";", "\t" or "whitespace"), header (a list of
+#                  names when the file has no header row), comment (a line
+#                  prefix to skip), na (cells that mean "no value"; an empty
+#                  cell always does), constants (extra columns per source) }]
+#     fields = [{ name, type, from, label, required, primary_key, references,
+#                 if_missing, na, parse }]
+#
+# `type` is a basic type name (int, float, text, bool, date, timestamp,
+# geometry_point, geometry_multipolygon, geometry_multilinestring) or `key`,
+# which takes its type from the `references`d table's key. A table with no
+# `primary_key` field gets an `id` the database numbers. `from` defaults to the
+# field's name; it may be a list: [lon, lat] makes a point, [year, month] or
+# [year, month, day] a date. In a GeoJSON file `$geometry` is the feature's
+# geometry, `$id` its id and `$z` the third coordinate of a point. `parse` is
+# one of year_quarter ("1998 Q1"), year_month ("1850-01"), decimal_year_month
+# (1949.0833), epoch_ms, parent_code (the code without its last character, none
+# for a two-letter code). `if_missing = "null"` writes no reference when the
+# row it names is not in the referenced table.
+
+# --- Tabular ---------------------------------------------------------------------
+
+[[dataset]]
+key = "penguins"
+title = "Palmer penguins"
+category = "tabular"
+description = "Bill, flipper and body measurements of three penguin species on three islands near Palmer Station, Antarctica, 2007–2009. A friendly replacement for iris, with some missing values."
+homepage = "https://allisonhorst.github.io/palmerpenguins/"
+licence = "CC0 1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "Horst AM, Hill AP, Gorman KB (2020). palmerpenguins: Palmer Archipelago (Antarctica) penguin data. Data collected by Dr. Kristen Gorman and the Palmer Station Long Term Ecological Research Program."
+dataset_table = "penguins"
+
+[[dataset.table]]
+name = "penguins"
+rows = 344
+sources = [{ url = "https://raw.githubusercontent.com/allisonhorst/palmerpenguins/8957207b78d6ccd1b4654a9dd9c9041b657478ab/inst/extdata/penguins.csv", format = "csv", bytes = 15241, na = ["NA"] }]
+fields = [
+  { name = "species", type = "text", required = true },
+  { name = "island", type = "text", required = true },
+  { name = "bill_length_mm", type = "float", label = "Bill length (mm)" },
+  { name = "bill_depth_mm", type = "float", label = "Bill depth (mm)" },
+  { name = "flipper_length_mm", type = "int", label = "Flipper length (mm)" },
+  { name = "body_mass_g", type = "int", label = "Body mass (g)" },
+  { name = "sex", type = "text" },
+  { name = "year", type = "int", required = true },
+]
+
+[[dataset]]
+key = "iris"
+title = "Iris flowers"
+category = "tabular"
+description = "Sepal and petal measurements of 150 iris flowers, 50 from each of three species: the classic small classification example."
+homepage = "https://archive.ics.uci.edu/dataset/53/iris"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Fisher, R. A. (1936). Iris [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C56C76"
+dataset_table = "iris"
+
+[[dataset.table]]
+name = "iris"
+rows = 150
+sources = [{ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/iris/iris.data", format = "csv", bytes = 4551, header = ["sepal_length", "sepal_width", "petal_length", "petal_width", "species"] }]
+fields = [
+  { name = "sepal_length", type = "float", label = "Sepal length (cm)", required = true },
+  { name = "sepal_width", type = "float", label = "Sepal width (cm)", required = true },
+  { name = "petal_length", type = "float", label = "Petal length (cm)", required = true },
+  { name = "petal_width", type = "float", label = "Petal width (cm)", required = true },
+  { name = "species", type = "text", required = true },
+]
+
+[[dataset]]
+key = "titanic"
+title = "Titanic passengers"
+category = "tabular"
+description = "The 1,309 passengers of the Titanic with their class, age, sex, family aboard, fare, cabin and whether they survived. The standard survival-modelling example."
+homepage = "https://hbiostat.org/data/"
+licence = "Free to use, no licence stated"
+licence_url = "https://hbiostat.org/data/"
+attribution = "titanic3, compiled by Thomas Cason from Encyclopedia Titanica and others; distributed by Frank Harrell, Department of Biostatistics, Vanderbilt University."
+dataset_table = "titanic"
+
+[[dataset.table]]
+name = "titanic"
+rows = 1309
+sources = [{ url = "https://hbiostat.org/data/repo/titanic3.csv", format = "csv", bytes = 116752 }]
+fields = [
+  { name = "name", type = "text", required = true },
+  { name = "pclass", type = "int", label = "Class", required = true },
+  { name = "survived", type = "bool", required = true },
+  { name = "sex", type = "text", required = true },
+  { name = "age", type = "float" },
+  { name = "sibsp", type = "int", label = "Siblings or spouses aboard" },
+  { name = "parch", type = "int", label = "Parents or children aboard" },
+  { name = "ticket", type = "text" },
+  { name = "fare", type = "float" },
+  { name = "cabin", type = "text" },
+  { name = "embarked", type = "text", label = "Port of embarkation" },
+  { name = "boat", type = "text", label = "Lifeboat" },
+  { name = "body", type = "int", label = "Body number" },
+  { name = "home_dest", type = "text", from = "home.dest", label = "Home or destination" },
+]
+
+[[dataset]]
+key = "tips"
+title = "Restaurant tips"
+category = "tabular"
+description = "244 bills and tips recorded by one waiter over a few months, with the party's size, the day, the time and whether they smoked."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/reshape2/tips.html"
+licence = "MIT (reshape2 R package)"
+licence_url = "https://cran.r-project.org/package=reshape2"
+attribution = "Bryant, P. G. and Smith, M. A. (1995). Practical Data Analysis: Case Studies in Business Statistics. Distributed in the reshape2 R package, via Rdatasets."
+dataset_table = "tips"
+
+[[dataset.table]]
+name = "tips"
+rows = 244
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/reshape2/tips.csv", format = "csv", bytes = 8640 }]
+fields = [
+  { name = "total_bill", type = "float", required = true },
+  { name = "tip", type = "float", required = true },
+  { name = "sex", type = "text", required = true },
+  { name = "smoker", type = "bool", required = true },
+  { name = "day", type = "text", required = true },
+  { name = "time", type = "text", required = true },
+  { name = "size", type = "int", label = "Party size", required = true },
+]
+
+[[dataset]]
+key = "diamonds"
+title = "Diamonds"
+category = "tabular"
+description = "Price, carat, cut, colour, clarity and dimensions of almost 54,000 diamonds. Large enough to need binning, with ordered categories."
+homepage = "https://ggplot2.tidyverse.org/reference/diamonds.html"
+licence = "MIT (ggplot2 R package)"
+licence_url = "https://ggplot2.tidyverse.org/LICENSE.html"
+attribution = "diamonds, from the ggplot2 R package (Hadley Wickham and the ggplot2 authors)."
+dataset_table = "diamonds"
+
+[[dataset.table]]
+name = "diamonds"
+rows = 53940
+sources = [{ url = "https://raw.githubusercontent.com/tidyverse/ggplot2/737be17f43bebac02ccb119753c1fee267572443/data-raw/diamonds.csv", format = "csv", bytes = 2772143 }]
+fields = [
+  { name = "carat", type = "float", required = true },
+  { name = "cut", type = "text", required = true },
+  { name = "color", type = "text", required = true },
+  { name = "clarity", type = "text", required = true },
+  { name = "depth", type = "float", label = "Depth (%)", required = true },
+  { name = "table_width", type = "float", from = "table", label = "Table (%)", required = true },
+  { name = "price", type = "int", label = "Price (USD)", required = true },
+  { name = "x", type = "float", label = "Length (mm)", required = true },
+  { name = "y", type = "float", label = "Width (mm)", required = true },
+  { name = "z", type = "float", label = "Depth (mm)", required = true },
+]
+
+[[dataset]]
+key = "auto_mpg"
+title = "Auto MPG"
+category = "tabular"
+description = "Fuel economy of 398 cars from 1970–1982 with their engine size, horsepower, weight, acceleration and origin."
+homepage = "https://archive.ics.uci.edu/dataset/9/auto+mpg"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Quinlan, R. (1993). Auto MPG [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C5859H"
+dataset_table = "auto_mpg"
+
+[[dataset.table]]
+name = "auto_mpg"
+rows = 398
+sources = [{ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/auto-mpg/auto-mpg.data", format = "csv", bytes = 30286, delimiter = "whitespace", na = ["?"], header = ["mpg", "cylinders", "displacement", "horsepower", "weight", "acceleration", "model_year", "origin", "car_name"] }]
+fields = [
+  { name = "car_name", type = "text", required = true },
+  { name = "mpg", type = "float", label = "Miles per gallon", required = true },
+  { name = "cylinders", type = "int", required = true },
+  { name = "displacement", type = "float", label = "Displacement (cu in)", required = true },
+  { name = "horsepower", type = "float" },
+  { name = "weight", type = "int", label = "Weight (lb)", required = true },
+  { name = "acceleration", type = "float", label = "0–60 mph (s)", required = true },
+  { name = "model_year", type = "int", required = true },
+  { name = "origin", type = "int", label = "Origin (1 USA, 2 Europe, 3 Japan)", required = true },
+]
+
+[[dataset]]
+key = "mtcars"
+title = "Motor Trend cars"
+category = "tabular"
+description = "Fuel consumption and ten design and performance figures for 32 cars from the 1974 Motor Trend magazine. Small enough to read in full."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/datasets/mtcars.html"
+licence = "GPL (R datasets package)"
+licence_url = "https://www.r-project.org/Licenses/"
+attribution = "Henderson and Velleman (1981). Building multiple regression models interactively. Biometrics 37, 391–411. Data from Motor Trend US magazine, 1974; distributed with R, via Rdatasets."
+dataset_table = "mtcars"
+
+[[dataset.table]]
+name = "mtcars"
+rows = 32
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/datasets/mtcars.csv", format = "csv", bytes = 1703 }]
+fields = [
+  { name = "model", type = "text", from = "rownames", required = true },
+  { name = "mpg", type = "float", label = "Miles per gallon", required = true },
+  { name = "cyl", type = "int", label = "Cylinders", required = true },
+  { name = "disp", type = "float", label = "Displacement (cu in)", required = true },
+  { name = "hp", type = "int", label = "Horsepower", required = true },
+  { name = "drat", type = "float", label = "Rear axle ratio", required = true },
+  { name = "wt", type = "float", label = "Weight (1000 lb)", required = true },
+  { name = "qsec", type = "float", label = "Quarter-mile time (s)", required = true },
+  { name = "vs", type = "bool", label = "Straight engine", required = true },
+  { name = "am", type = "bool", label = "Manual transmission", required = true },
+  { name = "gear", type = "int", label = "Forward gears", required = true },
+  { name = "carb", type = "int", label = "Carburettors", required = true },
+]
+
+[[dataset]]
+key = "wine_quality"
+title = "Wine quality"
+category = "tabular"
+description = "Physico-chemical tests and a tasting score from 0 to 10 for 6,497 red and white Portuguese vinho verde wines. The two source files are joined with a colour column."
+homepage = "https://archive.ics.uci.edu/dataset/186/wine+quality"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Cortez, P., Cerdeira, A., Almeida, F., Matos, T., & Reis, J. (2009). Wine Quality [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C56S3T"
+dataset_table = "wine_quality"
+
+[[dataset.table]]
+name = "wine_quality"
+rows = 6497
+sources = [
+  { url = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv", format = "csv", bytes = 84199, delimiter = ";", constants = { colour = "red" } },
+  { url = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv", format = "csv", bytes = 264426, delimiter = ";", constants = { colour = "white" } },
+]
+fields = [
+  { name = "colour", type = "text", required = true },
+  { name = "fixed_acidity", type = "float", from = "fixed acidity", required = true },
+  { name = "volatile_acidity", type = "float", from = "volatile acidity", required = true },
+  { name = "citric_acid", type = "float", from = "citric acid", required = true },
+  { name = "residual_sugar", type = "float", from = "residual sugar", required = true },
+  { name = "chlorides", type = "float", required = true },
+  { name = "free_sulfur_dioxide", type = "float", from = "free sulfur dioxide", required = true },
+  { name = "total_sulfur_dioxide", type = "float", from = "total sulfur dioxide", required = true },
+  { name = "density", type = "float", required = true },
+  { name = "ph", type = "float", from = "pH", label = "pH", required = true },
+  { name = "sulphates", type = "float", required = true },
+  { name = "alcohol", type = "float", label = "Alcohol (%)", required = true },
+  { name = "quality", type = "int", required = true },
+]
+
+[[dataset]]
+key = "adult_income"
+title = "Adult census income"
+category = "tabular"
+description = "32,561 adults from the 1994 US Census with their age, education, occupation, hours worked and whether they earned more than $50,000 a year."
+homepage = "https://archive.ics.uci.edu/dataset/2/adult"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Becker, B. & Kohavi, R. (1996). Adult [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C5XW20"
+dataset_table = "adult_income"
+
+[[dataset.table]]
+name = "adult_income"
+rows = 32561
+sources = [{ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data", format = "csv", bytes = 3974305, na = ["?"], header = ["age", "workclass", "fnlwgt", "education", "education_num", "marital_status", "occupation", "relationship", "race", "sex", "capital_gain", "capital_loss", "hours_per_week", "native_country", "income"] }]
+fields = [
+  { name = "age", type = "int", required = true },
+  { name = "workclass", type = "text" },
+  { name = "fnlwgt", type = "int", label = "Census weight", required = true },
+  { name = "education", type = "text", required = true },
+  { name = "education_num", type = "int", label = "Years of education", required = true },
+  { name = "marital_status", type = "text", required = true },
+  { name = "occupation", type = "text" },
+  { name = "relationship", type = "text", required = true },
+  { name = "race", type = "text", required = true },
+  { name = "sex", type = "text", required = true },
+  { name = "capital_gain", type = "int", required = true },
+  { name = "capital_loss", type = "int", required = true },
+  { name = "hours_per_week", type = "int", required = true },
+  { name = "native_country", type = "text" },
+  { name = "income", type = "text", required = true },
+]
+
+[[dataset]]
+key = "abalone"
+title = "Abalone"
+category = "tabular"
+description = "Size and weight measurements of 4,177 abalone from Tasmania with their age, counted as rings in the shell."
+homepage = "https://archive.ics.uci.edu/dataset/1/abalone"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Nash, W., Sellers, T., Talbot, S., Cawthorn, A., & Ford, W. (1994). Abalone [Dataset]. UCI Machine Learning Repository. https://doi.org/10.24432/C55C7W"
+dataset_table = "abalone"
+
+[[dataset.table]]
+name = "abalone"
+rows = 4177
+sources = [{ url = "https://archive.ics.uci.edu/ml/machine-learning-databases/abalone/abalone.data", format = "csv", bytes = 191873, header = ["sex", "length", "diameter", "height", "whole_weight", "shucked_weight", "viscera_weight", "shell_weight", "rings"] }]
+fields = [
+  { name = "sex", type = "text", label = "Sex (M, F or I for infant)", required = true },
+  { name = "length", type = "float", label = "Length (mm/200)", required = true },
+  { name = "diameter", type = "float", required = true },
+  { name = "height", type = "float", required = true },
+  { name = "whole_weight", type = "float", required = true },
+  { name = "shucked_weight", type = "float", required = true },
+  { name = "viscera_weight", type = "float", required = true },
+  { name = "shell_weight", type = "float", required = true },
+  { name = "rings", type = "int", required = true },
+]
+
+[[dataset]]
+key = "california_housing"
+title = "California housing"
+category = "tabular"
+description = "Median house value, income, age and size of housing in 20,640 California block groups from the 1990 census, each with its location."
+homepage = "https://github.com/ageron/handson-ml2/tree/master/datasets/housing"
+licence = "Public domain (US Census data)"
+licence_url = "https://www.census.gov/about/policies/open-gov/open-data.html"
+attribution = "Pace, R. K. and Barry, R. (1997). Sparse Spatial Autoregressions. Statistics and Probability Letters 33, 291–297. This version from Aurélien Géron's Hands-On Machine Learning."
+dataset_table = "california_housing"
+
+[[dataset.table]]
+name = "california_housing"
+rows = 20640
+sources = [{ url = "https://raw.githubusercontent.com/ageron/handson-ml2/7b7e23e7267356f8355580877eff98c43cda1bd0/datasets/housing/housing.csv", format = "csv", bytes = 1423529 }]
+fields = [
+  { name = "longitude", type = "float", required = true },
+  { name = "latitude", type = "float", required = true },
+  { name = "housing_median_age", type = "int", required = true },
+  { name = "total_rooms", type = "int", required = true },
+  { name = "total_bedrooms", type = "int" },
+  { name = "population", type = "int", required = true },
+  { name = "households", type = "int", required = true },
+  { name = "median_income", type = "float", label = "Median income (10,000 USD)", required = true },
+  { name = "median_house_value", type = "int", label = "Median house value (USD)", required = true },
+  { name = "ocean_proximity", type = "text", required = true },
+  { name = "location", type = "geometry_point", from = ["longitude", "latitude"] },
+]
+
+# --- Hierarchical ----------------------------------------------------------------
+
+[[dataset]]
+key = "gapminder"
+title = "Gapminder"
+category = "hierarchical"
+description = "Life expectancy, population and GDP per person for 142 countries every five years from 1952 to 2007. Countries are a table of their own, grouped by continent."
+homepage = "https://www.gapminder.org/data/"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Free data from Gapminder.org, via the gapminder R package by Jennifer Bryan."
+dataset_table = "gapminder"
+
+[[dataset.table]]
+name = "gapminder_countries"
+rows = 142
+distinct = true
+sources = [{ url = "https://raw.githubusercontent.com/jennybc/gapminder/391b5a40d3574c3b89d889dd7d72f7f3fdb4a70c/inst/extdata/gapminder.tsv", format = "csv", bytes = 81932, delimiter = "\t" }]
+fields = [
+  { name = "country", type = "text", primary_key = true },
+  { name = "continent", type = "text", required = true },
+]
+
+[[dataset.table]]
+name = "gapminder"
+rows = 1704
+sources = [{ url = "https://raw.githubusercontent.com/jennybc/gapminder/391b5a40d3574c3b89d889dd7d72f7f3fdb4a70c/inst/extdata/gapminder.tsv", format = "csv", bytes = 81932, delimiter = "\t" }]
+fields = [
+  { name = "country", type = "key", references = "gapminder_countries", required = true },
+  { name = "year", type = "int", required = true },
+  { name = "life_exp", type = "float", from = "lifeExp", label = "Life expectancy (years)", required = true },
+  { name = "pop", type = "int", label = "Population", required = true },
+  { name = "gdp_per_cap", type = "float", from = "gdpPercap", label = "GDP per person (USD, 2005 prices)", required = true },
+]
+
+[[dataset]]
+key = "radon"
+title = "Minnesota radon"
+category = "hierarchical"
+description = "Radon measured in 919 Minnesota homes, in 85 counties with each county's soil uranium level. The standard example of a multilevel model: homes within counties."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/HLMdiag/radon.html"
+licence = "GPL-2 (HLMdiag R package)"
+licence_url = "https://cran.r-project.org/package=HLMdiag"
+attribution = "Gelman, A. and Hill, J. (2007). Data Analysis Using Regression and Multilevel/Hierarchical Models. Survey data from the US Environmental Protection Agency, via the HLMdiag R package and Rdatasets."
+dataset_table = "radon_homes"
+
+[[dataset.table]]
+name = "radon_counties"
+rows = 85
+distinct = true
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/HLMdiag/radon.csv", format = "csv", bytes = 48433 }]
+fields = [
+  { name = "county", type = "int", primary_key = true },
+  { name = "name", type = "text", from = "county.name", required = true },
+  { name = "uranium", type = "float", label = "Soil uranium (log)", required = true },
+]
+
+[[dataset.table]]
+name = "radon_homes"
+rows = 919
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/HLMdiag/radon.csv", format = "csv", bytes = 48433 }]
+fields = [
+  { name = "county", type = "key", references = "radon_counties", required = true },
+  { name = "log_radon", type = "float", from = "log.radon", label = "Radon (log pCi/L)", required = true },
+  { name = "basement", type = "bool", label = "Measured in the basement", required = true },
+]
+
+[[dataset]]
+key = "sleepstudy"
+title = "Sleep deprivation"
+category = "hierarchical"
+description = "Reaction times of 18 people over ten days of sleep restricted to three hours a night: repeated measures, one line per subject."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/lme4/sleepstudy.html"
+licence = "GPL (lme4 R package)"
+licence_url = "https://cran.r-project.org/package=lme4"
+attribution = "Belenky, G. et al. (2003). Patterns of performance degradation and restoration during sleep restriction and subsequent recovery. Journal of Sleep Research 12, 1–12. Via the lme4 R package and Rdatasets."
+dataset_table = "sleepstudy"
+
+[[dataset.table]]
+name = "sleepstudy"
+rows = 180
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/lme4/sleepstudy.csv", format = "csv", bytes = 3316 }]
+fields = [
+  { name = "subject", type = "int", from = "Subject", required = true },
+  { name = "days", type = "int", from = "Days", label = "Days of sleep restriction", required = true },
+  { name = "reaction", type = "float", from = "Reaction", label = "Reaction time (ms)", required = true },
+]
+
+[[dataset]]
+key = "flare"
+title = "Flare class hierarchy"
+category = "hierarchical"
+description = "The 252 packages and classes of the Flare visualisation library, each pointing at its parent package, with the size of each class's source. A tree in one table."
+homepage = "https://github.com/vega/vega-datasets"
+licence = "BSD-3-Clause (vega-datasets)"
+licence_url = "https://github.com/vega/vega-datasets/blob/main/LICENSE"
+attribution = "The class hierarchy of the Flare ActionScript library (flare.prefuse.org), via vega-datasets."
+dataset_table = "flare"
+
+[[dataset.table]]
+name = "flare"
+rows = 252
+sources = [{ url = "https://raw.githubusercontent.com/vega/vega-datasets/0574bc0cdc128bfdd82f6edc841e6d4e69341eed/data/flare.json", format = "json", bytes = 20638 }]
+fields = [
+  { name = "id", type = "int", primary_key = true },
+  { name = "name", type = "text", required = true },
+  { name = "parent", type = "key", references = "flare" },
+  { name = "size", type = "int", label = "Source size (bytes)" },
+]
+
+[[dataset]]
+key = "tourism"
+title = "Australian domestic tourism"
+category = "hierarchical"
+description = "Overnight trips in Australia by quarter, 1998–2017, for 76 regions in 8 states and four purposes of travel: the textbook hierarchical time series."
+homepage = "https://otexts.com/fpp3/tsibbles.html"
+licence = "GPL-3 (tsibble R package)"
+licence_url = "https://cran.r-project.org/package=tsibble"
+attribution = "Tourism Research Australia, National Visitor Survey; as published in the tsibble R package and in Hyndman & Athanasopoulos, Forecasting: Principles and Practice (3rd ed.). Via Rdatasets."
+dataset_table = "tourism_trips"
+
+[[dataset.table]]
+name = "tourism_regions"
+rows = 76
+distinct = true
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/timeSeriesDataSets/tourism_tbl_ts.csv", format = "csv", bytes = 1429787 }]
+fields = [
+  { name = "region", type = "text", from = "Region", primary_key = true },
+  { name = "state", type = "text", from = "State", required = true },
+]
+
+[[dataset.table]]
+name = "tourism_trips"
+rows = 24320
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/timeSeriesDataSets/tourism_tbl_ts.csv", format = "csv", bytes = 1429787 }]
+fields = [
+  { name = "quarter", type = "date", from = "Quarter", parse = "year_quarter", label = "Quarter starting", required = true },
+  { name = "region", type = "key", from = "Region", references = "tourism_regions", required = true },
+  { name = "purpose", type = "text", from = "Purpose", required = true },
+  { name = "trips", type = "float", from = "Trips", label = "Overnight trips (thousands)", required = true },
+]
+
+[[dataset]]
+key = "northwind"
+title = "Northwind Traders"
+category = "hierarchical"
+description = "The classic sample database of a small food importer: customers, orders and order lines, products in categories from suppliers, shippers, and employees with the manager each reports to. Eleven related tables."
+homepage = "https://github.com/graphql-compose/graphql-compose-examples/tree/master/examples/northwind"
+licence = "MIT"
+licence_url = "https://github.com/graphql-compose/graphql-compose-examples/blob/master/package.json"
+attribution = "Northwind Traders sample database (Microsoft), CSV export from graphql-compose-examples."
+dataset_table = "northwind_order_details"
+
+[[dataset.table]]
+name = "northwind_categories"
+rows = 8
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/categories.csv", format = "csv", bytes = 2437, na = ["NULL"] }]
+fields = [
+  { name = "category_id", type = "int", from = "categoryID", primary_key = true },
+  { name = "name", type = "text", from = "categoryName", required = true },
+  { name = "description", type = "text" },
+]
+
+[[dataset.table]]
+name = "northwind_suppliers"
+rows = 29
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/suppliers.csv", format = "csv", bytes = 4220, na = ["NULL"] }]
+fields = [
+  { name = "supplier_id", type = "int", from = "supplierID", primary_key = true },
+  { name = "company_name", type = "text", from = "companyName", required = true },
+  { name = "contact_name", type = "text", from = "contactName" },
+  { name = "contact_title", type = "text", from = "contactTitle" },
+  { name = "address", type = "text" },
+  { name = "city", type = "text" },
+  { name = "region", type = "text" },
+  { name = "postal_code", type = "text", from = "postalCode" },
+  { name = "country", type = "text" },
+  { name = "phone", type = "text" },
+  { name = "fax", type = "text" },
+  { name = "home_page", type = "text", from = "homePage" },
+]
+
+[[dataset.table]]
+name = "northwind_shippers"
+rows = 3
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/shippers.csv", format = "csv", bytes = 126, na = ["NULL"] }]
+fields = [
+  { name = "shipper_id", type = "int", from = "shipperID", primary_key = true },
+  { name = "company_name", type = "text", from = "companyName", required = true },
+  { name = "phone", type = "text" },
+]
+
+[[dataset.table]]
+name = "northwind_customers"
+rows = 91
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/customers.csv", format = "csv", bytes = 11816, na = ["NULL"] }]
+fields = [
+  { name = "customer_id", type = "text", from = "customerID", primary_key = true },
+  { name = "company_name", type = "text", from = "companyName", required = true },
+  { name = "contact_name", type = "text", from = "contactName" },
+  { name = "contact_title", type = "text", from = "contactTitle" },
+  { name = "address", type = "text" },
+  { name = "city", type = "text" },
+  { name = "region", type = "text" },
+  { name = "postal_code", type = "text", from = "postalCode" },
+  { name = "country", type = "text" },
+  { name = "phone", type = "text" },
+  { name = "fax", type = "text" },
+]
+
+[[dataset.table]]
+name = "northwind_regions"
+rows = 4
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/regions.csv", format = "csv", bytes = 69, na = ["NULL"] }]
+fields = [
+  { name = "region_id", type = "int", from = "regionID", primary_key = true },
+  { name = "name", type = "text", from = "regionDescription", required = true },
+]
+
+[[dataset.table]]
+name = "northwind_territories"
+rows = 53
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/territories.csv", format = "csv", bytes = 965, na = ["NULL"] }]
+fields = [
+  { name = "territory_id", type = "text", from = "territoryID", primary_key = true },
+  { name = "name", type = "text", from = "territoryDescription", required = true },
+  { name = "region_id", type = "key", from = "regionID", references = "northwind_regions", required = true },
+]
+
+[[dataset.table]]
+name = "northwind_employees"
+rows = 9
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/employees.csv", format = "csv", bytes = 5963, na = ["NULL"] }]
+fields = [
+  { name = "employee_id", type = "int", from = "employeeID", primary_key = true },
+  { name = "last_name", type = "text", from = "lastName", required = true },
+  { name = "first_name", type = "text", from = "firstName", required = true },
+  { name = "title", type = "text" },
+  { name = "title_of_courtesy", type = "text", from = "titleOfCourtesy" },
+  { name = "birth_date", type = "date", from = "birthDate" },
+  { name = "hire_date", type = "date", from = "hireDate" },
+  { name = "address", type = "text" },
+  { name = "city", type = "text" },
+  { name = "region", type = "text" },
+  { name = "postal_code", type = "text", from = "postalCode" },
+  { name = "country", type = "text" },
+  { name = "home_phone", type = "text", from = "homePhone" },
+  { name = "extension", type = "text" },
+  { name = "notes", type = "text" },
+  { name = "reports_to", type = "key", from = "reportsTo", references = "northwind_employees" },
+]
+
+[[dataset.table]]
+name = "northwind_employee_territories"
+rows = 49
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/employee_territories.csv", format = "csv", bytes = 415, na = ["NULL"] }]
+fields = [
+  { name = "employee_id", type = "key", from = "employeeID", references = "northwind_employees", required = true },
+  { name = "territory_id", type = "key", from = "territoryID", references = "northwind_territories", required = true },
+]
+
+[[dataset.table]]
+name = "northwind_products"
+rows = 77
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/products.csv", format = "csv", bytes = 4475, na = ["NULL"] }]
+fields = [
+  { name = "product_id", type = "int", from = "productID", primary_key = true },
+  { name = "name", type = "text", from = "productName", required = true },
+  { name = "supplier_id", type = "key", from = "supplierID", references = "northwind_suppliers" },
+  { name = "category_id", type = "key", from = "categoryID", references = "northwind_categories" },
+  { name = "quantity_per_unit", type = "text", from = "quantityPerUnit" },
+  { name = "unit_price", type = "float", from = "unitPrice" },
+  { name = "units_in_stock", type = "int", from = "unitsInStock" },
+  { name = "units_on_order", type = "int", from = "unitsOnOrder" },
+  { name = "reorder_level", type = "int", from = "reorderLevel" },
+  { name = "discontinued", type = "bool", required = true },
+]
+
+[[dataset.table]]
+name = "northwind_orders"
+rows = 830
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/orders.csv", format = "csv", bytes = 132357, na = ["NULL"] }]
+fields = [
+  { name = "order_id", type = "int", from = "orderID", primary_key = true },
+  { name = "customer_id", type = "key", from = "customerID", references = "northwind_customers" },
+  { name = "employee_id", type = "key", from = "employeeID", references = "northwind_employees" },
+  { name = "order_date", type = "date", from = "orderDate" },
+  { name = "required_date", type = "date", from = "requiredDate" },
+  { name = "shipped_date", type = "date", from = "shippedDate" },
+  { name = "ship_via", type = "key", from = "shipVia", references = "northwind_shippers" },
+  { name = "freight", type = "float" },
+  { name = "ship_name", type = "text", from = "shipName" },
+  { name = "ship_address", type = "text", from = "shipAddress" },
+  { name = "ship_city", type = "text", from = "shipCity" },
+  { name = "ship_region", type = "text", from = "shipRegion" },
+  { name = "ship_postal_code", type = "text", from = "shipPostalCode" },
+  { name = "ship_country", type = "text", from = "shipCountry" },
+]
+
+[[dataset.table]]
+name = "northwind_order_details"
+rows = 2155
+sources = [{ url = "https://raw.githubusercontent.com/graphql-compose/graphql-compose-examples/8677f359f35a70d4a52c42b07cc30931ba78208f/examples/northwind/data/csv/order_details.csv", format = "csv", bytes = 44378, na = ["NULL"] }]
+fields = [
+  { name = "order_id", type = "key", from = "orderID", references = "northwind_orders", required = true },
+  { name = "product_id", type = "key", from = "productID", references = "northwind_products", required = true },
+  { name = "unit_price", type = "float", from = "unitPrice", required = true },
+  { name = "quantity", type = "int", required = true },
+  { name = "discount", type = "float", required = true },
+]
+
+# --- Time series -----------------------------------------------------------------
+
+[[dataset]]
+key = "co2_mauna_loa"
+title = "Mauna Loa CO₂"
+category = "time_series"
+description = "Monthly mean carbon dioxide in the air at Mauna Loa Observatory, Hawaii, since March 1958: the Keeling curve. Trend and seasonality in one series; updated monthly at the source."
+homepage = "https://gml.noaa.gov/ccgg/trends/"
+licence = "Public domain (US Government work)"
+licence_url = "https://gml.noaa.gov/about/disclaimer.html"
+attribution = "Dr. Xin Lan, NOAA/GML (gml.noaa.gov/ccgg/trends/) and Dr. Ralph Keeling, Scripps Institution of Oceanography (scrippsco2.ucsd.edu/)."
+dataset_table = "co2_mauna_loa"
+
+[[dataset.table]]
+name = "co2_mauna_loa"
+rows = 823
+sources = [{ url = "https://gml.noaa.gov/webdata/ccgg/trends/co2/co2_mm_mlo.csv", format = "csv", bytes = 38732, comment = "#" }]
+fields = [
+  { name = "month", type = "date", from = ["year", "month"], label = "Month", required = true },
+  { name = "decimal_date", type = "float", from = "decimal date", required = true },
+  { name = "average", type = "float", label = "CO₂ (ppm)", required = true },
+  { name = "deseasonalized", type = "float", label = "CO₂ without the seasonal cycle (ppm)" },
+  { name = "days", type = "int", from = "ndays", label = "Days with data", na = ["-1"] },
+  { name = "sdev", type = "float", label = "Standard deviation of the days", na = ["-9.99"] },
+  { name = "unc", type = "float", label = "Uncertainty of the mean", na = ["-0.99"] },
+]
+
+[[dataset]]
+key = "air_passengers"
+title = "Airline passengers"
+category = "time_series"
+description = "Monthly international airline passengers, January 1949 to December 1960, in thousands: a growing trend with a seasonal swing that grows with it."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/datasets/AirPassengers.html"
+licence = "GPL (R datasets package)"
+licence_url = "https://www.r-project.org/Licenses/"
+attribution = "Box, G. E. P., Jenkins, G. M. and Reinsel, G. C. (1976). Time Series Analysis, Forecasting and Control. Distributed with R, via Rdatasets."
+dataset_table = "air_passengers"
+
+[[dataset.table]]
+name = "air_passengers"
+rows = 144
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/datasets/AirPassengers.csv", format = "csv", bytes = 3032 }]
+fields = [
+  { name = "month", type = "date", from = "time", parse = "decimal_year_month", required = true },
+  { name = "passengers", type = "int", from = "value", label = "Passengers (thousands)", required = true },
+]
+
+[[dataset]]
+key = "nile"
+title = "Nile river flow"
+category = "time_series"
+description = "Yearly flow of the Nile at Aswan, 1871–1970, with a well-known drop around 1898 when the first Aswan dam was built: a changepoint example."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/datasets/Nile.html"
+licence = "GPL (R datasets package)"
+licence_url = "https://www.r-project.org/Licenses/"
+attribution = "Durbin, J. and Koopman, S. J. (2001). Time Series Analysis by State Space Methods. Oxford University Press. Distributed with R, via Rdatasets."
+dataset_table = "nile"
+
+[[dataset.table]]
+name = "nile"
+rows = 100
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/datasets/Nile.csv", format = "csv", bytes = 1242 }]
+fields = [
+  { name = "year", type = "int", from = "time", required = true },
+  { name = "flow", type = "float", from = "value", label = "Flow (10⁸ m³)", required = true },
+]
+
+[[dataset]]
+key = "seattle_weather"
+title = "Seattle weather"
+category = "time_series"
+description = "Daily rain, temperatures, wind and the kind of weather in Seattle, 2012–2015."
+homepage = "https://github.com/vega/vega-datasets"
+licence = "Public domain (US Government work)"
+licence_url = "https://www.usa.gov/government-works"
+attribution = "NOAA National Centers for Environmental Information, via vega-datasets."
+dataset_table = "seattle_weather"
+
+[[dataset.table]]
+name = "seattle_weather"
+rows = 1461
+sources = [{ url = "https://raw.githubusercontent.com/vega/vega-datasets/0574bc0cdc128bfdd82f6edc841e6d4e69341eed/data/seattle-weather.csv", format = "csv", bytes = 48219 }]
+fields = [
+  { name = "date", type = "date", required = true },
+  { name = "precipitation", type = "float", label = "Precipitation (mm)", required = true },
+  { name = "temp_max", type = "float", label = "Highest temperature (°C)", required = true },
+  { name = "temp_min", type = "float", label = "Lowest temperature (°C)", required = true },
+  { name = "wind", type = "float", label = "Wind (m/s)", required = true },
+  { name = "weather", type = "text", required = true },
+]
+
+[[dataset]]
+key = "global_temperature"
+title = "Global temperature anomalies"
+category = "time_series"
+description = "Monthly global surface temperature compared with the 20th-century average, from two records (NASA's GISTEMP and NOAA's GCAG) side by side, since 1850."
+homepage = "https://github.com/datasets/global-temp"
+licence = "Public domain (NASA and NOAA)"
+licence_url = "https://opendatacommons.org/licenses/pddl/"
+attribution = "GISTEMP Team, NASA Goddard Institute for Space Studies; NOAA National Centers for Environmental Information. Packaged by datasets/global-temp."
+dataset_table = "global_temperature"
+
+[[dataset.table]]
+name = "global_temperature"
+rows = 3871
+sources = [{ url = "https://raw.githubusercontent.com/datasets/global-temp/44571fe8c15e228c156bb19308e5ccc1e31cf9f7/data/monthly.csv", format = "csv", bytes = 81109 }]
+fields = [
+  { name = "source", type = "text", from = "Source", required = true },
+  { name = "month", type = "date", from = "Year", parse = "year_month", required = true },
+  { name = "anomaly", type = "float", from = "Mean", label = "Anomaly (°C)", required = true },
+]
+
+[[dataset]]
+key = "sp500"
+title = "S&P 500 since 1871"
+category = "time_series"
+description = "Monthly S&P composite stock index since 1871 with dividends, earnings, inflation, long-term interest rates and the cyclically adjusted P/E ratio (CAPE)."
+homepage = "https://github.com/datasets/s-and-p-500"
+licence = "ODC-PDDL 1.0"
+licence_url = "https://opendatacommons.org/licenses/pddl/"
+attribution = "Robert J. Shiller, Online Data (www.econ.yale.edu/~shiller/data.htm); packaged by datasets/s-and-p-500."
+dataset_table = "sp500"
+
+[[dataset.table]]
+name = "sp500"
+rows = 1869
+sources = [{ url = "https://raw.githubusercontent.com/datasets/s-and-p-500/07b81e6af68239acd65b901a11844d6d95db6ead/data/data.csv", format = "csv", bytes = 123851 }]
+fields = [
+  { name = "date", type = "date", from = "Date", required = true },
+  { name = "sp500", type = "float", from = "SP500", label = "S&P composite", required = true },
+  { name = "dividend", type = "float", from = "Dividend", na = ["0.0"] },
+  { name = "earnings", type = "float", from = "Earnings", na = ["0.0"] },
+  { name = "cpi", type = "float", from = "Consumer Price Index", label = "Consumer price index", na = ["0.0"] },
+  { name = "long_interest_rate", type = "float", from = "Long Interest Rate", na = ["0.0"] },
+  { name = "real_price", type = "float", from = "Real Price", na = ["0.0"] },
+  { name = "real_dividend", type = "float", from = "Real Dividend", na = ["0.0"] },
+  { name = "real_earnings", type = "float", from = "Real Earnings", na = ["0.0"] },
+  { name = "pe10", type = "float", from = "PE10", label = "CAPE (P/E10)", na = ["0.0"] },
+]
+
+[[dataset]]
+key = "us_unemployment"
+title = "US unemployment by industry"
+category = "time_series"
+description = "Monthly unemployed people and unemployment rate in 14 US industries, 2000–2010, through the 2008 recession. Many series in long format."
+homepage = "https://github.com/vega/vega-datasets"
+licence = "Public domain (US Government work)"
+licence_url = "https://www.usa.gov/government-works"
+attribution = "US Bureau of Labor Statistics, Current Population Survey; via vega-datasets."
+dataset_table = "us_unemployment"
+
+[[dataset.table]]
+name = "us_unemployment"
+rows = 1708
+sources = [{ url = "https://raw.githubusercontent.com/vega/vega-datasets/0574bc0cdc128bfdd82f6edc841e6d4e69341eed/data/unemployment-across-industries.json", format = "json", bytes = 185641 }]
+fields = [
+  { name = "industry", type = "text", from = "series", required = true },
+  { name = "month", type = "date", from = ["year", "month"], required = true },
+  { name = "unemployed", type = "int", from = "count", label = "Unemployed (thousands)", required = true },
+  { name = "rate", type = "float", label = "Unemployment rate (%)", required = true },
+]
+
+[[dataset]]
+key = "owid_co2"
+title = "CO₂ and greenhouse gas emissions"
+category = "time_series"
+description = "Yearly emissions of CO₂ by fuel, methane and nitrous oxide, with population, GDP and energy use, for every country and region from as far back as 1750. A selection of Our World in Data's columns."
+homepage = "https://github.com/owid/co2-data"
+licence = "CC BY 4.0"
+licence_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "Our World in Data, CO₂ and Greenhouse Gas Emissions (github.com/owid/co2-data), based on the Global Carbon Project and other sources listed there."
+dataset_table = "owid_co2"
+
+[[dataset.table]]
+name = "owid_co2"
+rows = 50411
+sources = [{ url = "https://raw.githubusercontent.com/owid/co2-data/382ee6c662b0ece26e111f263b44c029afad7787/owid-co2-data.csv", format = "csv", bytes = 14377942 }]
+fields = [
+  { name = "country", type = "text", label = "Country or region", required = true },
+  { name = "year", type = "int", required = true },
+  { name = "iso_code", type = "text", label = "ISO code (none for a region)" },
+  { name = "population", type = "int" },
+  { name = "gdp", type = "float", label = "GDP (international $, 2011 prices)" },
+  { name = "co2", type = "float", label = "CO₂ (million tonnes)" },
+  { name = "co2_per_capita", type = "float", label = "CO₂ per person (tonnes)" },
+  { name = "co2_per_gdp", type = "float", label = "CO₂ per $ of GDP (kg)" },
+  { name = "coal_co2", type = "float", label = "CO₂ from coal (million tonnes)" },
+  { name = "oil_co2", type = "float", label = "CO₂ from oil (million tonnes)" },
+  { name = "gas_co2", type = "float", label = "CO₂ from gas (million tonnes)" },
+  { name = "cement_co2", type = "float", label = "CO₂ from cement (million tonnes)" },
+  { name = "flaring_co2", type = "float", label = "CO₂ from flaring (million tonnes)" },
+  { name = "other_industry_co2", type = "float", label = "CO₂ from other industry (million tonnes)" },
+  { name = "land_use_change_co2", type = "float", label = "CO₂ from land-use change (million tonnes)" },
+  { name = "cumulative_co2", type = "float", label = "Cumulative CO₂ (million tonnes)" },
+  { name = "share_global_co2", type = "float", label = "Share of global CO₂ (%)" },
+  { name = "consumption_co2", type = "float", label = "Consumption-based CO₂ (million tonnes)" },
+  { name = "trade_co2", type = "float", label = "CO₂ embedded in trade (million tonnes)" },
+  { name = "methane", type = "float", label = "Methane (million tonnes CO₂e)" },
+  { name = "nitrous_oxide", type = "float", label = "Nitrous oxide (million tonnes CO₂e)" },
+  { name = "total_ghg", type = "float", label = "All greenhouse gases (million tonnes CO₂e)" },
+  { name = "ghg_per_capita", type = "float", label = "Greenhouse gases per person (tonnes CO₂e)" },
+  { name = "primary_energy_consumption", type = "float", label = "Primary energy (TWh)" },
+  { name = "energy_per_capita", type = "float", label = "Energy per person (kWh)" },
+  { name = "temperature_change_from_ghg", type = "float", label = "Warming caused (°C)" },
+]
+
+[[dataset]]
+key = "nycflights13"
+title = "New York City flights, 2013"
+category = "time_series"
+description = "Every one of the 336,776 flights that left New York's three airports in 2013, with delays, and tables of the airlines, the airports, the planes and the hourly weather at each origin."
+homepage = "https://github.com/tidyverse/nycflights13"
+licence = "CC0 1.0"
+licence_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+attribution = "nycflights13 R package (Hadley Wickham), from the US Bureau of Transportation Statistics, the FAA and the Iowa Environmental Mesonet; via Rdatasets."
+dataset_table = "nycflights_flights"
+
+[[dataset.table]]
+name = "nycflights_airlines"
+rows = 16
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/nycflights13/airlines.csv", format = "csv", bytes = 434 }]
+fields = [
+  { name = "carrier", type = "text", primary_key = true },
+  { name = "name", type = "text", required = true },
+]
+
+[[dataset.table]]
+name = "nycflights_airports"
+rows = 1458
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/nycflights13/airports.csv", format = "csv", bytes = 110488 }]
+fields = [
+  { name = "faa", type = "text", label = "FAA code", primary_key = true },
+  { name = "name", type = "text", required = true },
+  { name = "lat", type = "float", label = "Latitude", required = true },
+  { name = "lon", type = "float", label = "Longitude", required = true },
+  { name = "alt", type = "int", label = "Altitude (ft)", required = true },
+  { name = "tz", type = "int", label = "Hours from GMT" },
+  { name = "dst", type = "text", label = "Daylight saving time" },
+  { name = "tzone", type = "text", label = "Time zone" },
+  { name = "location", type = "geometry_point", from = ["lon", "lat"] },
+]
+
+[[dataset.table]]
+name = "nycflights_planes"
+rows = 3322
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/nycflights13/planes.csv", format = "csv", bytes = 255972 }]
+fields = [
+  { name = "tailnum", type = "text", label = "Tail number", primary_key = true },
+  { name = "year", type = "int", label = "Year built" },
+  { name = "type", type = "text", required = true },
+  { name = "manufacturer", type = "text", required = true },
+  { name = "model", type = "text", required = true },
+  { name = "engines", type = "int", required = true },
+  { name = "seats", type = "int", required = true },
+  { name = "speed", type = "int", label = "Cruising speed (mph)" },
+  { name = "engine", type = "text", label = "Engine type", required = true },
+]
+
+[[dataset.table]]
+name = "nycflights_weather"
+rows = 26115
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/nycflights13/weather.csv", format = "csv", bytes = 2391865 }]
+fields = [
+  { name = "origin", type = "key", references = "nycflights_airports", required = true },
+  { name = "time_hour", type = "timestamp", label = "Hour", required = true },
+  { name = "temp", type = "float", label = "Temperature (°F)" },
+  { name = "dewp", type = "float", label = "Dew point (°F)" },
+  { name = "humid", type = "float", label = "Relative humidity (%)" },
+  { name = "wind_dir", type = "int", label = "Wind direction (degrees)" },
+  { name = "wind_speed", type = "float", label = "Wind speed (mph)" },
+  { name = "wind_gust", type = "float", label = "Gust speed (mph)" },
+  { name = "precip", type = "float", label = "Precipitation (inches)" },
+  { name = "pressure", type = "float", label = "Sea-level pressure (mbar)" },
+  { name = "visib", type = "float", label = "Visibility (miles)" },
+]
+
+[[dataset.table]]
+name = "nycflights_flights"
+rows = 336776
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/nycflights13/flights.csv", format = "csv", bytes = 33206996 }]
+fields = [
+  { name = "date", type = "date", from = ["year", "month", "day"], required = true },
+  { name = "dep_time", type = "int", label = "Departed (HHMM)" },
+  { name = "sched_dep_time", type = "int", label = "Scheduled departure (HHMM)", required = true },
+  { name = "dep_delay", type = "int", label = "Departure delay (min)" },
+  { name = "arr_time", type = "int", label = "Arrived (HHMM)" },
+  { name = "sched_arr_time", type = "int", label = "Scheduled arrival (HHMM)", required = true },
+  { name = "arr_delay", type = "int", label = "Arrival delay (min)" },
+  { name = "carrier", type = "key", references = "nycflights_airlines", required = true },
+  { name = "flight", type = "int", label = "Flight number", required = true },
+  { name = "tailnum", type = "text", label = "Tail number" },
+  { name = "plane", type = "key", from = "tailnum", references = "nycflights_planes", if_missing = "null" },
+  { name = "origin", type = "key", references = "nycflights_airports", required = true },
+  { name = "dest", type = "text", label = "Destination code", required = true },
+  { name = "destination", type = "key", from = "dest", references = "nycflights_airports", if_missing = "null" },
+  { name = "air_time", type = "int", label = "Air time (min)" },
+  { name = "distance", type = "int", label = "Distance (miles)", required = true },
+  { name = "time_hour", type = "timestamp", label = "Scheduled hour", required = true },
+]
+
+# --- Spatial ---------------------------------------------------------------------
+
+[[dataset]]
+key = "world_countries"
+title = "World countries"
+category = "spatial"
+description = "Outlines of 177 countries at a small scale, with population, GDP, income group, continent and UN region."
+homepage = "https://www.naturalearthdata.com/downloads/110m-cultural-vectors/"
+licence = "Public domain"
+licence_url = "https://www.naturalearthdata.com/about/terms-of-use/"
+attribution = "Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com."
+dataset_table = "world_countries"
+
+[[dataset.table]]
+name = "world_countries"
+rows = 177
+sources = [{ url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_110m_admin_0_countries.geojson", format = "geojson", bytes = 838726, na = ["-99"] }]
+fields = [
+  { name = "name", type = "text", from = "NAME", required = true },
+  { name = "name_long", type = "text", from = "NAME_LONG" },
+  { name = "formal_name", type = "text", from = "FORMAL_EN" },
+  { name = "iso_a2", type = "text", from = "ISO_A2_EH", label = "ISO code (2 letters)" },
+  { name = "iso_a3", type = "text", from = "ISO_A3_EH", label = "ISO code (3 letters)" },
+  { name = "type", type = "text", from = "TYPE" },
+  { name = "sovereignty", type = "text", from = "SOVEREIGNT" },
+  { name = "continent", type = "text", from = "CONTINENT", required = true },
+  { name = "region_un", type = "text", from = "REGION_UN", label = "UN region" },
+  { name = "subregion", type = "text", from = "SUBREGION", label = "UN subregion" },
+  { name = "region_wb", type = "text", from = "REGION_WB", label = "World Bank region" },
+  { name = "pop_est", type = "float", from = "POP_EST", label = "Population (estimate)" },
+  { name = "pop_year", type = "int", from = "POP_YEAR", label = "Population year" },
+  { name = "gdp_md", type = "int", from = "GDP_MD", label = "GDP (million USD)" },
+  { name = "gdp_year", type = "int", from = "GDP_YEAR", label = "GDP year" },
+  { name = "economy", type = "text", from = "ECONOMY" },
+  { name = "income_group", type = "text", from = "INCOME_GRP" },
+  { name = "geom", type = "geometry_multipolygon", from = "$geometry", label = "Outline", required = true },
+]
+
+[[dataset]]
+key = "us_states"
+title = "US states"
+category = "spatial"
+description = "Outlines of the 50 US states and the District of Columbia, with their postal codes and census regions."
+homepage = "https://www.naturalearthdata.com/downloads/110m-cultural-vectors/"
+licence = "Public domain"
+licence_url = "https://www.naturalearthdata.com/about/terms-of-use/"
+attribution = "Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com."
+dataset_table = "us_states"
+
+[[dataset.table]]
+name = "us_states"
+rows = 51
+sources = [{ url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_110m_admin_1_states_provinces.geojson", format = "geojson", bytes = 183638 }]
+fields = [
+  { name = "name", type = "text", required = true },
+  { name = "postal", type = "text", label = "Postal code", required = true },
+  { name = "iso_3166_2", type = "text", label = "ISO 3166-2 code" },
+  { name = "region", type = "text", label = "Census region" },
+  { name = "subregion", type = "text", from = "region_sub", label = "Census division" },
+  { name = "fips", type = "text", label = "FIPS code" },
+  { name = "latitude", type = "float", label = "Label latitude" },
+  { name = "longitude", type = "float", label = "Label longitude" },
+  { name = "geom", type = "geometry_multipolygon", from = "$geometry", label = "Outline", required = true },
+]
+
+[[dataset]]
+key = "populated_places"
+title = "World cities"
+category = "spatial"
+description = "243 capitals and major cities of the world as points, with their country, region and population."
+homepage = "https://www.naturalearthdata.com/downloads/110m-cultural-vectors/"
+licence = "Public domain"
+licence_url = "https://www.naturalearthdata.com/about/terms-of-use/"
+attribution = "Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com."
+dataset_table = "world_cities"
+
+[[dataset.table]]
+name = "world_cities"
+rows = 243
+sources = [{ url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_110m_populated_places_simple.geojson", format = "geojson", bytes = 166071 }]
+fields = [
+  { name = "name", type = "text", required = true },
+  { name = "country", type = "text", from = "adm0name" },
+  { name = "country_a3", type = "text", from = "adm0_a3", label = "Country code" },
+  { name = "region", type = "text", from = "adm1name", label = "Region or state" },
+  { name = "feature_class", type = "text", from = "featurecla" },
+  { name = "capital", type = "bool", from = "adm0cap", label = "National capital" },
+  { name = "world_city", type = "bool", from = "worldcity" },
+  { name = "megacity", type = "bool" },
+  { name = "pop_max", type = "int", label = "Population (largest estimate)" },
+  { name = "pop_min", type = "int", label = "Population (smallest estimate)" },
+  { name = "location", type = "geometry_point", from = "$geometry", required = true },
+]
+
+[[dataset]]
+key = "rivers"
+title = "Rivers and lakes"
+category = "spatial"
+description = "The world's main rivers and lake centrelines as lines, with names and a rank for the scale to show each at."
+homepage = "https://www.naturalearthdata.com/downloads/50m-physical-vectors/"
+licence = "Public domain"
+licence_url = "https://www.naturalearthdata.com/about/terms-of-use/"
+attribution = "Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com."
+dataset_table = "rivers"
+
+[[dataset.table]]
+name = "rivers"
+rows = 462
+sources = [{ url = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/ca96624a56bd078437bca8184e78163e5039ad19/geojson/ne_50m_rivers_lake_centerlines.geojson", format = "geojson", bytes = 827318 }]
+fields = [
+  { name = "name", type = "text" },
+  { name = "name_en", type = "text", label = "Name in English" },
+  { name = "feature_class", type = "text", from = "featurecla" },
+  { name = "scalerank", type = "int", label = "Scale rank" },
+  { name = "geom", type = "geometry_multilinestring", from = "$geometry", label = "Course", required = true },
+]
+
+[[dataset]]
+key = "earthquakes"
+title = "Earthquakes, past 30 days"
+category = "spatial"
+description = "Every earthquake (and quarry blast) the USGS recorded worldwide in the last 30 days, with magnitude, depth and time. Live: each download is a different month."
+homepage = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php"
+licence = "Public domain (US Government work)"
+licence_url = "https://www.usgs.gov/information-policies-and-instructions/copyrights-and-credits"
+attribution = "US Geological Survey, Earthquake Hazards Program (earthquake.usgs.gov)."
+dataset_table = "earthquakes"
+
+[[dataset.table]]
+name = "earthquakes"
+rows = 10000
+sources = [{ url = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_month.geojson", format = "geojson", bytes = 7500000 }]
+fields = [
+  { name = "event_id", type = "text", from = "$id", label = "USGS event id", primary_key = true },
+  { name = "time", type = "timestamp", parse = "epoch_ms", required = true },
+  { name = "magnitude", type = "float", from = "mag" },
+  { name = "mag_type", type = "text", from = "magType", label = "Magnitude type" },
+  { name = "depth_km", type = "float", from = "$z", label = "Depth (km)" },
+  { name = "place", type = "text" },
+  { name = "type", type = "text", label = "Event type" },
+  { name = "status", type = "text", label = "Review status" },
+  { name = "tsunami", type = "bool", label = "Tsunami flag" },
+  { name = "significance", type = "int", from = "sig" },
+  { name = "felt", type = "int", label = "Felt reports" },
+  { name = "alert", type = "text", label = "PAGER alert" },
+  { name = "network", type = "text", from = "net" },
+  { name = "url", type = "text", label = "Event page" },
+  { name = "updated", type = "timestamp", parse = "epoch_ms" },
+  { name = "location", type = "geometry_point", from = "$geometry", required = true },
+]
+
+[[dataset]]
+key = "fiji_quakes"
+title = "Earthquakes off Fiji"
+category = "spatial"
+description = "1,000 earthquakes of magnitude 4 and over near Fiji since 1964, with depth and the number of stations that reported each. Shows the subducting plate in three dimensions."
+homepage = "https://vincentarelbundock.github.io/Rdatasets/doc/datasets/quakes.html"
+licence = "GPL (R datasets package)"
+licence_url = "https://www.r-project.org/Licenses/"
+attribution = "Harvard PRIM-H project, from Dr. John Woodhouse, Department of Geophysics, Harvard University. Distributed with R, via Rdatasets."
+dataset_table = "fiji_quakes"
+
+[[dataset.table]]
+name = "fiji_quakes"
+rows = 1000
+sources = [{ url = "https://raw.githubusercontent.com/vincentarelbundock/Rdatasets/1dcc2bf5f955cc1224a3e1307256e1fe86b68dae/csv/datasets/quakes.csv", format = "csv", bytes = 27956 }]
+fields = [
+  { name = "latitude", type = "float", from = "lat", required = true },
+  { name = "longitude", type = "float", from = "long", required = true },
+  { name = "depth", type = "int", label = "Depth (km)", required = true },
+  { name = "magnitude", type = "float", from = "mag", required = true },
+  { name = "stations", type = "int", label = "Stations reporting", required = true },
+  { name = "location", type = "geometry_point", from = ["long", "lat"], required = true },
+]
+
+[[dataset]]
+key = "airports"
+title = "World airports"
+category = "spatial"
+description = "Over 85,000 airports, airfields, heliports and seaplane bases worldwide, with type, elevation and continent, country and region codes. Updated nightly at the source."
+homepage = "https://ourairports.com/data/"
+licence = "Public domain (The Unlicense)"
+licence_url = "https://github.com/davidmegginson/ourairports-data/blob/main/LICENSE"
+attribution = "OurAirports (ourairports.com), David Megginson and contributors."
+dataset_table = "airports"
+
+[[dataset.table]]
+name = "airports"
+rows = 86000
+sources = [{ url = "https://davidmegginson.github.io/ourairports-data/airports.csv", format = "csv", bytes = 12750000 }]
+fields = [
+  { name = "id", type = "int", primary_key = true },
+  { name = "ident", type = "text", required = true },
+  { name = "type", type = "text", required = true },
+  { name = "name", type = "text", required = true },
+  { name = "latitude", type = "float", from = "latitude_deg", required = true },
+  { name = "longitude", type = "float", from = "longitude_deg", required = true },
+  { name = "elevation_ft", type = "int", label = "Elevation (ft)" },
+  { name = "continent", type = "text", label = "Continent (NA is North America)" },
+  { name = "iso_country", type = "text", label = "Country code" },
+  { name = "iso_region", type = "text", label = "Region code" },
+  { name = "municipality", type = "text" },
+  { name = "scheduled_service", type = "bool" },
+  { name = "icao_code", type = "text", label = "ICAO code" },
+  { name = "iata_code", type = "text", label = "IATA code" },
+  { name = "gps_code", type = "text", label = "GPS code" },
+  { name = "local_code", type = "text" },
+  { name = "home_link", type = "text", label = "Website" },
+  { name = "wikipedia_link", type = "text", label = "Wikipedia" },
+  { name = "keywords", type = "text" },
+  { name = "location", type = "geometry_point", from = ["longitude_deg", "latitude_deg"], required = true },
+]
+
+[[dataset]]
+key = "eu_nuts_regions"
+title = "EU NUTS regions (2021)"
+category = "spatial"
+description = "The EU's statistical regions at all four levels, from countries (NUTS 0) to small regions (NUTS 3), each pointing at the region it is part of: 2,010 outlines in one hierarchy."
+homepage = "https://ec.europa.eu/eurostat/web/gisco/geodata/statistical-units/territorial-units-statistics"
+licence = "Eurostat GISCO terms; © EuroGeographics for the administrative boundaries"
+licence_url = "https://ec.europa.eu/eurostat/web/gisco/geodata/statistical-units/territorial-units-statistics"
+attribution = "© EuroGeographics for the administrative boundaries. Source: Eurostat GISCO, NUTS 2021, 1:60 million."
+dataset_table = "eu_nuts_regions"
+
+[[dataset.table]]
+name = "eu_nuts_regions"
+rows = 2010
+sources = [{ url = "https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson/NUTS_RG_60M_2021_4326.geojson", format = "geojson", bytes = 2057365 }]
+fields = [
+  { name = "nuts_id", type = "text", from = "NUTS_ID", label = "NUTS code", primary_key = true },
+  { name = "level", type = "int", from = "LEVL_CODE", label = "NUTS level", required = true },
+  { name = "country_code", type = "text", from = "CNTR_CODE", required = true },
+  { name = "name", type = "text", from = "NAME_LATN", label = "Name (Latin script)", required = true },
+  { name = "native_name", type = "text", from = "NUTS_NAME", label = "Name" },
+  { name = "mountain_type", type = "int", from = "MOUNT_TYPE" },
+  { name = "urban_type", type = "int", from = "URBN_TYPE" },
+  { name = "coastal_type", type = "int", from = "COAST_TYPE" },
+  { name = "parent", type = "key", from = "NUTS_ID", parse = "parent_code", references = "eu_nuts_regions" },
+  { name = "geom", type = "geometry_multipolygon", from = "$geometry", label = "Outline", required = true },
+]

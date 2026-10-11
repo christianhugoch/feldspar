@@ -18,6 +18,11 @@
 //! configuration value. Saying so is better than implying a protection a
 //! database dump would disprove. What *is* guaranteed is that it does not leave
 //! through the API — see [`sc_types::redact_attrs`] and the admin handlers.
+//!
+//! **The host's provider is merged in.** The provider `feldspar.toml` supplies
+//! (`crate::host`) has no row, but every reader here answers with it as if it
+//! had one — listed, found by id and by name, with its models — and every
+//! writer refuses it. Callers never need to know which kind they hold.
 
 use sc_catalog::{
     Catalog, ConstraintKind, DataField, DataFieldKind, FieldId, SchemaStep, SharedTx, Table,
@@ -30,6 +35,7 @@ use sc_types::{Attrs, BasicType, TypeRef};
 use serde_json::Value as Json;
 
 use crate::def::{LlmProviderDef, LlmProviderDefId, validate_provider_config};
+use crate::host::{host_llm_provider, is_host_llm_provider, read_only};
 use crate::model::{LlmModelDef, LlmModelDefId, normalise_model_config, validate_model_config};
 
 /// Name of the providers table in the primary database.
@@ -129,9 +135,18 @@ pub async fn save_llm_provider(catalog: &Catalog, def: &LlmProviderDef) -> Resul
 /// settings matching that backend's spec, and no other provider holding the
 /// name.
 pub async fn check_provider_saveable(catalog: &Catalog, def: &LlmProviderDef) -> Result<()> {
+    if is_host_llm_provider(catalog, def.id) {
+        return Err(read_only(&format!("LLM provider `{}`", def.name.trim())));
+    }
     let name = def.name.trim();
     if name.is_empty() {
         return Err(Error::invalid("an LLM provider needs a name"));
+    }
+    if host_llm_provider(catalog).is_some_and(|host| host.def().name == name) {
+        return Err(Error::invalid(format!(
+            "LLM provider name `{name}` is used by the provider the server's \
+             configuration file supplies; choose another"
+        )));
     }
     if def.backend.trim().is_empty() {
         return Err(Error::invalid(format!(
@@ -156,12 +171,31 @@ pub async fn load_llm_provider(
     catalog: &Catalog,
     id: LlmProviderDefId,
 ) -> Result<Option<LlmProviderDef>> {
+    if let Some(host) = host_llm_provider(catalog)
+        && host.def().id == id
+    {
+        return Ok(Some(host.def().clone()));
+    }
     load_one(catalog, Expr::col(COL_ID).eq(Expr::lit(id.0))).await
 }
 
 /// Load the definition named `name`, if any — the lookup an agent's `provider`
 /// resolves through.
 pub async fn load_llm_provider_by_name(
+    catalog: &Catalog,
+    name: &str,
+) -> Result<Option<LlmProviderDef>> {
+    if let Some(host) = host_llm_provider(catalog)
+        && host.def().name == name
+    {
+        return Ok(Some(host.def().clone()));
+    }
+    load_stored_provider_by_name(catalog, name).await
+}
+
+/// The provider **the admin added** named `name`, leaving out the host's — what
+/// the host's own name is checked against.
+pub(crate) async fn load_stored_provider_by_name(
     catalog: &Catalog,
     name: &str,
 ) -> Result<Option<LlmProviderDef>> {
@@ -177,7 +211,8 @@ pub async fn require_llm_provider(catalog: &Catalog, name: &str) -> Result<LlmPr
         .ok_or_else(|| Error::not_found(format!("no LLM provider named `{name}`")))
 }
 
-/// Every stored definition, ordered by name — what the admin UI lists.
+/// Every definition, the host's included, ordered by name — what the admin UI
+/// lists.
 pub async fn list_llm_providers(catalog: &Catalog) -> Result<Vec<LlmProviderDef>> {
     let select = Select::from(Source::table(LLM_PROVIDERS_TABLE));
     let mut defs: Vec<LlmProviderDef> = rows(catalog, select)
@@ -185,6 +220,9 @@ pub async fn list_llm_providers(catalog: &Catalog) -> Result<Vec<LlmProviderDef>
         .iter()
         .map(provider_from_row)
         .collect::<Result<_>>()?;
+    if let Some(host) = host_llm_provider(catalog) {
+        defs.push(host.def().clone());
+    }
     defs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(defs)
 }
@@ -211,6 +249,9 @@ pub async fn delete_llm_provider(
     let Some(def) = load_llm_provider(catalog, id).await? else {
         return Ok(false);
     };
+    if is_host_llm_provider(catalog, id) {
+        return Err(read_only(&format!("LLM provider `{}`", def.name)));
+    }
 
     if !extra_referents.is_empty() {
         return Err(Error::invalid(format!(
@@ -480,6 +521,14 @@ pub async fn save_llm_model(catalog: &Catalog, model: &LlmModelDef) -> Result<Ll
 /// Everything [`save_llm_model`] checks before it writes.
 pub async fn check_model_saveable(catalog: &Catalog, model: &LlmModelDef) -> Result<()> {
     let name = model.name.trim();
+    if let Some(host) = host_llm_provider(catalog)
+        && host.def().id == model.provider_id
+    {
+        return Err(read_only(&format!(
+            "the models of LLM provider `{}`",
+            host.def().name
+        )));
+    }
     if name.is_empty() {
         return Err(Error::invalid("an LLM model needs a name"));
     }
@@ -514,6 +563,9 @@ pub async fn check_model_saveable(catalog: &Catalog, model: &LlmModelDef) -> Res
 
 /// Load the model row with this id, if it exists.
 pub async fn load_llm_model(catalog: &Catalog, id: LlmModelDefId) -> Result<Option<LlmModelDef>> {
+    if let Some(model) = host_model(catalog, id) {
+        return Ok(Some(model));
+    }
     let select = Select::from(Source::table(LLM_MODELS_TABLE))
         .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)))
         .limit(1);
@@ -546,6 +598,11 @@ pub async fn list_llm_models(
     catalog: &Catalog,
     provider: &LlmProviderDef,
 ) -> Result<Vec<LlmModelDef>> {
+    if let Some(host) = host_llm_provider(catalog)
+        && host.def().id == provider.id
+    {
+        return Ok(host.models().to_vec());
+    }
     let select = Select::from(Source::table(LLM_MODELS_TABLE))
         .filter(Expr::col(COL_PROVIDER_ID).eq(Expr::lit(provider.id.0)));
     let mut models: Vec<LlmModelDef> = rows(catalog, select)
@@ -603,6 +660,9 @@ pub async fn delete_llm_model(
     id: LlmModelDefId,
     extra_referents: &[String],
 ) -> Result<bool> {
+    if let Some(model) = host_model(catalog, id) {
+        return Err(read_only(&format!("LLM model `{}`", model.name)));
+    }
     let select = Select::from(Source::table(LLM_MODELS_TABLE))
         .filter(Expr::col(COL_ID).eq(Expr::lit(id.0)))
         .limit(1);
@@ -621,6 +681,15 @@ pub async fn delete_llm_model(
     let delete = Delete::from(LLM_MODELS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id.0)));
     run(catalog, Statement::from(delete)).await?;
     Ok(true)
+}
+
+/// The host provider's model with this id, if it is one.
+fn host_model(catalog: &Catalog, id: LlmModelDefId) -> Option<LlmModelDef> {
+    host_llm_provider(catalog)?
+        .models()
+        .iter()
+        .find(|m| m.id == id)
+        .cloned()
 }
 
 /// The model row's columns, in the order [`model_values`] produces them.

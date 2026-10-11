@@ -17,6 +17,8 @@ mod agent_eval;
 mod api_queries;
 #[path = "auth_token.rs"]
 mod auth_token;
+#[path = "backup.rs"]
+mod backup;
 #[path = "build_app.rs"]
 mod build_app;
 #[path = "build_script.rs"]
@@ -47,5 +49,7 @@ mod serve;
 mod setup_host;
 #[path = "sqlite_primary.rs"]
 mod sqlite_primary;
+#[path = "users.rs"]
+mod users;
 #[path = "whale_ci.rs"]
 mod whale_ci;

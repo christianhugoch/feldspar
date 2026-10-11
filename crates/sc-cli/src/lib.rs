@@ -7,7 +7,8 @@
 //! domains they read ([`i18n`]), the `cmdstan` commands' arguments and status
 //! report ([`cmdstan`]), parsing the `api` commands' flags
 //! ([`api`]), the `get-cfg`/`set-cfg` commands' arguments ([`config`]), the
-//! `mcp-token` commands ([`mcp_token`]), resolving an application's project
+//! `mcp-token` commands ([`mcp_token`]), the `add-user`/`modify-user`
+//! commands' arguments and password prompt ([`users`]), resolving an application's project
 //! directory for `app list` ([`app`]) and
 //! standing up a connected [`Catalog`] ([`connect_catalog`]) —
 //! live here so integration tests can drive the same boot path the CLI uses.
@@ -22,6 +23,7 @@ pub mod demo;
 pub mod eval;
 pub mod i18n;
 pub mod mcp_token;
+pub mod users;
 
 /// The `feldspar.toml` reader. It lives in its own layer-0 crate because the
 /// integration-test harness reads the same file (for the `test` environment),
@@ -110,6 +112,47 @@ pub async fn connect_catalog(db: &DbConfig) -> Result<Arc<Catalog>> {
     sc_config::bootstrap(&catalog)
         .await
         .context("ensuring the configuration tables exist")?;
+    // Geometry (analytics TODO A5.1): PostGIS where the role may install it,
+    // and a sentence where it may not, so the admin knows why a geometry field
+    // is refused before trying one.
+    match sc_catalog::bootstrap_spatial(&catalog)
+        .await
+        .context("looking for PostGIS")?
+    {
+        sc_db::SpatialSupport::Available { version } => {
+            eprintln!("feldspar: PostGIS {version}; geometry fields are available");
+        }
+        sc_db::SpatialSupport::Unavailable { reason } => {
+            eprintln!("feldspar: geometry fields are unavailable: {reason}");
+        }
+    }
+    // The TLS settings the selected environment pins (§13.5), before anything
+    // reads a setting: from here every read of them — the boot's, the settings
+    // screen's, `get-cfg`'s — sees the file's value, and a write is refused.
+    let pinned = db.serving().host_config();
+    if !pinned.is_empty() {
+        eprintln!(
+            "feldspar: {} set by the configuration file",
+            pinned.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    sc_config::set_host_config(&catalog, pinned)
+        .context("reading the TLS settings in the configuration file")?;
+    // The LLM provider the selected environment supplies, on the same footing:
+    // usable by every agent, listed read-only, never stored.
+    let provider = db
+        .serving()
+        .llm_provider()
+        .context("reading the LLM provider in the configuration file")?;
+    if let Some(provider) = &provider {
+        eprintln!(
+            "feldspar: LLM provider `{}` set by the configuration file",
+            provider.def().name
+        );
+    }
+    sc_llm::set_host_llm_provider(&catalog, provider)
+        .await
+        .context("reading the LLM provider in the configuration file")?;
     // The stored Localisation settings, on the same footing and here for the
     // same reason: what a `feldspar` command prints to an admin — and what a
     // server negotiates a request into — is a stored setting, so it has to be

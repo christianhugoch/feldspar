@@ -19,6 +19,8 @@ mod admin_applications_api;
 mod admin_graphql_explorer;
 #[path = "admin_spa_typecheck.rs"]
 mod admin_spa_typecheck;
+#[path = "admin_subdomain.rs"]
+mod admin_subdomain;
 #[path = "admin_theme.rs"]
 mod admin_theme;
 #[path = "admin_users_api.rs"]
@@ -31,6 +33,8 @@ mod agent_admin_api;
 mod agent_chat;
 #[path = "analytics_api.rs"]
 mod analytics_api;
+#[path = "analytics_apps.rs"]
+mod analytics_apps;
 #[path = "analytics_done.rs"]
 mod analytics_done;
 #[path = "analytics_plots.rs"]
@@ -87,6 +91,10 @@ mod file_store_admin_api;
 mod fit_model_action;
 #[path = "generated_client_refresh.rs"]
 mod generated_client_refresh;
+#[path = "geo_import.rs"]
+mod geo_import;
+#[path = "geometry.rs"]
+mod geometry;
 #[path = "graphql_serving.rs"]
 mod graphql_serving;
 #[path = "ide_language_server.rs"]
@@ -135,6 +143,8 @@ mod posterior_api;
 mod primary_key_api;
 #[path = "provided_tables_api.rs"]
 mod provided_tables_api;
+#[path = "public_datasets_api.rs"]
+mod public_datasets_api;
 #[path = "python_trigger.rs"]
 mod python_trigger;
 #[path = "rls_enforcement.rs"]
