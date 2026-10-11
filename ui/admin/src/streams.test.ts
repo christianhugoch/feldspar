@@ -30,6 +30,7 @@ import {
   elementTypeSummary,
   emptyObserve,
   extraKeys,
+  filterByTopic,
   formatCount,
   hexHead,
   isReplayed,
@@ -40,8 +41,10 @@ import {
   readElementType,
   readEnvelope,
   readStatus,
+  readTopics,
   statusLabel,
   streamObserveUrl,
+  topicLabel,
   type ElementType,
   type Envelope,
   type ObserveFrame,
@@ -121,6 +124,53 @@ describe("reading an envelope", () => {
   it("refuses something that is not one", () => {
     expect(readEnvelope({ stream: "s", value: 1 })).toBeNull();
     expect(readEnvelope("nope")).toBeNull();
+  });
+
+  it("carries a topic when the stream has one, and leaves it off when not", () => {
+    const read = readEnvelope({
+      stream: "job_status",
+      topic: "6f9619ff-8b86-d011-b42d-00cf4fc964ff",
+      value: { message: "Done" },
+      received_at: "2026-09-17T09:00:00.000Z",
+    });
+    expect(read?.topic).toBe("6f9619ff-8b86-d011-b42d-00cf4fc964ff");
+    const single = readEnvelope({ stream: "s", value: 1, received_at: "2026-09-17T09:00:00Z" });
+    expect(single && "topic" in single).toBe(false);
+  });
+});
+
+describe("topics on the Observe screen", () => {
+  it("reads a stream's topic kind, and anything else as single", () => {
+    expect(readTopics({ kind: "user" })).toEqual({ kind: "user" });
+    expect(readTopics({ kind: "row", table: "boards" })).toEqual({ kind: "row", table: "boards" });
+    expect(readTopics({ kind: "single" })).toEqual({ kind: "single" });
+    expect(readTopics(null)).toEqual({ kind: "single" });
+    expect(readTopics({ kind: "galaxy" })).toEqual({ kind: "single" });
+  });
+
+  it("names the column after what the topic is", () => {
+    // A translator that shows what it was asked, so the message and its
+    // arguments are both checked.
+    const t = (text: string, args?: Record<string, string>) =>
+      args ? `${text} ${JSON.stringify(args)}` : text;
+    expect(topicLabel(t, { kind: "user" })).toBe("Topic (user)");
+    expect(topicLabel(t, { kind: "row", table: "boards" })).toBe('Topic ({table} row) {"table":"boards"}');
+    expect(topicLabel(t, { kind: "row" })).toBe("Topic (row)");
+    expect(topicLabel(t, { kind: "single" })).toBe("Topic");
+  });
+
+  it("narrows the tail to the topics containing the query, keeping the order", () => {
+    const on = (topic: string | undefined, n: number): Envelope => ({
+      stream: "job_status",
+      ...(topic === undefined ? {} : { topic }),
+      value: { n },
+      received_at: "2026-09-17T09:00:00.000Z",
+    });
+    const tail = [on("alice-1", 3), on("bob-2", 2), on("alice-1", 1), on(undefined, 0)];
+    expect(filterByTopic(tail, "").length).toBe(4);
+    expect(filterByTopic(tail, "  ").length).toBe(4);
+    expect(filterByTopic(tail, "alice").map((e) => (e.value as { n: number }).n)).toEqual([3, 1]);
+    expect(filterByTopic(tail, "carol")).toEqual([]);
   });
 });
 

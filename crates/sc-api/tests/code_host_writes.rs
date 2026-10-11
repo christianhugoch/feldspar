@@ -353,7 +353,10 @@ async fn with_triggers(
         save_trigger(catalog, &dispatcher.registry(), trigger).await?;
     }
     dispatcher.reload(catalog).await?;
-    catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
+    catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>,
+    )?;
     Ok(dispatcher)
 }
 

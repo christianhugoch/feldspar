@@ -102,6 +102,14 @@ feldspar/
 │  │                              #    that advances a run of it (§10.3)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
 │  │                              #    loop + `_fd_agents`/`_fd_runs` storage (§11.2)
+│  ├─ sc-live/                    # 7. Live updates (§14.10): the multiplexed socket's protocol,
+│  │                              #    a connection's subscriptions, the topic index, the access
+│  │                              #    decisions as pure functions, and the hub that fans a
+│  │                              #    running stream's elements out, publishes into internal
+│  │                              #    streams (sc-expr's `LiveHost`) and watches the tables a row
+│  │                              #    topic's read rule reads (sc-catalog's `TableEvents`).
+│  │                              #    Above sc-stream and sc-auth; below sc-server, which mounts
+│  │                              #    `{mount}/live`
 │  ├─ sc-model/                   # 6. Predictive models: a named dataset (sc-dataset) resolved,
 │  │                              #    the columnar Frame, the row-identity-hash split, the
 │  │                              #    DatasetSource + ModelProvider seams, `_fd_models` /
@@ -126,7 +134,7 @@ feldspar/
 │  │                              #    StreamProvider seam and its registry, the element
 │  │                              #    type and the envelope, `_fd_streams`, the supervisor
 │  │                              #    that keeps subscriptions running, and the built-in
-│  │                              #    MQTT provider. Layer 6 for sc-model's reason: a module
+│  │                              #    MQTT and `internal` providers (§14.10). Layer 6 for sc-model's reason: a module
 │  │                              #    supplies providers, and its rows go through the Catalog
 │  ├─ sc-fieldview/               # 6. FieldView trait, built-in fieldviews (React components)
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
@@ -206,6 +214,9 @@ graph TD
   stan --> model
   coreact --> model
   server --> stream["sc-stream"]
+  server --> live["sc-live"]
+  live --> stream
+  stream --> auth
   app --> stream
   module --> stream
   server --> python["sc-python"]
@@ -275,10 +286,11 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-dataset` | `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-analytics` | `sc-catalog` `sc-config` `sc-dataset` `sc-db` `sc-db-sqlite` `sc-error` `sc-model` `sc-query` `sc-types` |
-| `sc-stream` | `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
+| `sc-stream` | `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-query` `sc-types` |
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
+| `sc-live` | `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-stream` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-dataset` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-model` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
@@ -286,7 +298,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
@@ -1893,9 +1905,9 @@ ambient, and `row`/`old` are *out of scope* on an event that has no row (so nami
 run's `context` — §10.3) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
-The seven built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
-`run_python_code` (§15.2) and `send_email`, and they live in **`sc-core-actions`, above the row
-layer**. That placement is the design's one real constraint on where an action may live: a
+The eight built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
+`run_python_code` (§15.2), `send_email` and `publish` (§14.10), and they live in
+**`sc-core-actions`, above the row layer**. That placement is the design's one real constraint on where an action may live: a
 trigger's write goes through `sc-api`'s `rows` module, so it is coerced, validated,
 `File`-field-checked and *observed* exactly like an API caller's write. A second write path would
 quietly skip all of it. Two more are registered apart from the set, because each holds a seam a
@@ -1932,14 +1944,20 @@ means something for one provider is a cost paid by everybody.
   configuration is validated against. The transport is handed in through `ActionContext`,
   exactly as the JavaScript engine is, which is what lets its tests assert *what would have
   been sent*.
-- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and five
+- `publish` puts one element on an internal stream (§14.10): a stream, a topic formula (blank is
+  `user.id` on a stream with a topic per user — the event's user, so a workflow step tells the
+  person who started the run) and a formula per declared key. A per-user publish with no user is
+  an error naming the trigger.
+- `run_js_code` runs a JavaScript body with `row`/`old`/`user`/`payload` in scope — and six
   host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), `fs`, the file
-  stores (below), `trigger`, this server's other triggers (below), and `modfn`, an installed
-  module's functions (§15.1). Those five are exactly the surface: no subprocess, no timers, no
-  schema changes, no path to a file that is not a store an admin connected, and no way to fire
-  an event except by being one more caller of the dispatcher every event already goes through.
-  Beside them a body is handed Saltcorn 1's `Table` and `Field` (below), which are not a sixth
-  surface but v1's vocabulary over the first and the fourth, and `models`, whose
+  stores (below), `trigger`, this server's other triggers (below), `modfn`, an installed
+  module's functions (§15.1), and `live`, whose `live.publish(stream, topic, value)` puts an
+  element on an internal stream (§14.10) — synchronously, on a budget of its own. Those six are
+  exactly the surface: no subprocess, no timers, no schema changes, no path to a file that is not
+  a store an admin connected, and no way to fire an event except by being one more caller of the
+  dispatcher every event already goes through. Beside them a body is handed Saltcorn 1's `Table`
+  and `Field` (below), which are not a seventh surface but v1's vocabulary over the first and the
+  fourth, and `models`, whose
   `models.get("…")` answers a model handle (§14.2) and which is also not a surface: its
   requests are `op: "models"` on the `db` host, on the run's call budget. It runs on its
   **own pool of isolates**, not the single pure isolate every ownership formula shares, which
@@ -2580,9 +2598,18 @@ A table write raises its event through a seam the **catalog** owns (`TableEvents
 simply unobserved, which is what makes a build tool or an admin script safe to run against the
 same database.
 
-`TableEvents::observes(table, op)` is a **synchronous predicate the row layer asks first**, and
-it is the choke point that keeps the feature free for writes that do not use it: an update
-fetches its pre-image only when something will read it.
+**The seam holds a list of listeners, keyed** (`Catalog::add_table_events(key, listener)`): the
+trigger dispatcher under `TRIGGER_EVENTS` and the live hub under `LIVE_EVENTS` (§14.10), which
+re-checks a row topic's access when a table its read rule reads is written to. Installing under a
+key that is taken replaces — two dispatchers would fire every trigger twice — and a different key
+adds, so the second kind of listener can never silently switch the first off, which is what a
+replacing `set_table_events` would have done the day live updates were installed.
+
+`TableEvents::observes(table, op)` is a **synchronous predicate the row layer asks first** —
+`Catalog::observes_writes` is the OR over the listeners — and it is the choke point that keeps
+the feature free for writes that do not use it: an update fetches its pre-image only when
+something will read it. A write is handed only to the listeners that observe it, each its own
+copy, and one listener's failure does not keep the write from the next.
 
 Every other event is raised by something that already sits above `sc-action` and can simply
 hold the dispatcher: `login` from the one place a session starts, `startup` from the boot path,
@@ -5109,21 +5136,26 @@ request through it — not "not written to".
   tables as the caller, so `click` and `fill` on a form write real rows — the tool's description
   says so, because the alternative (a scratch database per preview) is a different product.
 
-**The observe socket, mounted beside the endpoint set.** An application exposes streams the way
-it exposes triggers — `streams: Vec<StreamRef>` and `exposes_stream(name)` — on the same
-principle: a stream is server-side configuration, and it becomes reachable from outside only
-because an app said so. The route is `GET {mount}/streams/{name}/observe`, and it is mounted
-*beside* the app's APIs rather than inside one, because an `EndpointSet` is a typed
-request/response model (§13.1) and a socket has no shape in it — the split the IDE's language
-server and the admin chat socket already made. It authenticates with the application's own
-session cookie, enforces the **stream's** `min_role` (read off the stored row, so a stream this
-process has not started is still authorised by the same number), and answers an unknown *or*
-unexposed name with a **404** rather than a 403: a 403 would confirm the existence of a flow this
-application has no business knowing about. Every refusal is decided before the handshake, because
-a browser cannot read the body of a failed upgrade. After it, the frames are the admin socket's
-(§14.3). The generated client gets an `observeStream_{name}()` per exposed stream, typed from
-the element type — which is where the element type earns its keep, and it costs nothing to keep
-in step because an app's client is emitted at build time (§13.1).
+**The live socket, mounted beside the endpoint set.** An application exposes streams the way it
+exposes triggers — `streams: Vec<StreamRef>` and `exposes_stream(name)` — on the same principle:
+a stream is server-side configuration, and it becomes reachable from outside only because an app
+said so. A page reaches them over **one** WebSocket, `GET {mount}/live`, carrying any number of
+subscriptions (§14.10). It is mounted *beside* the app's APIs rather than inside one, because an
+`EndpointSet` is a typed request/response model (§13.1) and a socket has no shape in it — the
+split the IDE's language server and the admin chat socket already made. Three things are decided
+before the upgrade, with a status, because a browser cannot read the body of a failed handshake:
+that it is an upgrade (400), that its `Origin` is the page's own host (403 — a sibling subdomain
+is *same-site*, and with a shared session cookie would otherwise ride the user's session), and who
+the caller is, by the same function (`app_caller`) the app's REST API authenticates with.
+Anonymous is allowed and holds the public role. Everything after is a frame: one `unavailable`
+for a stream that is unknown, unexposed or above the caller's role — a 403 would confirm the
+existence of a flow this application has no business knowing about — and `ready`, the replay,
+`element`, `lagged`, `status` and `revoked` for one that is allowed. The generated client gets a
+`live` object with an accessor per exposed stream, typed from the element type, all sharing one
+`LiveConnection` that opens on first use and reconnects by itself — which is where the element
+type earns its keep, and it costs nothing to keep in step because an app's client is emitted at
+build time (§13.1). The per-stream socket this replaced, `{mount}/streams/{name}/observe`, is
+gone; the admin's `/api/streams/{id}/observe` stays (§14.3).
 
 **The catalogue route, mounted the same way.** `GET {mount}/i18n/{locale}.json` answers an
 application's own catalogue (§16.1, D7) and is mounted beside the endpoint sets for the reason
@@ -6662,9 +6694,9 @@ for an application whose subdomain is **`@`**. The move is a save, not a restart
   gets a certificate naming it: `ordering` (with the CA's last error) until the order deploys,
   then `ready`. A pasted certificate (`tls::PastedCertificate`) is checked with `webpki` for the
   name; TLS off is `plain_http`. `GET /api/settings/admin-address` reports it.
-- **The session follows.** The session cookie is host-only — a `Domain` attribute would give the
-  admin's credential to every application under the base domain — so the new host has no
-  session. `POST /api/settings/admin-address/handoff` mints a single-use token (two minutes,
+- **The session follows.** The session cookie is host-only by default — a `Domain` attribute
+  would give the admin's credential to every application under the base domain — so the new
+  host has no session. `POST /api/settings/admin-address/handoff` mints a single-use token (two minutes,
   bound to the admin host, held in memory) which `GET /_feldspar/admin-handoff?token=…` on the
   new host exchanges for a fresh session of the same user, landing on Settings.
 - **The dialog** the save opens (`ui/admin` `AdminMove`) polls the address until the
@@ -6681,6 +6713,26 @@ domain when it was created, is widened for the admin host as it is served
 (`sc_app::follow_admin_host`), so the builder's preview pane keeps working after a move. A
 preview of the `@` application is `<label>.<base domain>`, having no subdomain to put after
 the `--`.
+
+**Sharing the sign-in between applications** (`shared_session_cookie`, Settings → Development,
+off by default). Users and sessions are already the instance's, not an application's: what keeps
+a sign-in on one host is only that `sc_session` is host-only. Ticking this gives the session
+cookie `Domain=<base domain>` — the base domain or extra base domain the request's `Host` is
+under; a host under none, an IP address, still gets a host-only one — so one sign-in reaches the
+admin UI and every application. The CSRF cookie stays host-only: each origin's client reads its
+own. The cost is the one the bullet above names: every application's pages, and its client code's
+requests to the admin host, carry the admin's session. Authorisation is still per endpoint, and
+an application's framework is never handed the `Cookie` header.
+
+It is live like the rest of the section (`AppMounts::shared_session_cookie`, read when the
+router sets or clears the cookie). **Changing it ends every session**, the saving admin's
+included (`SessionAction::EndAll`): a cookie already in a browser keeps the scope it was given,
+so turning sharing *off* would otherwise leave base-domain cookies valid on every application
+until they expire. The settings screen asks first, and reloads into the sign-in page after. A
+browser can then hold an ended `sc_session` in the old scope beside a new one; a response that
+sets or clears the session cookie for a request that carried one also expires it in the other
+scope, so a stale cookie never shadows the session just started. Clear all turns it off with
+the rest of `_fd_config`.
 
 **Name resolution is this process's own** (`sc-dns`, layer 0), and turning TLS on is what
 first made that necessary. glibc's `getaddrinfo` `dlopen`s a shared object per module named on
@@ -8179,6 +8231,14 @@ tests are offline — the decoder, `element_type` over each `payload` setting, t
 validation and the topic-filter check need no broker. The live half is a human's, and
 `docs/tutorial-streams.md` is the recipe.
 
+The second built-in provider, **`internal`**, observes nothing outside Saltcorn: its elements are
+published by Saltcorn's own code, it is always compiled in (a `--no-default-features` build still
+offers it, and the Streams screen's notice says only that MQTT was left out), and it is described
+with live updates, which it exists for (§14.10). Two provider hooks arrived with it and default
+to what every provider did before: `replay` (what a new live subscriber is handed — the ring, by
+default) and `accepts_publish` (whether Saltcorn's own code may publish into the stream — no, by
+default), plus `validate_in`, a save-time check against the catalog.
+
 #### Providers from a module: poll, not push
 
 A module exports `streamproviders` beside its `actions`, `table_providers` and `modelproviders`:
@@ -8216,7 +8276,9 @@ given — `listModelProviders`' arrangement, for its reason), `listStreams`, `ge
 afterwards, so the flow follows the row without a restart.
 
 Observing is a WebSocket rather than an endpoint, and it is mounted beside the endpoint set for
-§13.2's reason. `GET /api/streams/{id}/observe` is the admin's, and it is the admin chat socket's
+§13.2's reason. `GET /api/streams/{id}/observe` is the admin's (an application's page uses the
+multiplexed live socket instead, §14.10, and every socket checks the handshake's `Origin` the same
+way), and it is the admin chat socket's
 sibling in every respect that matters: admin-only, decided **before** the upgrade and refused with
 a status, because a browser cannot read a failed handshake's body; everything after it is JSON text
 frames. It sends `{"type":"ready","element_type":…,"status":…}`, replays the ring (the last 100
@@ -9589,6 +9651,301 @@ milestone's Try it over the demo data, with both applications at once: what a `s
 and reads in each, before and after an ownership formula narrows `houses`, against the admin's
 reads of every row.
 
+### 14.10 Live updates (`sc-live`)
+
+The server pushing to an application's page while it is open: a toast when a job finishes, a
+kanban card moving on someone else's board, a document edited by two people, a sensor reading.
+The plan is TODO.md "Live updates" (milestones L1–L6); this section records what is built.
+**Milestones L1 and L2 are built**: one socket per page, the access rules and their re-checking
+(L1); the built-in `internal` provider, `user` and `row` topics, retaining the latest element,
+re-checking a row topic when a write could change it, and server-side publishing from the
+`publish` action and `live.publish` in a code body (L2). `PerElementRow` topics, the
+`table_changes` and `document` providers, client publishing, presence and the bus are the later
+milestones.
+
+#### Everything is a stream, and a stream has topics
+
+Every update reaches the browser **through a stream**, and an application declares the streams it
+exposes, exactly as it did for MQTT. That keeps one entity, one admin screen, one place to set
+access, one socket and one client API, and a trigger can listen to any of them through the
+existing bridge (§10.2).
+
+What streams lacked was a way to say *who* may receive an element when the answer is not "anyone
+at or above `min_role`". So a provider now declares a **topic spec** as a function of its
+configuration, the way it declares its element type:
+
+```rust
+pub enum TopicSpec {
+    Single,                          // one topic; the stream's min_role decides (every provider today)
+    User,                            // the topic is a user id; a subscriber gets only their own
+    Row { table: String },           // the topic is a row's key; read access to that row decides
+    PerElementRow { table: String }, // every element is checked against the subscriber
+}
+```
+
+`StreamProvider::topic_spec` defaults to `Single`, so MQTT and module providers are unchanged.
+`RunningStream::topic_spec` answers for a running stream, and an error from the provider is a
+refusal rather than a guess — the guess that costs nothing (`Single`) is the one that would open a
+per-user stream to everyone above its floor. The stream's `min_role` stays a **floor on
+subscribing at all**, admin-only when unset; a topic or element check can only narrow it.
+
+The **envelope** (§14.3) gained an optional `topic`: present for a stream with topics, **absent —
+not null —** for a `Single` one, so every envelope a trigger or a generated client already reads
+is byte-for-byte unchanged. It is not MQTT's topic, which stays in `source`.
+
+#### One socket per page
+
+`GET {mount}/live` (§13.2) carries any number of subscriptions as JSON text frames, each naming
+the client's own `sub`:
+
+```
+client → server   subscribe {sub, stream, topic?, filter?} · unsubscribe {sub} · publish {sub, value}
+                  presence {sub, state} · doc_update {sub, update} · ping
+server → client   ready {sub, stream, element_type, replayed, can_publish, status, counters}
+                  element {sub, envelope} · lagged {sub, dropped} · status {sub, status, counters}
+                  revoked {sub} · error {sub?, code, message} · pong
+```
+
+`publish`, `presence` and `doc_update` are part of the protocol now, so a client is written
+against one contract, and are refused until their milestones (`publish` as `unavailable`, the
+others as `invalid`). A frame the server does not understand — malformed, an unknown `type`, a
+field of the wrong shape — is an `error` with `code: "invalid"` and the frame's `sub`, never a
+closed connection: one bad frame must not take every other subscription down with it, and a
+client a version ahead must still be able to use the server.
+
+**`ready` can come twice.** A subscription to a stream that is not running here (disabled,
+failing) gets `ready` with a `stopped` status and a null element type, and waits. When the stream
+starts — or restarts because its configuration changed, which replaces the `RunningStream` — the
+connection's status pass attaches it again and sends a fresh `ready` with the replay. A page
+follows the flow without reconnecting.
+
+#### Who may subscribe
+
+The decisions are **pure functions** in `sc-live::access`, over facts the socket has looked up,
+so they are tested as a table of cases and asked identically at subscribe time and at every
+re-check. `may_open(facts, caller)` is the stream-level rule — the app exposes the stream, it is
+stored, the caller meets its `min_role` — and `may_subscribe(facts, caller, topic)` adds the topic
+rule and answers a `Grant` naming the topic the subscription is routed under:
+
+| Topics | The subscriber names | Routed under | Refused when |
+|---|---|---|---|
+| `single` | nothing | no topic | below the floor |
+| `user` | nothing | their own user id | below the floor, or anonymous |
+| `row { table }` | a row's key (`"7"` or `7`) | the key | below the floor, the table outside the app's subset, or the caller's REST read of that row returns nothing |
+| `per_element_row` | — | — | always, until L3 |
+
+A **row topic's** verdict is a fact the socket looks up through `sc_api::row_readable_as`, which
+is `read_row_values_as` with `pk = key` — the very read the application's REST API makes, with the
+floor, the ownership formula (translated or reified) and a table's RLS policies in a
+caller-context transaction. A subscription therefore cannot see a row the REST API would not
+return, and there is no second copy of the rule to drift. The row is read only once the
+stream-level rule has passed, so a caller below the floor never causes a read.
+
+Unknown, unexposed, below the floor, anonymous on a `user` stream, a row that does not exist, a
+row the caller may not read and a row of a table the app does not include are all one `Denied`,
+which the socket sends as one `unavailable` frame worded the same whatever the reason. A frame
+that does not fit the stream — a topic for `single`, a topic named on `user` (a subscriber cannot
+ask for somebody else's), no topic for `row` — is `Refusal::Invalid`, said only once access has
+passed.
+
+Order matters for not leaking: a subscription's own rules (its `sub` is unused, the connection
+has room) are checked **before** the stream is looked up, so even the limit answer cannot hint at
+whether a name exists; a `topic` or `filter` given to a stream that takes none is `invalid` only
+**after** access passed, because only then may the caller know the stream is there.
+
+#### Internal streams
+
+`sc-stream::providers::internal` is the second built-in provider, always compiled in. Its elements
+are Saltcorn's own: published by the `publish` action, by `live.publish` in a code body, and (L4)
+by pages. Its settings are the declared keys (MQTT's JSON list, reused), `topics`
+(`single | user | row`, with `table` shown only for `row`), `retain_last` and `retain_ttl_s`, and
+— read from L4 on — `client_publish`, `presence` and `presence_fields`. Validation refuses an
+empty key list, a `row` stream with no table, a TTL outside one second to a week, and
+`client_publish` on a `user` stream; a new `StreamProvider::validate_in(config, catalog)` hook,
+run on save, refuses a `row` table that does not exist or lacks a one-column primary key, and a
+presence field that is not a column of `users` (or is its password hash).
+
+**Its subscription runs nothing.** `subscribe` returns an idle task; the supervisor keeps the
+sink it handed the subscription on the `RunningStream` for as long as the subscription lives, and
+`RunningStream::publish_value(topic, value)` delivers through it — so a published element takes
+exactly a provider element's path: the per-second cap, the stamp, the ring, the broadcast and the
+trigger bridge. It refuses, as an error the publisher sees: a provider that does not
+`accepts_publish()` (only `internal` does — an MQTT stream's elements are a broker's word), a
+stream not running here (disabled, so it has no sink), a topic of the wrong kind (a `user` topic
+must be a user id and is routed under its canonical hyphenated spelling), and a value that does
+not decode against the element type (counted as `malformed`, as a broker's bad payload is).
+
+The design described a separate hub registry from stream name to the internal provider's sink;
+what was built keeps the sink on the running stream and finds it by name through the supervisor.
+A registry owned by a provider instance would have been orphaned by a module change, which
+rebuilds the provider registry while running streams keep the provider they started with; one
+keyed process-wide by name would collide between two servers in one process.
+
+#### Retaining the latest element
+
+A provider now also declares what a new subscriber is replayed (`StreamProvider::replay`):
+`Replay::Ring` (the last elements on its topic — every provider before L2), `Replay::Nothing`, or
+`Replay::Latest { ttl, max_topics }`. `internal` answers `Latest` with `retain_last` on (an hour,
+at most 10 000 topics, the oldest-published forgotten first) and `Nothing` without — a minute-old
+toast is not news. The latest element per topic (`sc-stream::Retained`) is kept by the running
+stream **under the same lock** as its ring and its broadcast send, and `subscribe_elements` hands
+it out with them, so the fan-out's own copy is seeded without a gap or a double. A subscription
+on a `user` stream is on its own id, so the retained element it is handed is its own; it is
+counted in `ready`'s `replayed`.
+
+#### Re-checked when a write could change it
+
+A `row` subscription was authorised by its row's read rule, and the rule is a function of the
+row **and of every row it reaches**. So a row subscription **watches** its row's table and every
+table the table's ownership formula reads (`sc-live::read_rule_tables`, from the formula's own
+analysis: the target of each Ⱶ-path segment and the child table of each `Ↄ` aggregation). The hub
+is a second `TableEvents` listener (the catalog's write seam is now a keyed list — see §10.2): it
+`observes` exactly the watched tables, so a write to any other table pays nothing, and its `emit`
+does no access work — it hands the write's table and key(s) to the watching connections as a
+`Touch` and returns. Each connection then re-asks `row_readable_as` for the subscriptions the
+write could affect (its own row's key, or any write to a table the rule reads) on its own task,
+and sends `revoked` for those that now fail. Removing a share revokes the subscription it granted
+without waiting for the clock. The last subscription watching a table takes the watch with it.
+
+A write made inside a `SharedTx` (a workflow step's) is emitted before that transaction commits
+(§10.2), so a re-check made at once would read the old state. Until L3.1 publishes after commit,
+the hub hands such a write over a second time two seconds later; the clock re-check is the
+backstop behind both.
+
+#### Server-side publishing
+
+`sc_expr::LiveHost` is the seam — `topics(stream)` and `publish(stream, topic, value)`,
+synchronous because a publish is a send that never waits — and `LiveHub` implements it,
+installed on the catalog (`Catalog::set_live_host`) by the router, beside its session listener.
+Three publishers reach it without naming `sc-live`:
+
+- **The `publish` action** (`sc-core-actions`): `stream` (a picker the server fills with the
+  internal streams, `INTERNAL_STREAMS_QUERY`), `topic` (a formula; blank is `user.id` on a `user`
+  stream and none on a `single` one; required on a `row` one) and `value` (a formula per key). As a
+  workflow `Action` step it reads the run's event, so `user.id` is the user who started the run.
+  A `user` topic that evaluates to null — a periodic or stream trigger has no user — is an error
+  naming the trigger. Saving one is refused when the stream is not an internal stream here.
+- **`live.publish(stream, topic, value)` in a JavaScript body**, a sixth surface beside `db`,
+  `fetch`, `fs`, `trigger` and `modfn`: a synchronous op (`op_sc_live`) that calls the host on the
+  isolate's thread — the `Arc` crosses as it is, so no bridge — with a budget of
+  `MAX_LIVE_PUBLISHES` (1 000) per run. Two arguments are a stream without topics. A refusal is
+  thrown at the call; a publish clears the run's retry, because somebody's browser has seen it.
+- **`live.publish` in a Python body**, the same surface over the bridge (`Surface::Live`,
+  `__sc_live`, `LiveError`), with the same budget and sentences.
+
+Server-side publishers are trusted configuration (§3 rule 8 of the plan): no caller's role is
+consulted, as none is for an `insert_row`.
+
+#### Origin, for every socket
+
+A handshake is a `GET`, so CSRF does not cover it, CORS does not apply, and `SameSite=Strict`
+does not help between sibling subdomains — `shop.example.com` is *same-site* with
+`blog.example.com`, and with *Share sign-in between applications* on, the session cookie is sent
+to both. So `security::upgrade_origin_allowed` is asked by **every** socket the server accepts —
+`{mount}/live` and the admin's Observe, chat, language-server and fit-progress sockets: an
+`Origin` must be the request's own host and port (a preview host is its own origin, so a preview's
+page reaches its own socket, and not the live app's); with no `Origin` the caller is not a browser,
+and is refused only if it carries a session cookie without saying it is a native app
+(`x-feldspar-client: native`). The scheme is not compared: a TLS-terminating proxy shows `http`
+behind an `https` page.
+
+#### Re-checked while it is open
+
+A subscription is a standing read. Each connection re-reads its session and user every
+`recheck_interval` (the session cache's 60 s by default), re-resolves its application (a remount
+may have stopped exposing a stream) and asks `may_subscribe` again — a row subscription with its
+row read afresh, and any subscription whose grant now names a different topic counting as
+refused: a subscription that fails is
+sent `revoked` and dropped; a session that is gone closes the socket with an `error` of
+`signed_out`. A sign-out on this node does not wait for the clock: `SessionStore` now keeps weak
+`SessionListener`s, told synchronously after `logout`, `end_user_sessions` and
+`end_all_sessions`, and the hub is one — it closes exactly the connections that session (or user)
+held. A store that cannot answer keeps the connection as it was and asks again next time, rather
+than signing everyone out because a database blinked. An anonymous caller who carried a dead
+cookie holds no session, so it is never "signed out" of one.
+
+#### Inside: the hub and its fan-outs
+
+`LiveHub` (on `AppMounts`, so the router and the admin handlers share it) registers every
+connection with its application, user and session — which is what makes the per-user connection
+limit and the immediate sign-out possible — and holds **one fan-out task per running stream that
+somebody is subscribed to**. The fan-out holds the stream's one broadcast receiver and routes each
+element through a `TopicIndex` to the subscriptions on its topic, each a slot in a connection's
+bounded queue. Sending every element to every socket and filtering there would cost elements ×
+sockets; indexed, an element costs the subscribers on its topic.
+
+The fan-out keeps **its own copy of the replay ring**, taken together with its receiver under the
+stream's lock, and a subscription is added **by the fan-out task itself**, between two elements,
+and handed the ring at that moment: everything before is replay, everything after is delivered,
+nothing is both. Deliveries carry an attachment id rather than the client's `sub`, because a
+`sub` can be unsubscribed and reused while an element for its previous life is still queued.
+
+Nobody blocks the flow (§14.3's rule, reaching the browser): an element that does not fit a
+connection's queue is dropped *for that subscription* and counted, and the connection is woken to
+send `lagged`; a fan-out that falls behind its broadcast channel tells every subscription how
+much it lost. The last subscription out removes the fan-out, so a stream nobody watches costs
+nothing beyond what it cost before.
+
+#### Limits
+
+`LiveLimits` is configuration with survivable defaults, set on `AppMounts::with_live_limits`:
+64 subscriptions per connection (`too_many_subscriptions`, connection kept), 16 connections per
+user per application (`too_many_connections`, then closed; anonymous connections are not
+counted), 64 KB per client frame (`too_large`, not read, connection kept — the transport's own
+cap sits at four times that, at least 1 MB, so a frame over the limit is answered rather than hung
+up on), a WebSocket ping every 30 s and a close with `idle` after 90 s of silence (a browser pongs
+by itself, so only a dead connection is idle). Every clock is a parameter, which is how the tests
+run in milliseconds.
+
+#### The client
+
+The generated helper (§13.1) has `LiveConnection`: lazy (no socket until the first
+`subscribe`, closed again after the last), one per client, reconnecting with a capped exponential
+backoff with jitter and resubscribing everything, after which every subscriber is told
+`resync()` — delivery is at-most-once, so anything built from earlier elements may be stale. A
+subscription refused before `ready`, or `revoked`, is ended and handed to its `error` handler and
+is not asked for again. `client.live.<stream>.subscribe(handlers)` is typed from the element type
+— for a `single` or a `user` stream, which name no topic; a `row` stream's accessor is a
+`LiveRowStream`, `subscribe(topic, handlers)`, and `topic(key)` answers one row's topic as a
+`LiveStream` (the same object for the same key, so a hook can depend on it). The topic travels in
+the `subscribe` frame and again after a reconnect. Envelope types are the stream's name in
+PascalCase (`job_status` → `JobStatusEnvelope`). `connection.status` is
+`connecting | open | reconnecting`. A React app also gets `src/feldspar/live-react.ts`:
+`useStream(accessor, onElement)` (closed on unmount, the latest handler called without
+re-subscribing, returning `{ status, error }`), `useLatest(accessor)` (the latest element or
+`undefined` — a progress bar) and `useLiveStatus`, named in the scaffold's `AGENTS.md`. It
+imports the client only when the app exposes a stream, so a project with none still builds
+under `noUnusedLocals`.
+
+#### Admin
+
+The Streams list shows each stream's **subscribers** — live subscriptions from applications'
+pages on this server, from the hub — beside the counters, and `listStreams`, `getStream` and
+`streamStatus` carry `subscribers` (and the stream's `topics`). The stream form renders the
+internal provider from its declaration (`table` shown only for `row` topics, by `show_if`). The
+Observe screen has a **topic** column for a stream with topics, headed by what a topic is
+(`Topic (user)`, `Topic (boards row)`), and a box that narrows the tail to topics containing what
+is typed. The trigger form's action list offers `publish`, its stream picker filled in.
+
+**Tests.** `sc-live` unit-tests the frame round trips (an unknown `type` is `invalid`), the
+subscription states, the topic index and `may_subscribe` as a table; its `tests/hub.rs` runs the
+fan-out against a real supervisor and scripted provider (two connections, the replay meeting the
+deliveries exactly, a full queue as `lagged`, the per-user limit, a sign-out through
+`SessionStore`). `sc-server`'s `app_live.rs` drives real WebSocket clients against the assembled
+router and a real database: two subscriptions on one socket, one `unavailable` for forbidden,
+unexposed and misspelt, the Origin rule (sibling subdomain with a shared cookie, no Origin, a
+native app, a preview host, an admin socket), re-checking (a lowered role and a raised floor are
+`revoked`, a session deleted behind the store closes, a sign-out closes at once), every limit, and
+a stream that starts after it was subscribed to. L2's `app_live_topics.rs`, two users on two
+connections: every refused publish; a `user` stream reaching only its own user, including
+through what is retained; a `row` topic decided by the REST read on a runtime-checked table
+(through a `shares` table) and an RLS table, a missing row the same `unavailable` as a forbidden
+one, a table outside the app absent; removing a share revoking at once with the clock set to an
+hour; a workflow started by one user telling only that user; ten `run_js_code` publishes in
+order; the action list's `publish`; and a table trigger still firing while the hub observes its
+table. `tutorial_live.rs` part 2 walks `docs/tutorial-live.md`'s second part, type-checking its
+component against the generated runtime.
+
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
 A `CodeAdapter` maintains an open interpreter for a guest language, inside which the catalog
@@ -9621,11 +9978,11 @@ does: a load answers what a package supplies as data (§15.1), and the registry 
 that. What was left over — run this body, under these bounds, against these hosts — is
 `run_code`, and it is the same `CodeCall` in either language.
 
-**Nothing below the plans is per-language.** `CodeCall`'s `code`, its bindings, its five borrowed
-host handles and its six budgets are the same question in any language, so a second adapter needs
-no data layer, no query builder, no ownership rule and no row layer: `TableHost`,
-`CodeFetchHost`, `FileStoreHost`, `TriggerRunHost` and the module functions are used exactly as
-`run_js_code` uses them. That is also what makes the two languages agree about authority, budgets
+**Nothing below the plans is per-language.** `CodeCall`'s `code`, its bindings, its six host
+handles (five borrowed, and the live host, §14.10) and their budgets are the same question in any
+language, so a second adapter needs no data layer, no query builder, no ownership rule and no row
+layer: `TableHost`, `CodeFetchHost`, `FileStoreHost`, `TriggerRunHost`, the module functions and
+the live hub are used exactly as `run_js_code` uses them. That is also what makes the two languages agree about authority, budgets
 and events without anybody keeping them in step — the same question asked from a Python body and
 a JavaScript body produces the same rows because it produces the same **plan**.
 
@@ -10106,8 +10463,8 @@ not one of the nine is refused **by name** rather than passed as `None`. This is
 the Python plugin API is better than the JavaScript one rather than merely different, and it is
 free — Python has `inspect.signature` and JavaScript does not.
 
-**Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs` and `sc.trigger` are the same
-five surfaces a code body has, built by the same `sc_core_actions::CodeSurfaces`, so a plugin's
+**Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs`, `sc.trigger` and `sc.live` are
+the same surfaces a code body has, built by the same `sc_core_actions::CodeSurfaces`, so a plugin's
 write carries the event's caller and this trigger's chain and its `fetch` is counted on the run's
 budget. §15.1's `File`/`User`/`getState` stubs, and the v1 `Table` and `Field` beside them, exist
 because v1's API is v1's; a Python plugin has no v1 to be compatible with, so it is handed the

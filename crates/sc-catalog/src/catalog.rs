@@ -78,14 +78,22 @@ pub struct Catalog {
     /// attempted"; the definition list plus [`file_store`](Self::file_store)
     /// distinguishes those.
     file_store_errors: RwLock<HashMap<String, String>>,
-    /// Who observes row writes (§10.2's emit seam), installed once at boot with
-    /// `sc-action`'s trigger dispatcher — `None` in a process that has none (a
-    /// build tool, a test), where every write is simply unobserved.
+    /// Who observes row writes (§10.2's emit seam): `sc-action`'s trigger
+    /// dispatcher, and the live hub's row-topic re-checks (TODO.md "Live
+    /// updates" §5) — empty in a process that has neither (a build tool, a
+    /// test), where every write is simply unobserved.
     ///
-    /// The catalog holds it because it is what the row layer (layer 8) and
-    /// `sc-action` (layer 6) both already have: the write cannot name the
-    /// dispatcher without inverting the layering, and this is the inversion.
-    table_events: RwLock<Option<Arc<dyn crate::events::TableEvents>>>,
+    /// A **list**, because there is more than one kind of observer and
+    /// installing the second must not switch the first off: a trigger that
+    /// stopped firing the day live updates were turned on would be a silent
+    /// outage. A write asks every listener whether it observes and hands the
+    /// event only to those that do.
+    ///
+    /// The catalog holds them because it is what the row layer (layer 8),
+    /// `sc-action` (layer 6) and `sc-live` (layer 7) all already have: the write
+    /// cannot name any of them without inverting the layering, and this is the
+    /// inversion.
+    table_events: RwLock<Vec<(String, Arc<dyn crate::events::TableEvents>)>>,
     /// The `_fd_fields` overlay rows that did not cleanly merge on the last
     /// [`reload`](Self::reload) (design §3.2) — a dangling row, a rich type that
     /// does not fit its column, a `Key` with no foreign key behind it. Rebuilt
@@ -95,7 +103,7 @@ pub struct Catalog {
     /// Who observes **schema** changes (Phase 7's seam), installed once at boot
     /// with `sc-server`'s mount registry — `None` in a process that has none.
     ///
-    /// Held here for the reason [`table_events`](Catalog::set_table_events) is:
+    /// Held here for the reason [`table_events`](Catalog::add_table_events) is:
     /// the schema editor (layer 8) and the mount registry (layer 10) cannot name
     /// each other, and the catalog is what they both already hold.
     schema_observer: RwLock<Option<Arc<dyn crate::observer::SchemaObserver>>>,
@@ -103,13 +111,23 @@ pub struct Catalog {
     /// (TODO "Modules in-process", §4a) — `None` in a process with no modules
     /// installed, or none at all.
     ///
-    /// Held here for the reason [`table_events`](Catalog::set_table_events) is,
+    /// Held here for the reason [`table_events`](Catalog::add_table_events) is,
     /// and it is the same inversion. What implements it is `sc-module`'s worker
     /// pool; what needs it is [`prefetch_bindings`](crate::prefetch_bindings)
     /// — which resolves a formula's hoisted calls and is called from three
     /// crates, none of which can name `sc-module` — and `run_js_code`, in a
     /// fourth. The catalog is what all four already hold.
     module_functions: RwLock<Option<Arc<dyn sc_expr::ModuleFnHost>>>,
+    /// Live updates' publishing side (TODO.md "Live updates" §7) — `None` in a
+    /// process with no live hub (a build tool, most tests), where `live` is not
+    /// bound in a code body and the `publish` action says there is nothing to
+    /// publish to.
+    ///
+    /// Held here for the reason the module functions are: the `publish` action
+    /// (layer 8), a JavaScript body's op (layer 3's runtime) and a Python body
+    /// all need it, and what implements it is `sc-live`'s hub, which none of
+    /// them can name.
+    live_host: RwLock<Option<Arc<dyn sc_expr::LiveHost>>>,
     /// The **models** a formula's `predict("…")` and a code body's model handle
     /// reach (milestone 31 §4) — `None` in a process with no model support.
     ///
@@ -183,7 +201,7 @@ pub struct Catalog {
     /// The serialised schema snapshot for [`generation`](Catalog::generation),
     /// built once and shared by every run at that generation.
     ///
-    /// Held here for [`table_events`](Catalog::set_table_events)' reason,
+    /// Held here for [`table_events`](Catalog::add_table_events)' reason,
     /// inverted the same way: what *builds* it is `sc-api` (layer 8), which
     /// knows what v1 calls each of a field's properties; what needs it is every
     /// code body, workflow step and module action; and the catalog is what they
@@ -191,7 +209,7 @@ pub struct Catalog {
     /// unusable rather than wrong — [`code_schema`](Catalog::code_schema) hands
     /// back nothing once the generation has moved on.
     ///
-    /// [`table_events`]: Catalog::set_table_events
+    /// [`table_events`]: Catalog::add_table_events
     code_schema: RwLock<Option<Arc<sc_expr::SchemaSnapshot>>>,
     /// Whether anything in this database wants the workflow engine, and when
     /// ([`crate::RunWakeups`]).
@@ -202,7 +220,7 @@ pub struct Catalog {
     /// hold. Without it a deployment with no runs at all pays an SQL round trip
     /// every few seconds to be told so.
     ///
-    /// [`table_events`]: Catalog::set_table_events
+    /// [`table_events`]: Catalog::add_table_events
     run_wakeups: crate::RunWakeups,
 }
 
@@ -263,6 +281,7 @@ impl Catalog {
             field_overlay_issues: RwLock::new(Vec::new()),
             schema_observer: RwLock::new(None),
             module_functions: RwLock::new(None),
+            live_host: RwLock::new(None),
             model_host: RwLock::new(None),
             admin_host: RwLock::new(None),
             formula_evaluator: RwLock::new(None),
@@ -271,7 +290,7 @@ impl Catalog {
             public_origin: RwLock::new(None),
             host_config: RwLock::new(sc_types::Attrs::new()),
             host_llm_provider: RwLock::new(None),
-            table_events: RwLock::new(None),
+            table_events: RwLock::new(Vec::new()),
             generation: AtomicU64::new(0),
             code_schema: RwLock::new(None),
             run_wakeups: crate::RunWakeups::new(),
@@ -942,8 +961,8 @@ impl Catalog {
     /// Install the listener for schema changes — `sc-server`'s mount registry,
     /// once, at boot (Phase 7's schema seam).
     ///
-    /// Replaces any previous one, for the reason
-    /// [`set_table_events`](Self::set_table_events) does.
+    /// Replaces any previous one rather than refusing: a process installs
+    /// exactly one, and a test that installs a second means the second.
     pub fn set_schema_observer(&self, observer: Arc<dyn crate::observer::SchemaObserver>) {
         if let Ok(mut guard) = self.schema_observer.write() {
             *guard = Some(observer);
@@ -1513,26 +1532,48 @@ impl Catalog {
         Ok(())
     }
 
-    /// Install the listener for row writes — `sc-action`'s trigger dispatcher,
-    /// once, at boot (§10.2's emit seam).
+    /// Add a listener for row writes under `key` — `sc-action`'s trigger
+    /// dispatcher as [`TRIGGER_EVENTS`](crate::events::TRIGGER_EVENTS) and the
+    /// live hub as [`LIVE_EVENTS`](crate::events::LIVE_EVENTS), once each, at
+    /// boot (§10.2's emit seam).
     ///
-    /// Replaces any previous one rather than refusing: a process installs exactly
-    /// one, and a test that installs a second means the second.
-    pub fn set_table_events(&self, events: Arc<dyn crate::events::TableEvents>) -> Result<()> {
+    /// **Adds** beside listeners under other keys: the seam has more than one
+    /// observer, and a second kind of listener switching the first off would
+    /// silently stop every table trigger. **Replaces** a listener already under
+    /// the same key: a process (or a test) that installs a second trigger
+    /// dispatcher means the second, and two would fire every trigger twice.
+    pub fn add_table_events(
+        &self,
+        key: &str,
+        events: Arc<dyn crate::events::TableEvents>,
+    ) -> Result<()> {
         let mut guard = self
             .table_events
             .write()
             .map_err(|_| Error::msg("catalog table-events lock poisoned"))?;
-        *guard = Some(events);
+        match guard.iter_mut().find(|(existing, _)| existing == key) {
+            Some(slot) => slot.1 = events,
+            None => guard.push((key.to_owned(), events)),
+        }
         Ok(())
+    }
+
+    /// Take the listener under `key` off the seam again. `false` when there
+    /// was none.
+    pub fn remove_table_events(&self, key: &str) -> bool {
+        let Ok(mut guard) = self.table_events.write() else {
+            return false;
+        };
+        let before = guard.len();
+        guard.retain(|(existing, _)| existing != key);
+        guard.len() != before
     }
 
     /// Install the module functions — `sc-server`'s `ModuleServices`, at boot
     /// and again after every module change (install, configure, delete, Reload).
     ///
-    /// Replaces any previous one rather than refusing, for
-    /// [`set_table_events`](Catalog::set_table_events)' reason: the module set
-    /// is rebuilt whole on every change, so the second install *is* the answer.
+    /// Replaces any previous one rather than refusing: the module set is
+    /// rebuilt whole on every change, so the second install *is* the answer.
     pub fn set_module_functions(&self, functions: Arc<dyn sc_expr::ModuleFnHost>) -> Result<()> {
         let mut guard = self
             .module_functions
@@ -1551,6 +1592,26 @@ impl Catalog {
     /// is a formula that fails naming its call rather than every query failing.
     pub fn module_functions(&self) -> Option<Arc<dyn sc_expr::ModuleFnHost>> {
         self.module_functions.read().ok()?.clone()
+    }
+
+    /// Install live updates' publishing side — `sc-server`'s live hub, at boot.
+    ///
+    /// Replaces any previous one: a process has one hub, and a test that
+    /// installs a second means the second.
+    pub fn set_live_host(&self, host: Arc<dyn sc_expr::LiveHost>) -> Result<()> {
+        let mut guard = self
+            .live_host
+            .write()
+            .map_err(|_| Error::msg("catalog live-host lock poisoned"))?;
+        *guard = Some(host);
+        Ok(())
+    }
+
+    /// The installed live host, cloned out of the lock — `None` where nobody
+    /// installed one. A poisoned lock reads as "there is none", for
+    /// [`module_functions`](Catalog::module_functions)' reason.
+    pub fn live_host(&self) -> Option<Arc<dyn sc_expr::LiveHost>> {
+        self.live_host.read().ok()?.clone()
     }
 
     /// Install the models — `sc-server`'s `ModelServices`, at startup and
@@ -1616,39 +1677,52 @@ impl Catalog {
 
     /// Whether anything listens for `op` on `table` — the question the row layer
     /// asks **before** doing any work for the feature, so a write nobody observes
-    /// pays one lock and one lookup rather than a query.
+    /// pays one lock and a lookup per listener rather than a query.
     ///
     /// A poisoned lock reads as "nobody listens": this is asked on the write
     /// path, where the honest answer to "is the listener registry broken" is to
     /// let the write proceed unobserved rather than to fail it.
     pub fn observes_writes(&self, table: &str, op: crate::events::WriteOp) -> bool {
-        match self.listener() {
-            Ok(Some(events)) => events.observes(table, op),
-            _ => false,
+        match self.table_events.read() {
+            Ok(guard) => guard.iter().any(|(_, events)| events.observes(table, op)),
+            Err(_) => false,
         }
     }
 
-    /// Hand one committed write to the listener, if there is one.
+    /// Hand one committed write to every listener that observes it.
     ///
     /// An `Err` is the *dispatch* failing, never the write — which has already
     /// happened by the time this is called (decision 1: after commit). The caller
-    /// reports it and returns the row.
+    /// reports it and returns the row. Every observing listener is handed the
+    /// write even when an earlier one failed — one listener's error must not
+    /// starve another — and the first error is the one returned.
     pub async fn emit_write(&self, write: crate::events::TableWrite<'_>) -> Result<()> {
-        match self.listener()? {
-            Some(events) => events.emit(self, write).await,
+        let listeners: Vec<Arc<dyn crate::events::TableEvents>> = self
+            .listeners()?
+            .into_iter()
+            .filter(|events| events.observes(&write.table.name, write.op))
+            .collect();
+        let mut first_error = None;
+        for events in listeners {
+            if let Err(e) = events.emit(self, write.clone()).await {
+                first_error.get_or_insert(e);
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
             None => Ok(()),
         }
     }
 
-    /// The installed listener, **cloned out of the lock**: dispatch runs actions,
+    /// The installed listeners, **cloned out of the lock**: dispatch runs actions,
     /// which write rows, which come back here — so the guard must not be held
     /// across the await.
-    fn listener(&self) -> Result<Option<Arc<dyn crate::events::TableEvents>>> {
+    fn listeners(&self) -> Result<Vec<Arc<dyn crate::events::TableEvents>>> {
         let guard = self
             .table_events
             .read()
             .map_err(|_| Error::msg("catalog table-events lock poisoned"))?;
-        Ok(guard.clone())
+        Ok(guard.iter().map(|(_, events)| Arc::clone(events)).collect())
     }
 
     /// The connected file store with the given name, if any.

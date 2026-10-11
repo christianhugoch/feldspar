@@ -53,14 +53,16 @@ mod app_file_access;
 mod app_i18n;
 #[path = "app_invite.rs"]
 mod app_invite;
+#[path = "app_live.rs"]
+mod app_live;
+#[path = "app_live_topics.rs"]
+mod app_live_topics;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_signup.rs"]
 mod app_signup;
 #[path = "app_static_dirs.rs"]
 mod app_static_dirs;
-#[path = "app_streams.rs"]
-mod app_streams;
 #[path = "app_trigger_api.rs"]
 mod app_trigger_api;
 #[path = "backup_api.rs"]
@@ -187,6 +189,8 @@ mod saltcorn_ui_render;
 mod schema_edit_api;
 #[path = "settings_admin_api.rs"]
 mod settings_admin_api;
+#[path = "shared_session_cookie.rs"]
+mod shared_session_cookie;
 #[path = "stan_models.rs"]
 mod stan_models;
 #[path = "stream_triggers.rs"]
@@ -209,6 +213,8 @@ mod tls_live_domains;
 mod tls_serving;
 #[path = "trigger_admin_api.rs"]
 mod trigger_admin_api;
+#[path = "tutorial_live.rs"]
+mod tutorial_live;
 #[path = "tutorial_workflows.rs"]
 mod tutorial_workflows;
 #[path = "view_app.rs"]

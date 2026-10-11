@@ -265,6 +265,7 @@ impl Inner {
             files: hosts.files.is_some(),
             triggers: hosts.triggers.is_some(),
             module_fns: hosts.module_fns.is_some(),
+            live: hosts.live.is_some(),
         };
         // Asked of the **real** hosts here, while they are still borrowed: the
         // guest's `fs(name)` and `trigger(name)` are ordinary synchronous calls,
@@ -361,6 +362,7 @@ impl Inner {
                     let files = hosts.files;
                     let triggers = hosts.triggers;
                     let module_fns = hosts.module_fns;
+                    let live = hosts.live;
                     // The task-local §6 reads: everything this call leads to is
                     // nested inside this run.
                     serving.push(SERVING.scope((), async move {
@@ -391,6 +393,12 @@ impl Inner {
                                 None => Err(Error::msg(
                                     "this code body cannot call module functions",
                                 )),
+                            },
+                            Surface::Live => match live {
+                                Some(live) => publish(live.as_ref(), &plan),
+                                None => {
+                                    Err(Error::msg("this code body cannot publish to a stream"))
+                                }
                             },
                         };
                         // A dropped receiver means the run stopped waiting for
@@ -463,6 +471,29 @@ impl Drop for Inner {
 /// a thread that has not yet said it is free would make that run spawn a second
 /// one. The job channel is unbounded, so a run handed to a thread that is still
 /// inside this iteration simply waits in its inbox for the next `recv`.
+/// One `live.publish` from Python: the plan the package sends, handed to the
+/// live host — the JavaScript op's reading of the same three fields, so the two
+/// languages agree on what a topic may be.
+fn publish(live: &dyn sc_expr::LiveHost, plan: &Json) -> Result<Json> {
+    let stream = plan
+        .get("stream")
+        .and_then(Json::as_str)
+        .ok_or_else(|| Error::invalid("live.publish needs the stream's name"))?;
+    let topic = match plan.get("topic") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(topic)) => Some(topic.clone()),
+        Some(Json::Number(n)) => Some(n.to_string()),
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "live.publish takes a topic that is a string or a number, not {other}"
+            )));
+        }
+    };
+    let value = plan.get("value").cloned().unwrap_or(Json::Null);
+    live.publish(stream, topic, value)
+        .map(|topic| topic.map_or(Json::Null, Json::String))
+}
+
 fn thread_loop(inbox: &Receiver<Job>, mine: &Sender<Job>, owner: &Weak<Inner>) {
     while let Ok(Job::Run(job)) = inbox.recv() {
         let RunJob {

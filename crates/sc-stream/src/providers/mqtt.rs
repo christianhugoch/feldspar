@@ -935,12 +935,14 @@ mod tests {
         let mut wrong_type = boiler();
         wrong_type.insert(
             CFG_KEYS.to_owned(),
-            json!([{ "name": "where", "type": "geometry" }]),
+            json!([{ "name": "where", "type": "hologram" }]),
         );
         // An unknown type name survives the parse (it is `BasicType::Other`)
-        // and is refused by the element type, naming both.
+        // and is refused by the element type, naming both. (Not `geometry`,
+        // which has been a known type — GeoJSON on the wire — since the
+        // analytics milestones.)
         let err = Mqtt.validate(&wrong_type).unwrap_err().to_string();
-        assert!(err.contains("`where`") && err.contains("geometry"), "{err}");
+        assert!(err.contains("`where`") && err.contains("hologram"), "{err}");
     }
 
     // --- The settings validation --------------------------------------------

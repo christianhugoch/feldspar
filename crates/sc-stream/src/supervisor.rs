@@ -70,7 +70,7 @@ use sc_error::Result;
 
 use crate::envelope::{Element, Envelope};
 use crate::observer::StreamObserver;
-use crate::provider::StreamSink;
+use crate::provider::{Replay, StreamSink};
 use crate::registry::StreamRegistry;
 use crate::running::{RunningStream, StreamStatus};
 use crate::store::list_streams;
@@ -279,17 +279,24 @@ impl StreamSupervisor {
     /// the [`tick`](StreamSupervisor::tick)s that will service it.
     pub async fn start_at(&self, row: Stream, now: DateTime<Utc>) -> Result<Arc<RunningStream>> {
         let registry = self.registry();
-        let (provider, element_type, failure) = match registry.require(&row.provider) {
+        let (provider, element_type, replay, failure) = match registry.require(&row.provider) {
             // `resolve_element_type`, not `element_type`: a module's provider
             // answers the synchronous one from what it last resolved, and this
             // — a start, a restart, a module change — is where that gets
             // filled in. Every compiled-in provider's default is the same pure
             // call.
-            Ok(provider) => match provider.resolve_element_type(&row.configuration).await {
-                Ok(element_type) => (Some(Arc::clone(provider)), Some(element_type), None),
-                Err(e) => (None, None, Some(sc_error::format_chain(&e))),
+            Ok(provider) => match (
+                provider.resolve_element_type(&row.configuration).await,
+                provider.replay(&row.configuration),
+            ) {
+                (Ok(element_type), Ok(replay)) => {
+                    (Some(Arc::clone(provider)), Some(element_type), replay, None)
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    (None, None, Replay::Ring, Some(sc_error::format_chain(&e)))
+                }
             },
-            Err(e) => (None, None, Some(sc_error::format_chain(&e))),
+            Err(e) => (None, None, Replay::Ring, Some(sc_error::format_chain(&e))),
         };
 
         let status = match &failure {
@@ -309,6 +316,7 @@ impl StreamSupervisor {
             row,
             provider,
             element_type,
+            replay,
             status,
             self.config.channel_capacity,
             self.config.ring_capacity,
@@ -557,11 +565,15 @@ impl StreamSupervisor {
         // rename is deliberately allowed to reach a running connection's next
         // reconnect without restarting it now.
         match provider
-            .subscribe(&running.name(), &configuration, sink)
+            .subscribe(&running.name(), &configuration, Arc::clone(&sink))
             .await
         {
             Ok(subscription) => {
                 running.set_subscription(Some(subscription));
+                // Held beside the subscription for the provider whose elements
+                // Saltcorn itself publishes (`internal`): the same sink, so a
+                // published element takes the provider's path exactly.
+                running.set_sink(Some(sink));
                 running.set_status(StreamStatus::Running { since: now }, None);
             }
             Err(e) => {

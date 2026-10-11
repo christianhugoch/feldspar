@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -218,6 +219,13 @@ pub struct AppMounts {
     /// from. `None` is a process with no streams installed, where the Streams
     /// tab says so rather than pretending.
     streams: Option<crate::streams::StreamServices>,
+    /// The live hub (TODO.md "Live updates"): every application's live
+    /// connections and the fan-outs feeding them. Always present — a server
+    /// with no streams still answers `{mount}/live`, with `unavailable` for
+    /// every subscription — and here for the reason the stream services are:
+    /// the router serves the socket from this handle, and the admin's Streams
+    /// list reads the subscriber counts through it.
+    live: crate::live::LiveServices,
     /// The Python runtime this process built from its own flags (§15), for the
     /// **one** thing that needs the runtime rather than the adapter: the
     /// diagnostics on Settings → Development, which report which of §7's states
@@ -264,6 +272,9 @@ pub struct AppMounts {
     /// Where the admin UI is served (Settings → Development): live, because
     /// moving it is a save rather than a restart.
     admin: crate::admin_host::AdminHost,
+    /// Whether the session cookie is scoped to the base domain rather than to
+    /// the host that set it (Settings → Development): live for the same reason.
+    shared_session_cookie: AtomicBool,
 }
 
 /// One run's preview of one application.
@@ -308,6 +319,7 @@ impl AppMounts {
             modules: None,
             models: None,
             streams: None,
+            live: crate::live::LiveServices::default(),
             python: None,
             saltcorn_ui_dir: None,
             analytics_dir: None,
@@ -318,6 +330,7 @@ impl AppMounts {
             preview_idle: Duration::from_secs(crate::config::DEFAULT_PREVIEW_IDLE_MINUTES * 60),
             target_builds: crate::target_builds::TargetBuilds::default(),
             admin: crate::admin_host::AdminHost::default(),
+            shared_session_cookie: AtomicBool::new(false),
         }
     }
 
@@ -337,6 +350,19 @@ impl AppMounts {
     pub fn set_admin_subdomain(&self, subdomain: Option<String>) {
         self.admin.set_subdomain(subdomain);
         self.certificate_changed();
+    }
+
+    /// Whether a session cookie set from the next response on is scoped to the
+    /// base domain, so one sign-in reaches the admin UI and every application.
+    pub fn shared_session_cookie(&self) -> bool {
+        self.shared_session_cookie.load(Ordering::Relaxed)
+    }
+
+    /// Scope session cookies to the base domain (`true`) or to the host that
+    /// sets them (`false`). Cookies already handed out keep their scope: the
+    /// caller ends every session when this changes.
+    pub fn set_shared_session_cookie(&self, shared: bool) {
+        self.shared_session_cookie.store(shared, Ordering::Relaxed);
     }
 
     /// The host the admin UI is served on, if this deployment has a base domain.
@@ -596,6 +622,18 @@ impl AppMounts {
     /// The stream services, if this server has them.
     pub fn streams(&self) -> Option<&crate::streams::StreamServices> {
         self.streams.as_ref()
+    }
+
+    /// Enforce `limits` on every live connection, replacing the defaults — a
+    /// test turns the clocks down to milliseconds with this.
+    pub fn with_live_limits(mut self, limits: sc_live::LiveLimits) -> AppMounts {
+        self.live = crate::live::LiveServices::new(limits);
+        self
+    }
+
+    /// The live hub.
+    pub fn live(&self) -> &crate::live::LiveServices {
+        &self.live
     }
 
     /// Attach the Python runtime, so the diagnostics screen can say which of

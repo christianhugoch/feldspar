@@ -45,6 +45,203 @@ same Expo project. On Linux, the iOS targets show as not ready.
 - Project paths that contain spaces now build.
 - Tests: `crates/sc-module/tests/bundled_react_native.rs`.
 
+## Live updates L2: internal streams, topics and server-side publishing
+
+Saltcorn can now say things to an application's page itself — a toast when a job starts, a
+progress bar while it runs — to exactly the users who should hear them. TODO.md L2.1–L2.11, and
+L3.2, which L2.6 needed first.
+
+- **The `internal` stream provider** (`sc-stream::providers::internal`, always built in):
+  declared keys, `topics` (`single | user | row`, `table` shown for `row`), `retain_last` +
+  `retain_ttl_s`, and — read from L4 — `client_publish`, `presence`, `presence_fields`. A new
+  `StreamProvider::validate_in(config, catalog)` save-time hook refuses a `row` table that is
+  missing or has no one-column key, and a presence field that is not a column of `users` (or is
+  its password hash). Two more provider hooks, each defaulting to the old behaviour:
+  `replay` (`Ring | Nothing | Latest { ttl, max_topics }`) and `accepts_publish`.
+- **Publishing**: `RunningStream::publish_value(topic, value)` delivers through the sink the
+  running subscription was handed (the supervisor now keeps it beside the subscription), so the
+  rate cap, stamp, ring, broadcast and trigger bridge all apply. It refuses, by name, a stream
+  Saltcorn may not publish to, one not running here, a topic of the wrong kind, and a value that
+  does not match the element type (counted as `malformed`). `LiveHub::publish`/`topics` find the
+  stream by name through the supervisor (`LiveHub::set_streams`). **Deviation from the plan**:
+  no separate name → sink registry; a provider-owned one would be orphaned by a module change and
+  a process-wide one would collide between two servers in one process.
+- **Retaining the latest element** (`sc-stream::Retained`): the latest envelope per topic, for a
+  TTL and at most 10 000 topics, kept under the same lock as the ring and handed out with it, so
+  the fan-out's copy never gaps or doubles; sent after `ready` and counted in `replayed`.
+- **Topics** (`sc-live::access`): `may_open` (exposure, stored, floor) and
+  `may_subscribe(facts, caller, topic)` → a `Grant` naming the routing topic. A `user` stream puts
+  each subscriber on their own id (anonymous is `unavailable`; naming a topic is `invalid`). A
+  `row` stream needs **the application's REST read of that row** to return it —
+  `sc_api::row_readable_as`, i.e. `read_row_values_as` with `pk = key`, so the floor, the
+  ownership formula and RLS decide exactly as REST does — and a row of a table outside the app's
+  subset is absent. Missing, forbidden and absent rows are one `unavailable`.
+- **Re-checking row topics on writes**: a row subscription watches its table and every table its
+  ownership formula reads (`sc_live::read_rule_tables`, from the formula's Ⱶ paths and `Ↄ`
+  aggregations). The hub is a second `TableEvents` listener that observes only watched tables and
+  hands a write to the watching connections as a `Touch`; they re-ask the REST read off the write
+  path and send `revoked`. A write inside a `SharedTx` is handed over again two seconds later
+  until L3.1 publishes after commit.
+- **The write seam holds several listeners** (L3.2): `Catalog::add_table_events(key, listener)`
+  replaces `set_table_events` — the trigger dispatcher under `TRIGGER_EVENTS`, the hub under
+  `LIVE_EVENTS`; the same key replaces, a different key adds; `observes_writes` is the OR and a
+  write goes only to the listeners that observe it, each its own copy (`TableWrite` is `Clone`),
+  one's failure not starving the next. Every caller updated.
+- **The `publish` action** (`sc-core-actions`): `stream` (a picker the server fills with the
+  internal streams, `INTERNAL_STREAMS_QUERY`), `topic` (formula; blank is `user.id` on a `user`
+  stream), `value` (a formula per key). As a workflow step it tells the user who started the run;
+  a per-user publish with no user is an error naming the trigger.
+- **`live.publish(stream, topic, value)` in code bodies**: `sc_expr::LiveHost` (with
+  `LiveTopics`), installed on the catalog (`Catalog::set_live_host`) by the router, is a sixth
+  surface. JavaScript: a synchronous op, a budget of `MAX_LIVE_PUBLISHES` (1 000) per run, two
+  arguments for a stream without topics. Python: `Surface::Live`, `__sc_live`, `LiveError`,
+  `live = Live()` in the `saltcorn` package. Not bound in formulas.
+- **Client**: `StreamExport.topics` (`StreamTopics`); a `row` stream's accessor is a
+  `LiveRowStream` (`subscribe(topic, handlers)`, `topic(key)` memoised); the topic is sent with
+  `subscribe` and again on reconnect; envelope types are PascalCase (`JobStatusEnvelope`, not
+  `Job_statusEnvelope`). React: `useLatest(accessor)`. All four UIs' `helper.ts` regenerated.
+- **Fixed from L1**: `live-react.ts` imported `api` even for an app with no streams, so every
+  generated React app without one failed to build under `noUnusedLocals`; the scaffold's file
+  list tests had not been told about `live-react.ts`.
+- **Admin**: the Observe screen has a topic column (`Topic (user)`, `Topic (boards row)`) and a
+  topic filter box (`readTopics`, `topicHeading`, `filterByTopic` in `streams.ts`, translated in
+  all five catalogues); the stream form renders the internal provider (the conditional `table`
+  field); the trigger form offers `publish`. The Streams notice for a `--no-default-features`
+  build now says only MQTT is missing.
+- **Docs**: TECHNICAL_DESIGN §14.10 (internal streams, topics, retaining, re-checks, publishing,
+  client, admin, tests), §14.3, §10.1 (`publish`, the `live` surface), §10.2 (the keyed write
+  seam), §15, §2; `docs/tutorial-live.md` part 2; `live` in tutorial-python and tutorial-triggers.
+- **Tests**: `sc-stream` (the provider's settings, refusals and topic/replay answers; `Retained`;
+  a retaining running stream; server-side topic checks), `sc-live` (`may_subscribe` as tables for
+  user and row topics), `sc-catalog` `table_events.rs` (two keys both hear, same key replaces, a
+  failure does not starve), `sc-expr` (a JS loop publishing in order, a catchable refusal, no
+  `live` without a host), `sc-python` `python_live.rs` (type-checked here; this machine has no
+  libpython, CI links and runs it), `sc-api` (`live_connection` row topics on the wire and after a
+  reconnect; `typescript_typecheck` per-user and per-row accessors including what must not
+  compile), `sc-server` `app_live_topics.rs` (8 socket tests, two users) and `tutorial_live.rs`
+  part 2. A browser walk on a scratch database checked the stream form, the Observe topic column
+  and filter, and the tutorial's React component built and served: toasts and a progress bar for
+  one user, nothing for the other, the bar restored at once on a mid-job reload.
+- Also fixed: `sc-stream`'s MQTT test used `geometry` as an unknown type name, which it has not
+  been since the analytics milestones made it a known one.
+
+## Live updates L1: one live socket per page, with the access rules
+
+An application's page now holds **one** WebSocket, `GET {mount}/live`, carrying any number of
+subscriptions to the streams the app exposes. It replaces the per-stream
+`{mount}/streams/{name}/observe` socket and `observeStream_<name>()` (no compatibility: the
+prototype rule). TODO.md L1.1–L1.12.
+
+- **New crate `sc-live`** (layer 7, above `sc-stream` and `sc-auth`, below `sc-server`):
+  the protocol frames (tagged on `type`; an unknown or malformed client frame is an `invalid`
+  error frame, never a hang-up), a connection's `SubscriptionSet`, the `TopicIndex`,
+  `LiveLimits`, `may_subscribe` as a pure function tested as a table, and `LiveHub` — the
+  connection registry and one fan-out task per running stream that somebody watches, routing by
+  topic into bounded per-connection queues (overflow is counted and sent as `lagged`). The
+  fan-out keeps its own copy of the replay ring, so replay and delivery never gap or double.
+- **Wire contract change: the envelope gains an optional `topic`**, absent (not null) on a
+  stream without topics, so existing envelopes are byte-for-byte unchanged.
+  `StreamProvider::topic_spec` (`Single | User | Row | PerElementRow`, default `Single`) and
+  `RunningStream::topic_spec`. Until L2/L3, a stream declaring anything but `Single` is refused.
+- **Origin check on every WebSocket upgrade** (`security::upgrade_origin_allowed`): the live
+  socket and the admin's Observe, chat, LSP and fit-progress sockets. An `Origin` must be the
+  request's own host (a preview host is its own origin); with none, a session cookie is refused
+  unless the client says it is native. Closes the sibling-subdomain hole that *Share sign-in
+  between applications* opens.
+- **The socket authenticates with the app's REST function** (`app_caller`, now shared by both).
+  Anonymous holds the public role. Unknown, unexposed and below-`min_role` streams are one
+  `unavailable` frame. A disabled stream is waited for and followed (a second `ready`) when it
+  starts or restarts.
+- **Re-checking**: every `recheck_interval` (60 s) a connection re-reads its session, its app
+  mount and every subscription's access — `revoked`, or `signed_out` and closed.
+  `SessionStore` gains weak `SessionListener`s told on `logout`, `end_user_sessions` and
+  `end_all_sessions`; the hub is one, so a sign-out on this node closes that session's sockets
+  at once.
+- **Limits** (`AppMounts::with_live_limits`): 64 subscriptions per connection, 16 connections
+  per user per app, 64 KB frames, ping every 30 s, idle close at 90 s — each with its own error
+  code.
+- **Generated client**: `LiveConnection` in `helper.ts` (lazy, one per client, capped
+  exponential backoff with jitter, resubscribes and calls `resync`, does not re-ask for a
+  refused subscription) and `client.live.<stream>.subscribe(handlers)`, typed from the element
+  type. React apps get `src/feldspar/live-react.ts` (`useStream`, `useLiveStatus`, `live`),
+  documented in the scaffold's `AGENTS.md` and the runtime README. All four admin `client.ts`
+  copies regenerated.
+- **Admin**: the Streams list has a **Subscribers** column; `listStreams`, `getStream` and
+  `streamStatus` carry `subscribers` (and stream objects `topics`). The Application form's
+  Streams note names the live socket.
+- **Docs**: TECHNICAL_DESIGN §2 (tree, diagram, table), §13.2 rewritten, §14.3 note, new §14.10;
+  `docs/tutorial-streams.md` step 6 rewritten; new `docs/tutorial-live.md` part 1.
+- **Tests**: `sc-live` unit tests and `tests/hub.rs`; `sc-auth` listener test;
+  `sc-server` `app_live.rs` (16 tests with real WebSocket clients: subscriptions, one
+  `unavailable`, Origin incl. shared cookie and preview host, re-checks, every limit) replacing
+  `app_streams.rs`; `tutorial_live.rs`, the part-1 definition of done, which type-checks the
+  tutorial's own component against the generated runtime when `tsc` and React types are present;
+  `sc-api` `live_connection.rs` runs the generated `LiveConnection` under Node with a fake
+  socket; `typescript_typecheck` updated; existing admin socket tests send an `Origin`.
+
+## Live updates: design and plan (TODO.md)
+
+A new `TODO.md` (the analytics plan moved to `TODO-analytics.md`) for real-time updates
+in applications: toasts and progress from workflows, live kanban boards, collaborative
+documents with cursors, row-change notifications and external streams in the browser.
+Design only, no code.
+
+- **Everything is a stream with topics.** Streams gain a `TopicSpec`
+  (`Single | User | Row | PerElementRow`), with access decided per topic or per element
+  on top of the stream's `min_role`. Three new in-process providers: `internal`
+  (published by the `publish` action, `live.publish` in code bodies, or opt-in clients),
+  `table_changes` (committed row writes, checked per subscriber against the table's read
+  rule, with `enter`/`leave` for rows that cross a filter or an access boundary) and
+  `document` (Yjs documents in a `collab_doc` field, served with `yrs`).
+- **One multiplexed socket per page**, `{mount}/live`, replacing the per-stream app
+  socket. It checks `Origin` (needed now that a shared session cookie reaches sibling
+  subdomains) and re-checks access while open.
+- **Writes nobody watches stay free.** Live answers `TableEvents::observes` true only
+  while a connection is subscribed, and `emit` does no access work (fan-out runs off the
+  write path). The `TableEvents` slot holds one listener today (`set_table_events`
+  replaces it), so L3.2 makes it a list. Otherwise installing live would switch off
+  every table trigger.
+- Six milestones, L1–L6, ending with a Postgres LISTEN/NOTIFY bus for more than one
+  process.
+
+## Share sign-in between applications (Settings → Development)
+
+A checkbox on the Development tab, **Share sign-in between applications**
+(`shared_session_cookie`, off by default). Ticked, the session cookie is scoped to
+the base domain, so one sign-in reaches the admin UI and every application.
+
+- **`sc-config`**: the field in `development_section()`, with
+  `shared_session_cookie_from` / `shared_session_cookie` to read it (anything but
+  `true` is off).
+- **`sc-server`**: `AppMounts::shared_session_cookie` holds it live; `sc-cli`
+  reads it at boot, and `updateSettings` sets it on save. The router builds the
+  session cookie in one place (`session_cookie`), with `Domain` set to the base
+  domain or extra base domain the request's `Host` is under. A host under none
+  of them, such as an IP address, still gets a host-only cookie. The CSRF cookie
+  stays host-only.
+- **Changing it ends every session**, the saving admin's included: a cookie
+  already in a browser keeps its old scope. `updateSettings` answers with
+  `end_all_sessions` when the value changes. If the request carried a session
+  cookie, a response that sets or clears it also expires it in the other scope.
+  That way an ended cookie left in a browser can't shadow a new one.
+  `apply_session` now takes a `SessionClient` (native + `Host`) instead of
+  `native: bool`, and returns that extra `Set-Cookie`.
+- **Clear all** turns the live flag off with the rest of `_fd_config`.
+- **Admin UI** (`Settings.tsx`): the checkbox comes from the declaration as
+  every setting does. A save that changes it first opens a dialog, *You will be
+  signed out*, with *Cancel* / *Save and sign out*. After the save the page
+  reloads into the sign-in screen. `signsEveryoneOut` decides when to ask.
+- **Docs**: `TECHNICAL_DESIGN.md` (after "Where the admin UI is served"),
+  a troubleshooting row in `OPERATIONS.md` §8.5.
+- **Tests**: `sc-server/tests/shared_session_cookie.rs`, using a browser model
+  that keeps a cookie per name *and* domain. It covers: host-only by default;
+  the save ends every session and clears the admin's cookie in both scopes;
+  re-login gets `Domain=example.com`, also from another subdomain; that cookie
+  signs in on another host; the stale host-only cookie is expired at re-login;
+  an IP host stays host-only; an unchanged save ends nothing; turning it off
+  ends sessions again and returns to host-only. Plus a unit test in
+  `development.rs` and a vitest for `signsEveryoneOut`.
+
 ## Analytics A9.5–A9.6: applications documented, and their definition of done
 
 The last phase of milestone A9 (applications with a restricted Analytics UI). No

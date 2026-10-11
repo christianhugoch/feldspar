@@ -2948,10 +2948,18 @@ pub fn admin_handlers_with(
                     Some(_) => Some(Vec::new()),
                     None => None,
                 };
+                // The internal streams, for `publish`'s picker: streams are rows,
+                // so the declaration can only ask for them, and this is where it
+                // is answered — with an empty list on a server that has none,
+                // which is how the step palette learns `publish` has nothing
+                // to publish to yet.
+                let internal_streams = internal_stream_names(&catalog).await?;
                 let mut out = Vec::new();
                 for action in dispatcher.registry().all() {
-                    let spec =
-                        resolve_model_options(action.config_spec_for(&catalog, channel), &models);
+                    let spec = resolve_internal_streams(
+                        resolve_model_options(action.config_spec_for(&catalog, channel), &models),
+                        &internal_streams,
+                    );
                     out.push(json!({
                         "name": action.name(),
                         "description": say(action.description(), &ctx.locale),
@@ -4161,13 +4169,14 @@ pub fn admin_handlers_with(
                         "element_type_error": element_type_error,
                     }));
                 }
-                // An empty picker reads like a bug; the sentence reads like the
-                // decision it is.
-                let empty = providers.is_empty();
+                // A picker missing the one broker client the docs name reads
+                // like a bug; the sentence reads like the decision it is.
+                // (`internal` is always built in, so the picker is never
+                // empty — the notice is about what is not in it.)
                 Ok(HandlerResponse::ok(json!({
                     "providers": providers,
                     "builtins_compiled_out": !sc_stream::MQTT_COMPILED_IN,
-                    "notice": if empty && !sc_stream::MQTT_COMPILED_IN {
+                    "notice": if !sc_stream::MQTT_COMPILED_IN {
                         Json::String(sc_stream::BUILTINS_COMPILED_OUT.to_owned())
                     } else {
                         Json::Null
@@ -4192,7 +4201,7 @@ pub fn admin_handlers_with(
                 resolve_element_types(&streams, &stored).await;
                 let out: Vec<Json> = stored
                     .iter()
-                    .map(|stream| stream_json(&streams, stream))
+                    .map(|stream| stream_json(&streams, &apps, stream))
                     .collect();
                 Ok(HandlerResponse::ok(Json::Array(out)))
             }
@@ -4209,7 +4218,7 @@ pub fn admin_handlers_with(
                 let streams = streams_of(&apps)?;
                 let stream = require_stream_by_id(&catalog, ctx.path_param("id")?).await?;
                 resolve_element_types(&streams, std::slice::from_ref(&stream)).await;
-                Ok(HandlerResponse::ok(stream_json(&streams, &stream)))
+                Ok(HandlerResponse::ok(stream_json(&streams, &apps, &stream)))
             }
         }
     });
@@ -4249,7 +4258,7 @@ pub fn admin_handlers_with(
                         sc_error::format_causes(&e)
                     );
                 }
-                let response = HandlerResponse::ok(stream_json(&streams, &stream));
+                let response = HandlerResponse::ok(stream_json(&streams, &apps, &stream));
                 Ok(if created {
                     response.with_status(201)
                 } else {
@@ -4321,6 +4330,7 @@ pub fn admin_handlers_with(
                         .and_then(|r| r.element_type())
                         .and_then(|ty| serde_json::to_value(ty).ok()),
                     "listeners": running.as_ref().map_or(0, |r| r.listeners()),
+                    "subscribers": apps.live().hub().subscribers(stream.id),
                 })))
             }
         }
@@ -4423,6 +4433,12 @@ pub fn admin_handlers_with(
                 if moving {
                     check_admin_move(&catalog, &apps, admin_subdomain.as_deref()).await?;
                 }
+                // Whether one sign-in is good for every application. A cookie
+                // already in a browser keeps the scope it was set with, so a
+                // change ends every session, this admin's included: everyone
+                // signs in again and gets a cookie scoped the new way.
+                let shared_session_cookie = sc_config::shared_session_cookie_from(&merged);
+                let rescoping = shared_session_cookie != apps.shared_session_cookie();
 
                 sc_config::set_config_many(&catalog, &values).await?;
                 // The admin UI moves now, and the new name's certificate is
@@ -4431,6 +4447,7 @@ pub fn admin_handlers_with(
                 if moving {
                     apps.set_admin_subdomain(admin_subdomain);
                 }
+                apps.set_shared_session_cookie(shared_session_cookie);
                 // The two switches this process runs under move **now**, not at
                 // the next restart: an admin ticks "Log SQL" precisely because
                 // something is happening in the server they are looking at, and
@@ -4440,9 +4457,12 @@ pub fn admin_handlers_with(
                 // an admin who has just turned French on reloads the page to
                 // see it, not the server.
                 sc_i18n::set_active(localisation);
-                Ok(HandlerResponse::ok(
-                    settings_json(&catalog, &ctx.locale).await?,
-                ))
+                let body = settings_json(&catalog, &ctx.locale).await?;
+                Ok(if rescoping {
+                    HandlerResponse::end_all_sessions(body)
+                } else {
+                    HandlerResponse::ok(body)
+                })
             }
         }
     });
@@ -9917,6 +9937,39 @@ fn resolve_model_options(spec: Vec<FormField>, models: &Option<Vec<String>>) -> 
         .collect()
 }
 
+/// The names of the stored `internal` streams, in name order — what the
+/// `publish` action's stream picker offers.
+///
+/// A catalog with no `_fd_streams` table has none, which is what its absence
+/// means; asking the catalog first keeps a genuine database error an error.
+async fn internal_stream_names(catalog: &Catalog) -> Result<Vec<String>> {
+    if catalog.get(sc_stream::STREAMS_TABLE)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = sc_stream::list_streams(catalog)
+        .await?
+        .into_iter()
+        .filter(|stream| stream.provider == sc_stream::INTERNAL)
+        .map(|stream| stream.name)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Fill in the options of every field declaring
+/// [`INTERNAL_STREAMS_QUERY`](sc_core_actions::INTERNAL_STREAMS_QUERY) — the
+/// arrangement [`resolve_model_options`] has, for its reason.
+fn resolve_internal_streams(spec: Vec<FormField>, streams: &[String]) -> Vec<FormField> {
+    spec.into_iter()
+        .map(|field| match field.query() {
+            Some(q) if q == sc_core_actions::INTERNAL_STREAMS_QUERY => {
+                field.with_resolved_options(streams.to_vec())
+            }
+            _ => field,
+        })
+        .collect()
+}
+
 /// The model services this server was built with, or a configuration error
 /// saying it has none — the same shape [`agents_of`] and [`modules_of`] have,
 /// and for the same reason: a test or an admin-only server may have booted
@@ -10055,7 +10108,11 @@ async fn resolve_element_types(streams: &crate::StreamServices, stored: &[sc_str
 /// for status and counters. A stream whose provider was uninstalled has no
 /// element type and carries the reason in `error`, and it is still listed and
 /// still editable — because editing it is the repair.
-fn stream_json(streams: &crate::StreamServices, stream: &sc_stream::Stream) -> Json {
+fn stream_json(
+    streams: &crate::StreamServices,
+    apps: &AppMounts,
+    stream: &sc_stream::Stream,
+) -> Json {
     let registry = streams.registry();
     let redacted = sc_stream::redacted_stream(&registry, stream);
     // Computed, never stored (§5): a copy in the row would be a second answer
@@ -10077,6 +10134,12 @@ fn stream_json(streams: &crate::StreamServices, stream: &sc_stream::Stream) -> J
         ),
     };
     let running = streams.supervisor().get(stream.id);
+    // How its elements are split into topics (TODO.md "Live updates" §2): the
+    // provider's answer for this configuration, `null` when it has none.
+    let topics = registry
+        .get(stream.provider.trim())
+        .and_then(|provider| provider.topic_spec(&stream.configuration).ok())
+        .and_then(|spec| serde_json::to_value(spec).ok());
     json!({
         "id": stream.id.0,
         "name": stream.name,
@@ -10092,6 +10155,10 @@ fn stream_json(streams: &crate::StreamServices, stream: &sc_stream::Stream) -> J
             .as_ref()
             .and_then(|r| serde_json::to_value(r.status()).ok()),
         "counters": running.as_ref().map(|r| r.counters().to_json()),
+        "topics": topics,
+        // Live subscriptions to it from applications' pages right now, on
+        // this server (L1.11): beside the counters, and as in-memory as they.
+        "subscribers": apps.live().hub().subscribers(stream.id),
     })
 }
 

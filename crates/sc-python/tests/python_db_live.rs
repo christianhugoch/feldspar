@@ -477,8 +477,10 @@ async fn an_insert_from_a_body_fires_the_trigger_that_listens_for_it() -> Result
     save_trigger(&live.catalog, &registry, &trigger).await?;
     let dispatcher = Arc::new(TriggerDispatcher::new(Arc::new(registry)));
     dispatcher.reload(&live.catalog).await?;
-    live.catalog
-        .set_table_events(Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>)?;
+    live.catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn sc_catalog::TableEvents>,
+    )?;
 
     // The body's insert goes through the row layer, so it is observed exactly as
     // an API caller's write is — and the event carries **this** run's caller,

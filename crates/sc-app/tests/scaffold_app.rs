@@ -129,17 +129,18 @@ async fn the_server_writes_a_complete_project_against_the_apps_own_tables() -> s
         "src/feldspar/store.ts",
         "src/feldspar/messages.ts",
         "src/feldspar/i18n.tsx",
+        "src/feldspar/live-react.ts",
         "src/feldspar/schema.sql",
         "src/feldspar/README.md",
         "src/feldspar/SKILL.md",
     ] {
         assert!(project.join(expected).is_file(), "missing {expected}");
     }
-    // 14 project files (`CLAUDE.md` importing `AGENTS.md`) + one page for the app's one table + the nine-file
+    // 14 project files (`CLAUDE.md` importing `AGENTS.md`) + one page for the app's one table + the ten-file
     // runtime (the client, its helper, the hooks, the store, the two halves of
-    // the message runtime, the schema, and the two documents — one for a
-    // person, one for a coding agent).
-    assert_eq!(report.files.len(), 24);
+    // the message runtime, the live-update hooks, the schema, and the two
+    // documents — one for a person, one for a coding agent).
+    assert_eq!(report.files.len(), 25);
 
     // What a coding agent opening this project finds: a root file pointing at the
     // generated directory, and in it a README and a `schema.sql` describing the
@@ -322,6 +323,7 @@ async fn a_blank_project_directory_scaffolds_into_the_store_root() -> sc_error::
             "src/feldspar/hooks.ts",
             "src/feldspar/store.ts",
             "src/feldspar/i18n.tsx",
+            "src/feldspar/live-react.ts",
             "src/feldspar/README.md",
             "src/feldspar/client.ts",
             "src/feldspar/helper.ts",
@@ -398,6 +400,7 @@ async fn the_generated_runtime_is_rewritten_on_build_and_nothing_else_is() -> sc
             "todo/src/feldspar/hooks.ts",
             "todo/src/feldspar/store.ts",
             "todo/src/feldspar/i18n.tsx",
+            "todo/src/feldspar/live-react.ts",
             "todo/src/feldspar/README.md",
             "todo/src/feldspar/client.ts",
             "todo/src/feldspar/helper.ts",
@@ -464,6 +467,7 @@ async fn the_update_button_rescaffolds_an_empty_directory_and_re_emits_a_populat
             "todo/src/feldspar/hooks.ts",
             "todo/src/feldspar/store.ts",
             "todo/src/feldspar/i18n.tsx",
+            "todo/src/feldspar/live-react.ts",
             "todo/src/feldspar/README.md",
             "todo/src/feldspar/client.ts",
             "todo/src/feldspar/helper.ts",

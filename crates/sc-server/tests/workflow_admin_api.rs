@@ -587,15 +587,18 @@ async fn the_step_palette_is_told_which_actions_it_may_offer() -> sc_error::Resu
     assert!(!actions.is_empty());
     // Every action declares whether the palette may offer it as a step, so the
     // editor never renders a settings form that cannot be completed. The
-    // built-ins all can be, on a channel-less workflow and on one with a table.
+    // built-ins all can be, on a channel-less workflow and on one with a table —
+    // except `publish`, whose required stream has no options until an internal
+    // stream exists, which this server has not got.
     for action in &actions {
         assert!(
             action["workflow_step"].is_boolean(),
             "every action says: {action}"
         );
+        let usable = action["name"] != json!("publish");
         assert_eq!(
             action["workflow_step"],
-            json!(true),
+            json!(usable),
             "the built-ins are all usable as steps: {}",
             action["name"]
         );

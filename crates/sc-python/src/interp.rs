@@ -90,13 +90,14 @@ const PLUGIN_MODULE: &str = "__sc_plugin";
 /// authority, its budgets and the names it may reach all live on the **thread**
 /// (see [`crate::bridge`]), so one shared handle is this language's version of
 /// the closure a JavaScript run is handed.
-const SURFACES: [(&str, Surface); 6] = [
+const SURFACES: [(&str, Surface); 7] = [
     ("db", Surface::Db),
     ("models", Surface::Db),
     ("fetch", Surface::Fetch),
     ("fs", Surface::Files),
     ("trigger", Surface::Triggers),
     ("modfn", Surface::ModuleFns),
+    ("live", Surface::Live),
 ];
 
 /// How many compiled bodies the interpreter keeps. Generous next to the number
@@ -558,7 +559,7 @@ pub(crate) fn run_body(
 ///
 /// The same shape as [`run_body`] and deliberately so: a module's action is a
 /// run like any other — one thread, one deadline, one admission slot, the same
-/// five surfaces reached through the same thread-local — so everything §1 says
+/// six surfaces reached through the same thread-local — so everything §1 says
 /// about concurrency and §4 about stopping a run applies to it word for word.
 /// What differs is only that the Python being executed is an installed
 /// package's rather than an admin's, so there is nothing to compile and nothing

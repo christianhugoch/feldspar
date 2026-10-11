@@ -1,19 +1,19 @@
-//! The seam: five functions in one extension module, each taking a plan and
-//! answering one JSON value.
+//! The seam: six host functions in one extension module, each taking a plan
+//! and answering one JSON value — and a seventh that answers names.
 //!
 //! ```text
 //! __sc_db(plan) · __sc_fetch(request) · __sc_fs(op) · __sc_trigger(request)
-//! __sc_modfn(request) · __sc_names(kind)
+//! __sc_modfn(request) · __sc_live(request) · __sc_names(kind)
 //! ```
 //!
-//! The sixth is not a host call and spends nothing: it answers what this run
+//! The seventh is not a host call and spends nothing: it answers what this run
 //! may *name* — its file stores, its triggers, its module functions — so that
 //! `fs("typo")` fails at once naming what exists rather than deferring the
 //! question to the first operation. In JavaScript those lists are closed over
 //! by a per-run factory, because many runs share an isolate; here the run is the
 //! thread, so the same lists are a thread-local read.
 //!
-//! These are `sc-expr`'s five host traits and nothing else — the same plans a
+//! These are `sc-expr`'s six host traits and nothing else — the same plans a
 //! JavaScript body's ops carry, so the two languages cannot disagree about
 //! authority, budgets or events without somebody changing the trait they share.
 //! The fluent surface an author actually writes (`db.invoices.where(…).rows()`)
@@ -62,7 +62,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::convert;
 use crate::errors::{
-    DbError, FetchError, FileError, ModuleError, SaltcornError, Timeout, TriggerError,
+    DbError, FetchError, FileError, LiveError, ModuleError, SaltcornError, Timeout, TriggerError,
 };
 
 /// Which of the five a request is for.
@@ -73,6 +73,8 @@ pub(crate) enum Surface {
     Files,
     Triggers,
     ModuleFns,
+    /// `live.publish` (TODO.md "Live updates" L2.8).
+    Live,
 }
 
 impl Surface {
@@ -85,6 +87,7 @@ impl Surface {
             Surface::Files => FileError::new_err(message),
             Surface::Triggers => TriggerError::new_err(message),
             Surface::ModuleFns => ModuleError::new_err(message),
+            Surface::Live => LiveError::new_err(message),
         }
     }
 
@@ -97,6 +100,7 @@ impl Surface {
             Surface::Files => "this code body cannot reach a file store",
             Surface::Triggers => "this code body cannot run other triggers",
             Surface::ModuleFns => "this code body cannot call module functions",
+            Surface::Live => "this code body cannot publish to a stream",
         }
     }
 
@@ -118,7 +122,9 @@ impl Surface {
                 MIN_MODULE_FN_WINDOW,
                 "call a module function",
             )),
-            Surface::Db | Surface::Files => None,
+            // A publish is a send that never waits: there is no clock to hand
+            // on.
+            Surface::Db | Surface::Files | Surface::Live => None,
         }
     }
 }
@@ -180,6 +186,7 @@ pub(crate) struct Surfaces {
     pub(crate) files: bool,
     pub(crate) triggers: bool,
     pub(crate) module_fns: bool,
+    pub(crate) live: bool,
 }
 
 impl Surfaces {
@@ -192,6 +199,7 @@ impl Surfaces {
             Surface::Files => self.files,
             Surface::Triggers => self.triggers,
             Surface::ModuleFns => self.module_fns,
+            Surface::Live => self.live,
         }
     }
 }
@@ -204,6 +212,7 @@ pub(crate) struct Budgets {
     pub(crate) file_ops: u32,
     pub(crate) trigger_runs: u32,
     pub(crate) module_calls: u32,
+    pub(crate) publishes: u32,
 }
 
 impl Budgets {
@@ -214,6 +223,7 @@ impl Budgets {
             Surface::Files => self.file_ops,
             Surface::Triggers => self.trigger_runs,
             Surface::ModuleFns => self.module_calls,
+            Surface::Live => self.publishes,
         }
     }
 
@@ -224,6 +234,7 @@ impl Budgets {
             Surface::Files => &mut self.file_ops,
             Surface::Triggers => &mut self.trigger_runs,
             Surface::ModuleFns => &mut self.module_calls,
+            Surface::Live => &mut self.publishes,
         };
         *slot = slot.saturating_sub(1);
     }
@@ -254,6 +265,8 @@ fn exhausted(surface: Surface, max: u32) -> String {
             "this code called more than {max} module functions in one run; \
              the bound exists so a loop over rows cannot become a call per row"
         ),
+        // The JavaScript op's sentence, word for word.
+        Surface::Live => format!("this code published more than {max} elements in one run"),
     }
 }
 
@@ -474,6 +487,12 @@ fn modfn(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     call(py, Surface::ModuleFns, request)
 }
 
+#[pyfunction]
+#[pyo3(name = "__sc_live")]
+fn live(py: Python<'_>, request: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    call(py, Surface::Live, request)
+}
+
 /// The bridge module, appended to the interpreter's inittab before it starts —
 /// so it is a **built-in**, importable with no file on disk, no `sys.path` entry
 /// and nothing to install.
@@ -486,6 +505,7 @@ pub(crate) fn sc_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fs, m)?)?;
     m.add_function(wrap_pyfunction!(trigger, m)?)?;
     m.add_function(wrap_pyfunction!(modfn, m)?)?;
+    m.add_function(wrap_pyfunction!(live, m)?)?;
     m.add_function(wrap_pyfunction!(names, m)?)?;
     m.add("SaltcornError", py.get_type::<SaltcornError>())?;
     m.add("DbError", py.get_type::<DbError>())?;
@@ -493,16 +513,18 @@ pub(crate) fn sc_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("FileError", py.get_type::<FileError>())?;
     m.add("TriggerError", py.get_type::<TriggerError>())?;
     m.add("ModuleError", py.get_type::<ModuleError>())?;
+    m.add("LiveError", py.get_type::<LiveError>())?;
     m.add("Timeout", py.get_type::<Timeout>())?;
     Ok(())
 }
 
 /// The name each surface's bridge function is bound under in a run's globals,
 /// paired with the flag that says whether this run has it.
-pub(crate) const BOUND_NAMES: [(&str, Surface); 5] = [
+pub(crate) const BOUND_NAMES: [(&str, Surface); 6] = [
     ("__sc_db", Surface::Db),
     ("__sc_fetch", Surface::Fetch),
     ("__sc_fs", Surface::Files),
     ("__sc_trigger", Surface::Triggers),
     ("__sc_modfn", Surface::ModuleFns),
+    ("__sc_live", Surface::Live),
 ];

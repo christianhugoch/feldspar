@@ -746,13 +746,15 @@ comes back as the trigger's result — so a `none` trigger exposed on your app c
 front end to somebody else's API.
 
 `run_js_code` is the escape hatch for a computation no combination of the others expresses. It
-sees `row`, `old`, `user` and `payload` — and five ways out: `db`, your tables (Step 5),
+sees `row`, `old`, `user` and `payload` — and six ways out: `db`, your tables (Step 5),
 `fetch`, an HTTP request (Step 5 again), `fs`, your file stores (Step 5 once more), `trigger`,
-your other triggers (Step 5 once more again), and `modfn`, the functions an installed module
-supplies ([tutorial-modules.md](tutorial-modules.md)). That is the whole host surface: no
-subprocess, no timers, no schema changes, and no way to a file that is not a store you
-connected. Saltcorn 1's `Table` and `Field` are in scope beside them (Step 6), and are that
-same surface in v1's words rather than a sixth way out.
+your other triggers (Step 5 once more again), `modfn`, the functions an installed module
+supplies ([tutorial-modules.md](tutorial-modules.md)), and `live`, whose
+`live.publish(stream, topic, value)` puts a toast or a progress update on an application's page
+([tutorial-live.md](tutorial-live.md), part 2). That is the whole host surface: no subprocess,
+no timers, no schema changes, and no way to a file that is not a store you connected. Saltcorn
+1's `Table` and `Field` are in scope beside them (Step 6), and are that same surface in v1's
+words rather than a seventh way out.
 
 The `fetch` **action** and a body's `fetch` are the same capability, and which to reach for is a
 question of what you do with the answer: the action is one configured request whose response

@@ -1,9 +1,9 @@
-"""The surface an app builder writes: five handles, and the errors they raise.
+"""The surface an app builder writes: six handles, and the errors they raise.
 
 ``db`` the tables, ``fetch`` one HTTP request, ``fs`` the file stores,
 ``trigger`` this server's other triggers, ``modfn`` the functions its modules
-supply — and nothing else, because those are the five host traits ``sc-expr``
-has.
+supply, ``live`` the internal streams it may publish to — and nothing else,
+because those are the six host traits ``sc-expr`` has.
 
 This is the counterpart of the five JavaScript preludes, and it is Python for
 the reason they are JavaScript: the Rust side sees **plans**, so adding a chain
@@ -64,6 +64,7 @@ import re
 from __sc import __sc_db as _call_db
 from __sc import __sc_fetch as _call_fetch
 from __sc import __sc_fs as _call_fs
+from __sc import __sc_live as _call_live
 from __sc import __sc_modfn as _call_modfn
 from __sc import __sc_names as _call_names
 from __sc import __sc_trigger as _call_trigger
@@ -71,6 +72,7 @@ from __sc import (
     DbError,
     FetchError,
     FileError,
+    LiveError,
     ModuleError,
     SaltcornError,
     Timeout,
@@ -107,6 +109,8 @@ __all__ = [
     "Frame",
     "Fs",
     "Headers",
+    "Live",
+    "LiveError",
     "ModFns",
     "Models",
     "ModuleError",
@@ -128,6 +132,7 @@ __all__ = [
     "fetch",
     "fs",
     "function",
+    "live",
     "modfn",
     "model_provider",
     "models",
@@ -1470,6 +1475,47 @@ class Triggers:
 
 
 # ---------------------------------------------------------------------------
+# `live` — publishing to an internal stream (TODO.md "Live updates" L2.8)
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+class Live:
+    """``live.publish("job_status", user["id"], {"message": "Done"})``.
+
+    Synchronous, as in JavaScript: a publish is a send that never waits. A
+    refusal — no such stream, one not running, a topic of the wrong kind, a
+    value that does not match the stream's element type — is a catchable
+    :class:`LiveError`.
+    """
+
+    __slots__ = ()
+
+    def publish(self, stream, topic, value=_MISSING):
+        """Publish ``value`` on ``topic`` of ``stream``; answer the topic it
+        was published on.
+
+        Two arguments, ``publish(stream, value)``, are a stream without topics.
+        """
+        if not isinstance(stream, str) or stream == "":
+            raise TypeError(
+                'live.publish() takes the stream\'s name first, as in '
+                'live.publish("job_status", user["id"], {"message": "Done"})'
+            )
+        if value is _MISSING:
+            value, topic = topic, None
+        if topic is not None and not isinstance(topic, (str, int, float)):
+            raise TypeError("a topic is a string, a number or None")
+        if isinstance(topic, bool):
+            raise TypeError("a topic is a string, a number or None")
+        return _call_live({"stream": stream, "topic": topic, "value": value})
+
+    def __repr__(self):
+        return "<saltcorn live>"
+
+
+# ---------------------------------------------------------------------------
 # `modfn` — the functions this server's modules supply
 # ---------------------------------------------------------------------------
 #
@@ -1851,5 +1897,6 @@ fs = Fs()
 trigger = Triggers()
 #: The functions this server's modules supply.
 modfn = ModFns()
+live = Live()
 #: The models, over `db`: ``models.get(name)``.
 models = Models()

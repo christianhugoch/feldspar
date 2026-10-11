@@ -3,7 +3,7 @@
 //!
 //! `run_js_code` and `run_python_code` are the same action twice: the same two
 //! settings, the same default and the same ceiling on the timeout, the same
-//! scope rule for what the event binds, and the same five host surfaces built
+//! scope rule for what the event binds, and the same six host surfaces built
 //! from the same [`ActionContext`]. The only differences are which engine runs
 //! the source and what the editor is told to highlight.
 //!
@@ -20,8 +20,8 @@ use std::time::Duration;
 use sc_api::code_host::{FileStoreHost, TableHost, TriggerRunHost, schema_snapshot};
 use sc_error::{Error, Result};
 use sc_expr::{
-    CodeCall, CodeHosts, ConsoleSink, DEFAULT_CODE_TIMEOUT, JsEvaluator, MAX_CODE_TIMEOUT,
-    ModuleFnHost, SchemaSnapshot, TriggerHost,
+    CodeCall, CodeHosts, ConsoleSink, DEFAULT_CODE_TIMEOUT, JsEvaluator, LiveHost,
+    MAX_CODE_TIMEOUT, ModuleFnHost, SchemaSnapshot, TriggerHost,
 };
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
@@ -158,7 +158,7 @@ pub(crate) fn subject(ctx: &ActionContext<'_>) -> String {
     }
 }
 
-/// The five host surfaces one run may reach — and the schema it reads without
+/// The six host surfaces one run may reach — and the schema it reads without
 /// reaching for anything — built from the context that fired it and borrowed by
 /// the [`CodeCall`] for exactly as long as the run.
 ///
@@ -184,9 +184,11 @@ pub struct Hosts<'a> {
     files: FileStoreHost<'a>,
     triggers: Option<TriggerRunHost<'a>>,
     module_fns: Option<Arc<dyn ModuleFnHost>>,
+    /// Live updates (`live.publish`), when this server has a live hub.
+    live: Option<Arc<dyn LiveHost>>,
     schema: Option<Arc<SchemaSnapshot>>,
     /// Where this run's `console.*` lines go, when the context is collecting
-    /// them (the admin's Test run). Not one of the five surfaces and not a
+    /// them (the admin's Test run). Not one of the six surfaces and not a
     /// capability: every body has a console, and this is only whether anybody
     /// is reading it.
     console: Option<ConsoleSink>,
@@ -243,7 +245,7 @@ impl<'a> Hosts<'a> {
             }),
             // This server's tables as the guest sees them without asking — what
             // v1's synchronous `Table.findOne` is answered from. Built here,
-            // once, for the reason the five surfaces are: a code body, a
+            // once, for the reason the six surfaces are: a code body, a
             // workflow step and a module's action must all be looking at the
             // same schema, and the catalog caches it behind its generation
             // stamp so this is a clone of an `Arc` on every firing but the
@@ -260,12 +262,17 @@ impl<'a> Hosts<'a> {
             // finding an empty handle. The catalog is where they are because a
             // formula's hoisted call needs them too, from three other crates.
             module_fns: ctx.catalog.module_functions(),
+            // Live updates, when this server has a hub — and nothing at all
+            // when it does not, so a body that names `live` in a process with
+            // no hub says so by name. Server-side publishing is trusted (§3
+            // rule 8), so nothing about the event's caller rides on it.
+            live: ctx.catalog.live_host(),
             // Whoever asked for the transcript, if anyone did.
             console: ctx.console().cloned(),
         }
     }
 
-    /// The five surfaces alone, for a run that is not a code body — a Python
+    /// The six surfaces alone, for a run that is not a code body — a Python
     /// module's action, which has no source and no bindings.
     pub fn surfaces(&'a self) -> CodeHosts<'a> {
         CodeHosts {
@@ -274,6 +281,7 @@ impl<'a> Hosts<'a> {
             files: Some(&self.files),
             triggers: self.triggers.as_ref().map(|r| r as &dyn TriggerHost),
             module_fns: self.module_fns.as_deref(),
+            live: self.live.as_ref(),
         }
     }
 
@@ -301,6 +309,7 @@ impl<'a> Hosts<'a> {
             files: surfaces.files,
             triggers: surfaces.triggers,
             module_fns: surfaces.module_fns,
+            live: surfaces.live,
             schema: self.schema(),
             console: self.console.clone(),
             timeout,
@@ -309,11 +318,11 @@ impl<'a> Hosts<'a> {
     }
 }
 
-/// The HTTP client behind `fetch`, held once, and the five surfaces built over
+/// The HTTP client behind `fetch`, held once, and the six surfaces built over
 /// it (§10.1).
 ///
 /// What it is *for* is a caller outside this crate: a Python **plugin module**'s
-/// action reaches the same five surfaces a code body does, and building them
+/// action reaches the same six surfaces a code body does, and building them
 /// needs a `reqwest::Client` — which has to be built once, because a client is a
 /// connection pool and a TLS configuration and one per firing would pay for a
 /// handshake every time a trigger runs. Holding one of these is how a caller
@@ -332,7 +341,7 @@ impl CodeSurfaces {
         })
     }
 
-    /// The five surfaces this context can reach, borrowed for as long as the
+    /// The six surfaces this context can reach, borrowed for as long as the
     /// value is held.
     ///
     /// The evaluator is the context's own where it has one, exactly as

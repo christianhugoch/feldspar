@@ -237,6 +237,43 @@ pub async fn read_row_values_as(
     }
 }
 
+/// Whether the caller's read of the one row of `table` whose key is `key`
+/// returns it — the verdict a live `row` topic is subscribed and re-checked by
+/// (TODO.md "Live updates" §3).
+///
+/// [`read_row_values_as`] with `pk = key`, so it is **the** read rule and not a
+/// copy of it: the floor, the ownership formula (translated or reified), and a
+/// table's RLS policies in a caller-context transaction, all exactly as the
+/// application's REST read applies them. A row that does not exist and a row
+/// the caller may not read are both `false` — deliberately one answer — and so
+/// is a key that could not be a key of this table at all (`abc` for an integer
+/// key names no row). A caller below the floor of a table with no formula is
+/// `false` rather than an error, for the same reason.
+pub async fn row_readable_as(
+    cat: &Catalog,
+    table: &Table,
+    key: &str,
+    role: u8,
+    user: Option<&User>,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<bool> {
+    let pk = rows::single_pk(table)?;
+    let Ok(filter) = rows::pk_filter(table, &pk, key) else {
+        return Ok(false);
+    };
+    let query = rows::RowQuery {
+        filter: Some(filter),
+        limit: Some(1),
+        ..rows::RowQuery::new()
+    };
+    match read_row_values_as(cat, table, &query, role, user, evaluator).await {
+        Ok(found) => Ok(!found.is_empty()),
+        // No floor met and no formula to extend it: nothing here is theirs.
+        Err(e) if matches!(e.repr(), sc_error::Repr::Auth(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// How this caller's permission to read `table` can be expressed **inside** a
 /// statement — the form an aggregate needs, because an aggregate observes rows
 /// without returning them.

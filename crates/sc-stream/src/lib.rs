@@ -72,6 +72,7 @@ pub mod polling;
 pub mod provider;
 pub mod providers;
 pub mod registry;
+pub mod retained;
 pub mod running;
 pub mod secrets;
 pub mod store;
@@ -90,11 +91,15 @@ pub use observer::StreamObserver;
 pub use polling::{
     DEFAULT_INTERVAL_S, INTERVAL_FIELD, MIN_INTERVAL, PollAnswer, PollHost, PollingProvider,
 };
-pub use provider::{StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink};
+pub use provider::{
+    Replay, StreamProvider, StreamProviderHost, StreamProviderKind, StreamSink, TopicSpec,
+};
+pub use providers::internal::{INTERNAL, Internal};
 #[cfg(feature = "mqtt")]
 pub use providers::mqtt::{MQTT, Mqtt};
 pub use providers::{BUILTINS_COMPILED_OUT, MQTT_COMPILED_IN, builtin_providers, builtin_registry};
 pub use registry::StreamRegistry;
+pub use retained::Retained;
 pub use running::{Counters, ElementFeed, RunningStream, StreamStatus};
 pub use secrets::{redact_configuration, redacted_stream, restore_secrets};
 pub use store::{

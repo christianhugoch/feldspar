@@ -272,6 +272,17 @@ lat = modfn("@saltcorn/nominatim-geocode").geocode_lat({"city": row["city"]})
 A name only one module supplies may be reached the short way; the qualified form always works.
 They are synchronous here even where v1 made them `async`, because everything in this surface is.
 
+`live` publishes to an internal stream — a toast or a progress bar on an application's page
+([tutorial-live.md](tutorial-live.md), part 2):
+
+```python
+live.publish("job_status", user["id"], {"message": "Working", "progress": 0.5})
+live.publish("announcements", {"message": "Back at five"})   # a stream without topics
+```
+
+A refusal — no such stream, one not running, a topic of the wrong kind, a value that does not
+match the stream's declared keys — is a `LiveError`.
+
 `models` is this server's predictive models, the Python spelling of JavaScript's `models`,
 over the same `db` requests. `models.get` answers a **handle** on a model's active fit, or on
 the fit `fit=` names:
@@ -460,8 +471,8 @@ gets them all, and a parameter that is not one of the nine is refused **by name*
 handed `None`. This is the one place the Python plugin API is better than the JavaScript one, and
 it is free: Python has `inspect.signature`.
 
-**Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs` and `sc.trigger` inside an action
-are the same five surfaces a code body has, with the same authority and the same budgets — so the
+**Module code gets the real `db`.** `sc.db`, `sc.fetch`, `sc.fs`, `sc.trigger` and `sc.live` inside
+an action are the same surfaces a code body has, with the same authority and the same budgets — so the
 write above carries the event's caller and this trigger's chain. Outside a call they raise saying
 so. A **function** and a **table provider** get **none** of them, and that is deliberate rather
 than missing: a function is hoisted into a formula and a provider is called from inside a query,

@@ -229,7 +229,10 @@ async fn setup() -> Result<Tutorial> {
     dispatcher.reload(&catalog).await?;
     // Nothing observes a write until the dispatcher is installed; from here the
     // reader's `tasks` table is live.
-    catalog.set_table_events(Arc::clone(&dispatcher) as Arc<dyn TableEvents>)?;
+    catalog.add_table_events(
+        sc_catalog::TRIGGER_EVENTS,
+        Arc::clone(&dispatcher) as Arc<dyn TableEvents>,
+    )?;
 
     Ok(Tutorial {
         catalog,

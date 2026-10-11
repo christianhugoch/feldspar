@@ -103,6 +103,9 @@ export function elementTypeSummary(type: ElementType | null): string {
  * `only_if` reads and an application's generated client is typed from. */
 export type Envelope = {
   stream: string;
+  /** The topic it was published on, for a stream with topics — a user's id or
+   * a row's key (TODO.md "Live updates" §2). Absent on a stream without. */
+  topic?: string;
   value: unknown;
   received_at: string;
   /** The provider's own metadata — MQTT's topic, QoS and retain flag. Absent
@@ -117,10 +120,57 @@ export function readEnvelope(raw: unknown): Envelope | null {
   if (typeof value.received_at !== "string") return null;
   return {
     stream: typeof value.stream === "string" ? value.stream : "",
+    ...(typeof value.topic === "string" ? { topic: value.topic } : {}),
     value: value.value,
     received_at: value.received_at,
     ...(value.source === undefined || value.source === null ? {} : { source: value.source }),
   };
+}
+
+/** How a stream's elements are split into topics (`sc_stream::TopicSpec`),
+ * tagged `kind`. */
+export type TopicKind = "single" | "user" | "row" | "per_element_row";
+
+/** Read a stream's `topics` off the wire: `single` for anything unreadable,
+ * which is what every stream without topics is. */
+export function readTopics(raw: unknown): { kind: TopicKind; table?: string } {
+  if (!raw || typeof raw !== "object") return { kind: "single" };
+  const value = raw as { kind?: unknown; table?: unknown };
+  switch (value.kind) {
+    case "user":
+      return { kind: "user" };
+    case "row":
+    case "per_element_row":
+      return { kind: value.kind, ...(typeof value.table === "string" ? { table: value.table } : {}) };
+    default:
+      return { kind: "single" };
+  }
+}
+
+/** What the Observe screen calls a stream's topics, for its column heading.
+ * `t` is the screen's translator, called here with each message written out —
+ * the message id is the English text, so it has to be a literal at the call. */
+export function topicLabel(
+  t: (text: string, args?: Record<string, string>) => string,
+  topics: { kind: TopicKind; table?: string },
+): string {
+  switch (topics.kind) {
+    case "user":
+      return t("Topic (user)");
+    case "row":
+    case "per_element_row":
+      return topics.table ? t("Topic ({table} row)", { table: topics.table }) : t("Topic (row)");
+    default:
+      return t("Topic");
+  }
+}
+
+/** The envelopes on topics matching `query`: a substring, so a user's id can
+ * be found by its first few characters. A blank query is every envelope. */
+export function filterByTopic(tail: Envelope[], query: string): Envelope[] {
+  const wanted = query.trim();
+  if (wanted === "") return tail;
+  return tail.filter((envelope) => (envelope.topic ?? "").includes(wanted));
 }
 
 // --- the status and the counters --------------------------------------------

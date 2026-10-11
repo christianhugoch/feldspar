@@ -62,7 +62,7 @@ pub use db_connections::{
     delete_db_connection, dial, list_db_connections, load_db_connection,
     load_db_connection_by_name, save_db_connection,
 };
-pub use events::{TableEvents, TableWrite, WriteOp};
+pub use events::{LIVE_EVENTS, TRIGGER_EVENTS, TableEvents, TableWrite, WriteOp};
 pub use field::{Attrs, BaseField, DataField, DataFieldKind, DbId, FieldId, FileStoreId, TableId};
 pub use field_meta::{
     FIELD_META_TABLE, FieldMeta, FieldMetaId, KIND_CALC, KIND_FILE, KIND_KEY, KIND_PLAIN,

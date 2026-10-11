@@ -164,21 +164,36 @@ export async function exercise(): Promise<void> {
 "#;
 
 /// A usage module for an application that exposes three streams — one of each
-/// [`ElementType`](sc_stream::ElementType) shape (TODO "Streams" §10, task 8.3).
+/// [`ElementType`](sc_stream::ElementType) shape (TODO "Streams" §10; TODO.md
+/// "Live updates" L1.9).
 ///
 /// What it asserts is the whole point of typing a subscription from the element
 /// type: a declared key arrives as the type it was declared with, a text stream
 /// is a `string`, a binary one is base64 in a `string`, and a key nobody
 /// declared is a compile error rather than an `undefined` at three in the
-/// morning.
+/// morning. And that every stream shares one `LiveConnection`, whose status a
+/// page can show. And the two topic kinds (TODO.md "Live updates" L2.10): a
+/// per-user stream is subscribed naming nothing, and a per-row one cannot be
+/// subscribed without the row's key.
 const STREAM_USAGE_TS: &str = r#"
-import { createClient, type BoilerEnvelope, type StreamSubscription } from "./client";
+import {
+  createClient,
+  LiveConnection,
+  type BoardActivityEnvelope,
+  type BoilerEnvelope,
+  type JobStatusEnvelope,
+  type LiveError,
+  type LiveRowStream,
+  type LiveStatus,
+  type LiveStream,
+  type LiveSubscription,
+} from "./client";
 
 export function exercise(): void {
-  const api = createClient({ baseUrl: "https://blog.example.com" });
+  const api = createClient({ baseUrl: "https://blog.example.com", live: { minDelay: 100 } });
 
   // A `json` element: the declared keys, each typed, `value` an object.
-  const boiler: StreamSubscription = api.observeStream_boiler({
+  const boiler: LiveSubscription = api.live.boiler.subscribe({
     ready(info) {
       const replayed: number = info.replayed;
       void replayed;
@@ -187,34 +202,80 @@ export function exercise(): void {
       const temperature: number = envelope.value.temperature;
       const label: string | null = envelope.value.label;
       const seen: string = envelope.received_at;
-      void temperature; void label; void seen;
+      const topic: string | undefined = envelope.topic;
+      void temperature; void label; void seen; void topic;
     },
     // §7 reaching the client: a consumer that cannot keep up is told.
     lagged(dropped: number) {
       void dropped;
     },
+    // A reconnect: what was built from earlier elements may be stale.
+    resync() {},
+    error(error: LiveError) {
+      const code: string = error.code;
+      void code;
+    },
   });
   boiler.close();
 
   // A `text` element is a string, and a `binary` one is base64 in a string.
-  api.observeStream_syslog({ element: (e) => { const line: string = e.value; void line; } });
-  api.observeStream_frames({ element: (e) => { const b64: string = e.value; void b64; } });
+  api.live.syslog.subscribe({ element: (e) => { const line: string = e.value; void line; } });
+  api.live.frames.subscribe({ element: (e) => { const b64: string = e.value; void b64; } });
 
+  // Every accessor is over the one connection, and it says where it is.
+  const accessor: LiveStream<BoilerEnvelope> = api.live.boiler;
+  const connection: LiveConnection = accessor.connection;
+  const status: LiveStatus = connection.status;
+  const stop = connection.onStatus((next: LiveStatus) => void next);
+  stop();
+  void status;
+
+  // A per-user stream: the subscriber's own topic, never named.
+  api.live.job_status.subscribe({
+    element(envelope: JobStatusEnvelope) {
+      const message: string = envelope.value.message;
+      const progress: number | null = envelope.value.progress;
+      void message; void progress;
+    },
+  });
+  // A per-row stream: subscribed naming the row, by number or by text, or as
+  // one row's own stream — the same object for the same key.
+  const board: LiveRowStream<BoardActivityEnvelope> = api.live.board_activity;
+  board.subscribe(7, { element: (e) => void e.value.message }).close();
+  board.subscribe("7", { element: (e) => void e.value.message }).close();
+  const seven: LiveStream<BoardActivityEnvelope> = board.topic(7);
+  seven.subscribe({ element: (e) => void e.value.message }).close();
+
+  // @ts-expect-error a per-row stream cannot be subscribed without naming the row
+  api.live.board_activity.subscribe({ element: () => {} });
+  // @ts-expect-error a per-user stream's topic is the subscriber's own, never named
+  api.live.job_status.subscribe(7, { element: () => {} });
   // @ts-expect-error `pressure` is not a declared key of this element type
-  api.observeStream_boiler({ element: (e) => void e.value.pressure });
+  api.live.boiler.subscribe({ element: (e) => void e.value.pressure });
   // @ts-expect-error a text element's value is a string, not an object
-  api.observeStream_syslog({ element: (e) => void e.value.line });
+  api.live.syslog.subscribe({ element: (e) => void e.value.line });
+  // @ts-expect-error a stream the application does not expose has no accessor
+  void api.live.meter;
 }
 "#;
 
 #[test]
 fn generated_stream_client_type_checks() -> std::io::Result<()> {
-    use sc_api::{StreamExport, StructField, TypeSchema, ValueType};
+    use sc_api::{StreamExport, StreamTopics, StructField, TypeSchema, ValueType};
 
+    let message = || {
+        TypeSchema::struct_of([
+            StructField::new("message", TypeSchema::value(ValueType::Text)),
+            StructField::new(
+                "progress",
+                TypeSchema::optional(TypeSchema::value(ValueType::Float)),
+            ),
+        ])
+    };
     let streams = vec![
         StreamExport {
             name: "boiler".to_owned(),
-            path: "/api/streams/boiler/observe".to_owned(),
+            path: "/api/live".to_owned(),
             value: TypeSchema::struct_of([
                 // Required: the key is always there, so it is not nullable.
                 StructField::new("temperature", TypeSchema::value(ValueType::Float)),
@@ -224,17 +285,32 @@ fn generated_stream_client_type_checks() -> std::io::Result<()> {
                     TypeSchema::optional(TypeSchema::value(ValueType::Text)),
                 ),
             ]),
+            topics: StreamTopics::Single,
         },
         StreamExport {
             name: "syslog".to_owned(),
-            path: "/api/streams/syslog/observe".to_owned(),
+            path: "/api/live".to_owned(),
             value: TypeSchema::text(),
+            topics: StreamTopics::Single,
         },
         StreamExport {
             name: "frames".to_owned(),
-            path: "/api/streams/frames/observe".to_owned(),
+            path: "/api/live".to_owned(),
             // Bytes travel as base64, which is a string on the wire.
             value: TypeSchema::value(ValueType::Bytes),
+            topics: StreamTopics::Single,
+        },
+        StreamExport {
+            name: "job_status".to_owned(),
+            path: "/api/live".to_owned(),
+            value: message(),
+            topics: StreamTopics::User,
+        },
+        StreamExport {
+            name: "board_activity".to_owned(),
+            path: "/api/live".to_owned(),
+            value: message(),
+            topics: StreamTopics::Row,
         },
     ];
     // An application with no API provider still exposes streams: the client is

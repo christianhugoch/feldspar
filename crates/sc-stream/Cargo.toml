@@ -34,6 +34,11 @@ sc-error.workspace = true
 # and `BasicType` for a declared element key's type — the one vocabulary every
 # configurable extension point speaks (§6.2).
 sc-types.workspace = true
+# The `internal` provider's presence fields are columns of `users`, and the
+# password hash is one an admin must not be able to put in front of every
+# member of a topic: the table's name and its system columns are sc-auth's
+# (layer 5), named rather than repeated.
+sc-auth.workspace = true
 # `_fd_streams` is stored metadata, so this crate bootstraps its table through
 # the catalog and speaks the query language to read it back (§9's storage
 # pattern, as `_fd_models` and `_fd_triggers` do). The catalog is also what
