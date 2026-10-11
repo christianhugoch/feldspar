@@ -1,14 +1,16 @@
-# Saltcorn v2 — Live updates (milestones L1–L6)
+# Saltcorn v2 — Building apps from a coding agent (milestones F1–F6)
 
-Ordered, checkable task list for **real-time updates in applications**: a server pushing to the
-browser while the page is open. Earlier lists are archived in [docs/TODO-mvp.md](./docs/TODO-mvp.md),
-`docs/TODO-post-mvp-1.md` … [docs/TODO-post-mvp-31.md](./docs/TODO-post-mvp-31.md) and
-[TODO-analytics.md](./TODO-analytics.md). This builds on streams
-([docs/TECHNICAL_DESIGN.md](./docs/TECHNICAL_DESIGN.md) §14.3, [docs/tutorial-streams.md](./docs/tutorial-streams.md)),
-the access model (§7.3), triggers and workflows (§10.2, §10.3) and applications (§13.2).
+Ordered, checkable task list from the field report on **PADDI//GRID**: 11 React applications
+built on one instance by Claude Code over MCP. Every bit of server logic lived in JavaScript
+custom queries ("code queries"), tables were admin-only, and files were written with `fs` and
+served through `static_dirs`. Earlier lists are archived in
+[TODO-live-updates.md](./TODO-live-updates.md) (still has open items: L5 and L6),
+[TODO-analytics.md](./TODO-analytics.md), [docs/TODO-mvp.md](./docs/TODO-mvp.md) and
+`docs/TODO-post-mvp-1.md` … [docs/TODO-post-mvp-31.md](./docs/TODO-post-mvp-31.md).
 
-The design comes first, then the milestones. Each milestone is prefixed **L** and its tasks are
-numbered L1.1, L1.2, …. Work through them in order: a milestone assumes every earlier one is done.
+The design comes first, then the milestones. Each milestone is prefixed **F** and its tasks are
+numbered F1.1, F1.2, …. Work through them in order: a milestone assumes every earlier one is done.
+Report item numbers (1.1, 2.3, …) refer to the field report.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -16,367 +18,311 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 # Part I — Design
 
-## 1. What has to work
+## 1. What the report found, checked against the code
 
-| | Use case | Who publishes | Who may receive | Shape |
-|---|---|---|---|---|
-| **A** | Status of a long-running action: a toast on start and finish, a progress bar | A workflow step, an action, a code body | **The user who started it**, and nobody else | Small JSON, at most a few per second, latest value matters most |
-| **B** | Kanban: one user moves a card, another user's board moves it too | A row write (the card's `column` changes) | Everyone who can **read that card** and is looking at that board | A row change, filtered to one board |
-| **C** | Collaborative document editing with remote cursors | The **browser**, many times a second | Everyone who can **read the document**. Only those who can **update** it may edit | Binary CRDT updates plus ephemeral cursor state |
-| **D** | The frontend wants to hear about inserts, updates and deletes on a table | Any row write | Everyone who can **read the row** | A row change |
-| **E** | An external stream (MQTT, RSS) reaches the frontend | A stream provider | The stream's `min_role` | The existing envelope |
+| Report | Status | What the code does today |
+|---|---|---|
+| 1.1 Bodies capped at ~2 MB | Confirmed | No `DefaultBodyLimit` is set anywhere (`sc-server/src/router.rs:288-432`), so `dispatch(body: Bytes)` uses axum's 2 MiB default for every app request, **including REST File-field uploads**. Only admin `/upload` and the backup upload have their own cap: a hard-coded 256 MiB (`router.rs:440`), read fully into memory. |
+| 1.2 8 MB per file in code | Confirmed | `MAX_FILE_BYTES` (`sc-api/src/code_host/files.rs:92`). No partial read, no append. A host-side copy already allows 256 MiB (`:101`), so the host can move large files; only crossing into the isolate is limited. |
+| 1.3 Store files are public | **Half right** | Static dirs **do** check access: `serve_static_dir` runs `check_access` with the store floor and the path's rules (`router.rs:1689`). The anonymous 200 means the store or folder was public. But `FileMeta.owner` is "deliberately *not* an authority over anything" (`sc-files/src/store.rs:100-109`). It is recorded only by admin writes, not by code `fs` writes or REST uploads. So "min_role 1 + owner may read" is **not** possible today. No route supports Range. Content-Disposition exists only on admin download, and it drops non-ASCII names. |
+| 1.4 JSON only | Confirmed, half built | The router already stores a non-JSON body in `ApiRequest.raw` (`router.rs:1262-1295`). `code_scope` (`sc-api/src/rest/custom.rs:717`) ignores it, so a binary POST arrives as `body = {}`. `ApiResponse.raw` plus status exists for responses; code queries cannot reach it. |
+| 2.1 No crypto, codecs | Confirmed | The fetch prelude has private UTF-8 and base64 codecs (`__scCodec`, `sc-expr/src/code.rs:1924`). `getrandom` and `sha2` are dependencies already, and `sc-auth` has argon2. |
+| 2.2 No shared code | Confirmed | Nothing exists. The v1 importer drops `code_pages` (`sc-server/src/backup/v1.rs:1402`). |
+| 2.3 Always 400 with a stack | Confirmed | `op_sc_fail` → `Error::invalid` → `error_status` 400 (`router.rs:2754`). The message is `e.stack`, prefixed `invalid: custom query … invalid: JavaScript code failed:`. |
+| 2.5 Listing entries | Confirmed | The host sends `{name, path, isDirectory, size}` (`files.rs:602`, `modified` dropped). The guest wraps entries in objects whose `toJSON` is `{store, path}`. |
+| 3.1 No body argument | Confirmed | An empty `struct_of([])` counts as no input (`sc-api/src/schema.rs:238`), so `has_body` is false (`sc-api/src/typescript.rs:646`, `:726`). |
+| 3.2 Untyped responses | Confirmed | Code queries are typed as `TypeSchema::json()`, which is `unknown`. |
+| 3.4 No rate limiting | Confirmed | None in HTTP and no login throttle. Socket limits exist in `sc-live/src/limits.rs`. |
+| 3.5 Public is min_role 100 | Confirmed | `AuthRequirement::MinRole(100)` (`sc-api/src/endpoint.rs:207`). |
+| 4.2 Roles/users from CLI/MCP | Confirmed, cheap | The admin API has `listRoles`, `createRole`, `deleteRole`, `deleteUser` and `setUserDisabled` (`sc-server/src/handlers.rs`). The CLI and MCP do not expose them. |
+| 5.3 Per-app translations | Confirmed | `_fd_translations` rows and `locales/*.json` are per application only. |
+| 5.4 CSP blocks blob: | Confirmed | `react_csp` is `img-src 'self' data:` (`sc-app/src/react.rs:189`). |
+| 6.1 No partial restore | **Half right** | Restore only adds: an existing account is kept, never replaced (`backup/restore.rs:312`). The admin restore screen already lets you untick items. The gaps: the CLI always restores everything (`sc-cli/src/main.rs:1586`); selecting an app does not pull in its tables, stores or triggers; an app with the same id is **overwritten** (`save_application` upserts); settings sections are restored over the local ones. |
 
-E already works, through one WebSocket per stream per page (§13.2, "The observe socket"). The
-other four are not possible today.
+**The cross-cutting lesson.** The agent made tables admin-only and wrote everything as code
+queries, so the access model (ownership formulas, File fields, RLS) never helped it. Several
+workarounds were written because the access-model path was capped at 2 MiB, not because it was
+missing. Every milestone that touches the agent-facing text (`describe_code_api`, the MCP tool
+descriptions, the scaffold's `AGENTS.md`) should **steer towards tables with ownership formulas
+and File fields first**, and code queries for what those cannot express.
 
-## 2. The idea: everything is a stream, and a stream has topics
+## 2. Files: owners, streaming and resumable uploads (F2)
 
-The proposal in the brief holds up: **every update flows through a stream**, and an application
-declares the streams it exposes, exactly as it does now for MQTT. That keeps one entity, one
-admin screen, one place to set access, one socket and one client API. A trigger can also listen to
-any of these streams for free, because the stream→trigger bridge (§10.2) already exists.
+### 2.1 The owner is an authority
 
-What does not hold up is the access model streams have today. A stream has a single `min_role`.
-That is enough for E, but not for A (each user sees only their own toasts), B and D (each user
-sees only rows they may read) or C (access is per document). So a stream gains **topics**.
+`sc_files::check_access` takes the caller as well as the role. The rule (Saltcorn 1's rule):
 
-> A **topic** is a sub-channel of a stream, named by a string. A subscriber subscribes to one
-> topic. Access is decided **per topic** (at subscribe time, and again whenever it could have
-> changed) or **per element** (for every element, against the subscriber).
+> A file is **readable** if the caller's role is at or above the effective `min_role` (the
+> strictest of the store's and every folder's on the path) **or** the caller is the file's
+> owner. It is **writable** by its owner or by admin authority. Deleting follows writing.
 
-How topics are named and authorised is declared by the stream's provider, as a function of its
-configuration. This is the same way `element_type` already works:
+Admin authority in a code body (the default `fs(store)`) is unchanged and checks nothing.
+
+For "private by default" to work, every write path records an owner:
+
+| Path | Owner |
+|---|---|
+| Admin `writeFile`, `uploadFile`, `makeDirectory` | The admin (as today) |
+| REST File-field upload (`rest/mod.rs:1422`) | The signed-in caller |
+| Code `fs(store).asUser(...)` writes | That user |
+| Code `fs(store)` writes (admin authority) | None, unless `write(bytes, { owner, min_role })` says |
+| The new upload endpoint (§2.3) | The signed-in caller, or whatever the hook says |
+
+`setMeta` under user authority may still only tighten `min_role`. Under user authority it may
+not change the owner at all. Under admin authority it may.
+
+A file a user may not read is still a 404, the same answer as a missing file (§13.2's rule).
+
+### 2.2 Better file responses everywhere
+
+One response builder (in `sc-server`) serves static dirs, the REST File-field route,
+`/files/serve`, admin download and the new upload result:
+
+- It **streams from disk** instead of reading the whole file (`FileStore::open_read`, §2.4).
+- It honours **`Range`** with 206, `Content-Range`, `Accept-Ranges: bytes`, and 416 for an
+  unsatisfiable range. Multi-range requests are answered with the whole file. The compression
+  layer already skips range responses (`router.rs:417`).
+- It sets **Content-Disposition** with an RFC 5987 `filename*=UTF-8''…` beside an ASCII fallback
+  `filename="…"`. The name is the file's `meta.attributes.filename` when present, and the
+  storage basename otherwise. `?download=1` makes it `attachment`; otherwise `inline`.
+- It keeps the existing ETag and 304 behaviour, with the ETag from size + mtime + path rather than
+  a hash of the bytes, so it can be computed without reading the file.
+
+### 2.3 A resumable upload endpoint
+
+An application declares named upload slots:
 
 ```rust
-pub enum TopicSpec {
-    /// One topic. Access is the stream's `min_role` (every stream today, E).
-    Single,
-    /// The topic is a user id. A subscriber gets exactly their own topic and
-    /// never names it. Anonymous callers are refused. (A)
-    User,
-    /// The topic is the primary key of a row of `table`. Subscribing needs
-    /// **read** access to that row; publishing from a client needs **update**
-    /// access. Access uses §7.3's rule (role floor OR ownership formula). (B presence, C)
-    Row { table: String },
-    /// One topic per subscription filter. **Every element** is checked against
-    /// the subscriber's read access to the row it carries. (B, D)
-    PerElementRow { table: String },
+pub struct UploadSlot {
+    pub name: String,              // URL segment and client method name
+    pub store: String,             // must be in Application::file_stores
+    pub folder: String,            // under the store; files land in <folder>/<generated or hook path>
+    pub min_role: u8,              // who may start an upload (default: admin)
+    pub max_bytes: u64,            // per upload; capped by the server's --max-upload-bytes
+    pub mime_allow: Vec<String>,   // same matching as File fields
+    pub hook: Option<String>,      // a code query of this application, called before accepting
 }
 ```
 
-The stream's `min_role` remains a **floor on opening a subscription at all**, still defaulting to
-admin-only. Topic and element checks come **on top of it** and can only narrow access. A stream
-an admin has not considered stays closed.
+`Application.uploads: Vec<UploadSlot>`, validated in `save_application` beside
+`validate_static_dirs` (store in subset, mount not under an API, unique names, hook exists).
 
-### Three new built-in providers
+The route is `{mount}/_upload/{name}`. It speaks the **core tus 1.0 protocol plus the
+`creation` and `termination` extensions**:
 
-All three live in `sc-stream::providers` beside `mqtt`. All three are **in-process**: their
-elements come from Saltcorn itself, not from a broker.
+1. `POST` with `Upload-Length` and `Upload-Metadata` (filename, filetype) creates an upload. The
+   role, size and MIME are checked, then the hook runs with
+   `body = { filename, size, mime, slot }`. The hook may return `{ path?, meta? }` to choose
+   the final path and extra attributes, or `httpError(403|413|…)` to refuse. The answer is 201
+   with `Location: {mount}/_upload/{name}/{id}`.
+2. `PATCH` with `Upload-Offset` appends a chunk to a temp file in the store's own filesystem.
+   This is a streaming body with no 2 MiB cap; the slot's `max_bytes` is enforced while
+   reading.
+3. `HEAD` returns the current offset, so a client can resume after a dropped connection.
+4. When the offset reaches the length, the temp file is renamed into place, the meta is written
+   (owner = caller, `attributes.filename` = the original name, any hook meta), and the `PATCH`
+   response carries `Feldspar-File-Path` and `Feldspar-File-Url` (the static-dir URL if one
+   covers the file, else the REST/serve URL).
+5. `DELETE` abandons an upload. Abandoned uploads older than 24 h are swept by the existing
+   housekeeping tick.
 
-1. **`internal`** — elements are published by Saltcorn code: the `publish` action, `live.publish`
-   in a code body, or (if the configuration allows it) a client. Settings:
-   - the element type, as declared JSON keys (the MQTT form's repeating group, reused);
-   - `topics`: `single | user | row` (and `table` when `row`);
-   - `retain_last`: keep the latest element per topic for a TTL (default 1 h), sent to a new
-     subscriber first. This is MQTT's *retained* message, and it lets a page reloaded during a
-     long job show the current progress straight away;
-   - `client_publish`: `off` (the default) | `on`, under the rule below;
-   - `presence`: off | on, with `presence_fields` (user columns shown to other members; the
-     default is none, so only the user id is shown).
-2. **`table_changes`** — one element per committed insert, update or delete on `table`, with
-   `TopicSpec::PerElementRow`. Settings: `table`, `ops` (any of insert/update/delete),
-   `payload`: `row | key` (`key` sends `{op, key}` and the client refetches; use it for wide rows
-   or joined reads). The element type is **derived from the table's fields**, so the generated
-   TypeScript is the table's row type.
-3. **`document`** — a collaborative document stored in a field of a row. `TopicSpec::Row`.
-   Settings: `table`, `field` (of the new type `collab_doc`), `root` (the shared type's name,
-   default `default`, which is what TipTap's Collaboration extension uses), `root_kind`
-   (`text` for a `Y.Text`, as CodeMirror binds; `xml` for a `Y.XmlFragment`, as
-   ProseMirror/TipTap binds — `yrs` must know which to read), and an optional `text_mirror`
-   (a `String` field kept equal to the document, so it can be searched, filtered and read over
-   REST) with `mirror_format`: `text` (plain text, walked out of an `xml` root too) or `json`
-   (`root.toJSON()`). Presence is always on.
+Only the uploader (same session, or same user id) may `PATCH`, `HEAD` or `DELETE` an upload.
+Upload state (id, slot, user, length, offset, temp path, final path, meta) lives in a new table
+`_fd_uploads`, so a resume survives a server restart.
 
-E is unchanged: `mqtt` and module providers are `TopicSpec::Single`.
+### 2.4 Streaming in the store trait
 
-### Why not a separate pub/sub system beside streams
+`FileStore` gains:
 
-A separate "channels" entity would need its own admin screen, its own access settings, its own
-socket and its own client methods, and a trigger could not listen to it. Streams already have the
-envelope, the never-block delivery rule, the lagged notice, the ring, the counters and the Observe
-screen. Topics are the one thing they lack, and adding them is smaller than building a second
-system.
-
-## 3. Authorisation
-
-This is where the design is strictest. The rules:
-
-1. **The socket authenticates exactly as the application's REST API does.** It uses the same
-   function: the app's session cookie, or the native client's session header (`SessionClient`).
-   A subscriber is a `(user, role)` pair taken at upgrade time and **re-read** later (rule 6).
-2. **Origin is checked on every browser upgrade.** A WebSocket handshake is not covered by CORS,
-   and `SameSite=Strict` does not help between sibling subdomains: `appb.example.com` is
-   *same-site* with `appa.example.com`. With *Share sign-in between applications* turned on, the
-   session cookie is even scoped to the base domain. So a page on app B could otherwise open app
-   A's socket as the signed-in user. If a browser sends an `Origin`, it must be the app's own
-   origin (or that app's preview host). A request with no `Origin` is accepted only with
-   header-borne credentials, never with a cookie. This also closes the hole on the existing
-   `{mount}/streams/{name}/observe` route (L1.2).
-3. **Exposure is the application's decision.** A stream the app does not list in `streams` does
-   not exist for that app. Neither does a `table_changes` or `document` stream whose table is
-   outside the app's table subset (refused when the app is saved, and re-checked at subscribe
-   time).
-4. **Denial looks like absence.** An unknown stream, an unexposed stream, a stream below the
-   caller's role, a row topic for a row that does not exist and a row topic for a row the caller
-   may not read all get the **same** `unavailable` error. This is §7.3's rule, so subscribing is
-   never a way to probe whether a row exists.
-5. **Per-element checks for row changes.** For a `table_changes` element and a given subscriber:
-   - **insert**: delivered if the new row is readable and matches the subscription filter;
-   - **delete**: delivered as `{op:"delete", key}` if the **old** row was readable and matched.
-     Nobody learns that an unreadable row was deleted;
-   - **update**: four cases, depending on whether the old and new rows were each readable and
-     matching: `update` (both), `enter` (new only, with the row), `leave` (old only, **key
-     only**), nothing (neither). `leave` is what makes a kanban card disappear from board 7 when
-     it moves to board 8, and also when it stops being readable.
-   - The delivered row is **the row the app's REST read returns for that table**: the same
-     projection, so anything REST hides (a users table's password hash, a field outside the
-     read projection) is hidden here too. `collab_doc` fields are never included: they are
-     left out of the REST read projection altogether (not sent as `null`), and so out of the
-     generated row types too.
-   - "Readable" uses the access rule exactly: role ≥ `min_role_read` short-circuits; otherwise
-     the ownership formula is evaluated **reified** (the reference evaluator, §7.3) against the
-     row and the subscriber's `user`, with Ⱶ/Ↄ prefetches batched once per element. This works
-     the same on RLS tables, because RLS and runtime checks are specified to give the same
-     verdicts.
-   - The subscription filter uses the REST filter vocabulary (`FilterOp`) and is evaluated in
-     Rust. It gets **parity tests** against the REST read, with the same null semantics, the way
-     ownership formulas have parity tests.
-6. **Access is re-checked while the socket stays open.** A subscription is a standing read, so
-   one checked only at subscribe time would leak after a logout, a role change or an ownership
-   change. Each connection re-reads its session and user every `SessionStore::CACHE_TTL_SECONDS`
-   (60 s). A gone session closes the socket. A changed role re-checks every subscription. A
-   `Row`-topic subscription is also re-checked **immediately** when its row changes, or when a
-   row changes in any table its ownership formula reads (the Ⱶ paths and `AggUse` records already
-   list these). A subscription that fails a re-check gets `revoked` and is dropped. Logout on this
-   node closes that session's sockets at once, and L6's bus does the same on every node.
-7. **Client publishing is opt-in and stamped.** A client may publish only to an `internal` stream
-   with `client_publish: on`. On a `single` topic this needs the stream's `min_role`; on a `row`
-   topic it needs **update** access to the row; a `user` topic never accepts client publishes.
-   The value is validated against the element type. The server stamps
-   `source: {user, connection}`, and a client cannot set `source` or `received_at`.
-   Publishing is rate-limited per connection.
-8. **Server-side publishers are trusted.** The `publish` action, `live.publish` in code bodies and
-   workflow steps are admin-authored configuration, and they publish to any topic. This is the
-   trust an `insert_row` action already gets.
-9. **Presence reveals only what the admin chose.** A member is `{connection, user_id}` plus the
-   `presence_fields` the stream's settings list, plus client state (≤ 2 KB, for example a
-   cursor). Presence is visible only to members who passed the topic's read check.
-
-## 4. Transport: one multiplexed socket per page
-
-`GET {mount}/live` is **one WebSocket per page**, carrying any number of subscriptions. The
-alternative, one socket per stream (today), costs a connection, a handshake and an auth check per
-stream, and a kanban page that wants a card stream, a presence topic and a toast stream would
-open three. JSON text frames, with binary payloads (document updates) in base64:
-
-```
-client → server
-  {"type":"subscribe",   "sub":"s1", "stream":"cards_live", "topic"?: "7", "filter"?: {...}}
-  {"type":"unsubscribe", "sub":"s1"}
-  {"type":"publish",     "sub":"s2", "value": {...}}            // internal + client_publish
-  {"type":"presence",    "sub":"s2", "state": {...}}            // presence-enabled topics
-  {"type":"doc_update",  "sub":"s3", "update": "<base64>"}      // document streams
-  {"type":"ping"}
-
-server → client
-  {"type":"ready",    "sub":"s1", "element_type":…, "replayed":n, "can_publish":bool}
-  {"type":"element",  "sub":"s1", "envelope":{ "stream","topic"?, "value","received_at","source"? }}
-  {"type":"lagged",   "sub":"s1", "dropped":n}
-  {"type":"presence", "sub":"s2", "members":[…]}  then  {"type":"presence_diff", …}
-  {"type":"doc_sync", "sub":"s3", "update":"<base64>", "read_only":bool}
-  {"type":"doc_update","sub":"s3","update":"<base64>"}
-  {"type":"revoked",  "sub":"s1"}                 // access lost: re-checked and refused
-  {"type":"error",    "sub"?:"s1", "code":"unavailable"|"invalid"|"rate_limited"|…, "message"}
-  {"type":"pong"}
+```rust
+async fn open_read(&self, path: &str, range: Option<Range<u64>>) -> Result<BoxAsyncRead>;
+async fn open_append(&self, path: &str) -> Result<BoxAsyncWrite>;   // creates if missing
+async fn concat(&self, parts: &[String], to: &str) -> Result<u64>; // host-side join
 ```
 
-- **Refusals before the upgrade** (no session where the app needs one, a bad Origin) are HTTP
-  statuses, for §14.3's reason: a browser cannot read a failed handshake's body. Everything
-  after the upgrade is per-subscription and uses `error` frames.
-- **Delivery is at-most-once and never blocks the publisher** (§14.3's rule). A slow socket gets
-  `lagged`. A reconnecting client **resubscribes and gets `ready` again**. For `table_changes`,
-  the client helper treats a reconnect or a `lagged` as **resync**: `useLiveRows` refetches.
-  Replaying a gap by sequence number is left out on purpose (see §8).
-- **Limits** (configuration, with survivable defaults): 64 subscriptions per connection, 16
-  connections per user per app, 64 KB per client frame, client publishes 20/s and presence
-  updates 20/s per connection (presence is coalesced to the latest state per 50 ms). A ping
-  every 30 s; a connection silent for 90 s is closed.
-- **Document limits derive from one setting**, `max_doc_bytes` (2 MB by default), so they cannot
-  contradict each other: a server `doc_sync` may be up to `max_doc_bytes × 4/3` plus a margin
-  (base64), and a client `doc_update` frame has its own cap, `max_doc_update_bytes` (1 MB by
-  default), because pasting a long passage is ordinary editing — every other client frame keeps
-  64 KB. `doc_update`s count against the publish rate. An update that would take the document
-  past `max_doc_bytes` is refused with `too_large` and a sentence, and not applied.
-- **The per-stream app socket is removed.** `{mount}/streams/{name}/observe` and
-  `observeStream_x()` are replaced by the live socket (no backwards compatibility in the
-  prototype). The admin's `/api/streams/{id}/observe` stays, because the admin Observe screen
-  watches every topic.
+The local driver implements these directly. The git driver implements them over `local_path`.
+The default implementations fall back to `read`/`write`, so a module driver keeps working.
 
-## 5. Inside the server
+### 2.5 Files in a code body
 
-```
- publishers                          sc-live (new)                      sockets
- ──────────                          ─────────────                      ───────
- publish action ─┐
- live.publish() ─┼─► LiveHub::publish ─► internal provider sink ─┐
- client publish ─┘        (L6: via sc-bus)                       │
-                                                                 ├─► stream broadcast (exists)
- row write ─► TableEvents ─► after-commit ─► table_changes sink ─┤        │
-                                                                 │        ├─► trigger bridge (exists)
- doc_update ─► DocRoom (yrs) ─► document sink ───────────────────┘        │
-                                                                          └─► Fan-out task per stream
- mqtt / module providers ─► sink (exists) ──────────────────────────────►      │ topic index:
-                                                                               │ (stream, topic) → subs
-                                                                               └─► per-subscriber check
-                                                                                    ─► connection queue
-```
+The isolate never holds a large file. The host does the work, as `copyTo` already does:
 
-- **`sc-live`** (new crate, placed above `sc-stream` and the ownership evaluator, below
-  `sc-server`) holds the hub, the topic index, the protocol types, the subscription state machine
-  and the **authorisation decisions as pure functions** (`may_subscribe`, `deliver_to`,
-  `may_publish`), so they can be tested with tables of cases rather than sockets. `sc-server`
-  mounts the route and connects the seams, as it does for streams.
-- **Fan-out is indexed by topic.** Each running stream has one receiver per process that routes
-  each element to the subscriptions on its topic (`HashMap<(stream, topic), subs>`). Sending
-  every element to every socket and filtering there would cost elements × sockets, and a
-  per-user `job_status` stream with ten thousand users is exactly that case.
-- **Per-element checks are grouped by user.** For one `table_changes` element, the verdict is
-  computed once per distinct `(user, filter)`, not once per connection. A subscriber whose role
-  meets `min_role_read` skips the evaluator. One common formula shape gets a fast path:
-  `owner_field === user.id` is a field comparison with no isolate.
-- **Row changes are published after commit.** `TableEvents::emit` currently runs **before** a
-  `SharedTx` commits (a workflow step's write, an import). Live delivery cannot do that, because
-  it would broadcast rows that are then rolled back. `SharedTx` gains `after_commit` callbacks
-  (dropped on rollback). A write outside a shared transaction has already committed when it
-  emits, so it publishes immediately.
-- **Writes nobody watches stay free.** The row layer asks `TableEvents::observes(table, op)`
-  before doing any work for an event (`Catalog::observes_writes`). Live answers true only while
-  some connection is **subscribed** to a `table_changes` stream on that table with that op.
-  Having such a stream defined, or exposed by an app, is not enough. Otherwise a write costs one
-  lookup in a map of counters, so an update fetches its pre-image only when somebody will read
-  it. Live updates cost nothing until somebody is watching.
-- **The cost is per table, not per application.** Applications share one data layer (§13.2).
-  While anyone watches `cards`, every write to `cards` pays, whichever app made it. When a
-  write is watched, it pays: the pre-image read for an update or delete (which a trigger on that
-  table already needs, so the two share it), and for a write inside a `SharedTx`, registering an
-  after-commit callback. Nothing else.
-- **`emit` does no access work.** It hands `{op, old, new}` to the stream's sink, which is a
-  synchronous, non-blocking broadcast send (§14.3), and returns. Filter evaluation, ownership
-  checks and socket writes all run in the per-stream fan-out task, **off the write's request
-  path**. A thousand subscribers make fan-out slower, not the `INSERT`. If fan-out falls behind,
-  the broadcast channel reports `lagged` to those subscribers, and they resync. It never
-  back-pressures the writer.
-- **The `TableEvents` slot holds one listener.** `Catalog::set_table_events` replaces what was
-  there, and today that is the trigger dispatcher (`sc-server::triggers`). Installing live there
-  would silently switch off every table trigger. So the seam becomes a fan-out: the catalog
-  holds a list of listeners, `observes` is true if any listener observes, and `emit` calls only
-  those that do (L3.2).
-- **Documents use `yrs`**, the Rust port of Yjs, whose binary format is Yjs's own. That way the
-  browser uses the standard `yjs` package and every editor binding that exists for it
-  (ProseMirror/TipTap, CodeMirror, Monaco, Quill). The server keeps one `DocRoom` per open
-  `(stream, row)`: it loads the field's stored state, applies authorised updates, relays them,
-  and **persists** the merged state (debounced 2 s, and when the last member leaves) in a
-  transaction holding a row lock, merging with what is stored. CRDT merges are idempotent, so a
-  race with another process loses nothing. A persist writes the field and `text_mirror` through
-  the row layer as a system write, so update triggers and `table_changes` streams see it (the
-  `collab_doc` bytes themselves are never in an element). A persist is skipped when nothing
-  changed since the last one, so a room closing does not write an identical row. **An update
-  trigger on the table therefore fires about every 2 s while someone types**: consistent, and
-  said plainly in the docs and the tutorial, so nobody hangs an e-mail on it by surprise. REST
-  and `update_rows` **refuse** to write a `collab_doc` field, because a whole-value overwrite
-  would discard concurrent edits. The only server-side writer is `live.document(…)` in a code
-  body, which applies a CRDT update: any text edit on a `text` root, and appending a paragraph
-  on an `xml` root (arbitrary ProseMirror edits from a code body are out of scope). Reading the
-  document's text works on both kinds.
-- **Cursors are presence.** Yjs's *awareness* (cursor, selection, user colour) is ephemeral
-  per-connection state. That is what presence is, so only one mechanism exists. The server
-  never looks inside it: a member's presence state carries the bytes of
-  `encodeAwarenessUpdate` in base64 (well inside the 2 KB state limit), receivers apply it with
-  `applyAwarenessUpdate`, and a member leaving is `removeAwarenessStates` for their client id.
-- **Reconnecting with unsent edits.** `doc_sync` is the whole stored-and-room state. After each
-  `doc_sync` (the first and every one after a reconnect) the client sends what the server is
-  missing: `Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(syncUpdate))`. Edits made
-  while disconnected therefore arrive, and merging makes a repeat harmless.
+- `file.read({ offset, length })`, at most `max_file_bytes` per call.
+- `file.append(bytes)`.
+- `dir.file("out.bin").concat([part0, part1, …])`, a host-side join up to the copy limit.
+- `file.sha256()`, a host-side hex digest.
+- `file.write(bytes, { owner, min_role, filename })` (the meta options from §2.1).
+- `file.url({ download })`, the URL §2.2 serves the file at, or `null` if no route covers it.
 
-## 6. In the application
+`MAX_FILE_BYTES` and `MAX_COPY_BYTES` become server settings (`--code-max-file-bytes`,
+`--code-max-copy-bytes`), defaulting to today's values.
 
-The generated client (`src/feldspar/client.ts`) gets one typed accessor per exposed stream,
-based on its `TopicSpec` and element type. It also has one shared connection that reconnects with
-backoff and resubscribes:
+### 2.6 Binary in, binary out
 
-```ts
-live.job_status.subscribe(handlers)                       // User: no topic argument
-live.cards_live.subscribe({ where: { board: "eq.7" } }, handlers)   // PerElementRow
-live.board_presence.join(boardId, handlers)               // Row + presence
-live.board_presence.publish(boardId, value)               // only if client_publish
-live.doc_body.open(docId)                                 // Document → a Y.Doc + awareness
+A custom query gains `body_type: json | bytes` (default `json`). With `bytes`:
+
+- `body` is a `Uint8Array` of `ApiRequest.raw`, capped at `--max-request-body`.
+- `request` is bound as `{ method, contentType, headers }` (headers lower-cased, cookies and
+  authorization removed).
+- The generated client method takes `Blob | ArrayBuffer | Uint8Array` (`binary_input`, which
+  the generator already supports).
+
+Any code query may return `response({ status, headers, body })` (§3.2). When `body` is a
+`Uint8Array` it is served raw through `ApiResponse.raw` with the given content type, and the
+generated method returns a `Blob`. Headers the server owns (CSP, cookies, frame options) cannot
+be set this way.
+
+**Returning a file: custom download authorisation.** `body` may also be a file handle
+(`fs(store).open(path)`). Then the bytes never cross into the isolate. The host serves the file
+through §2.2's response builder, which streams it, honours `Range` and is not bound by
+`--code-max-file-bytes`. The options are:
+
+```js
+return response({
+  file: fs("paddi-files").open(path),
+  filename: share.original_name,   // Content-Disposition filename*; default: meta.attributes.filename
+  download: true,                  // attachment rather than inline
+  headers: { "cache-control": "private, no-store" },
+});
 ```
 
-React apps also get hooks (`src/feldspar/live-react.ts`, emitted only for the React framework).
-The non-React core is framework-neutral, so the Vue plugin and Saltcorn UI can use it too:
+This is how an app expresses any download rule the owner rule (§2.1) cannot express:
+password-protected shares, expiring links, revocation, quotas or audit logging. The query is a
+`GET` (so `<img>`, `<video>` and plain links work), its `min_role` decides who may call it, and
+its code decides the rest. Each request reruns the check, so revoking a share or changing a
+password takes effect at once. Some points about the design:
 
-```tsx
-useStream(live.job_status, (env) => toast(env.value.message));              // A, E
-const cards = useLiveRows(client.cards, { where: { board: "eq.7" } });        // B, D
-const { members, setState } = usePresence(live.board_presence, boardId);      // B, C
-const { doc, awareness, readOnly, status } = useDocument(live.doc_body, docId); // C
-```
+- The handle is read with the authority it was opened with. Under the default admin authority the
+  query is the whole access check. An `asUser` handle is also checked by §2.1 when served.
+- A `Range` request reruns the query for every range. That keeps revocation instant, at the
+  cost of one code run per seek. The response builder sends an `ETag` and `Last-Modified`, so
+  `If-Range` works.
+- A missing file is a 404, the same as the shared builder answers.
+- The generated client method for a query that can return a file returns a `Blob`, plus a
+  `<name>Url(params)` helper that builds the GET URL for `src`/`href`.
 
-**Documents live in their own file, `src/feldspar/live-doc.ts`**, emitted (regenerated, like
-the rest of `src/feldspar/`) only when the app exposes a `document` stream. It holds the typed
-`live.<doc>.open` accessors and, for React, `useDocument`. `helper.ts` and `live-react.ts` never
-import `yjs`, so an app without documents ships none of it, and neither do the four admin/IDE
-UIs that carry a copy of `helper.ts`. `package.json` is written once and owned by the developer,
-so `yjs` and `y-protocols` are **always** in the scaffold's dependencies: a package that is
-installed but not imported costs no bundle bytes, while one added only "when a document stream
-is exposed" would break `tsc --noEmit` for any app that exposes one after it was scaffolded.
-`yjs` is pinned to the major the editor bindings expect (`^13`), because two copies of `yjs` in
-one bundle break its constructor checks. `AGENTS.md` tells the coding agent to load the editor
-page with `React.lazy`, so `yjs` lands in that page's chunk only, and to install the editor
-binding as an ordinary dependency.
+## 3. The runtime (F1, F3)
 
-`useLiveRows` reads with the REST client, subscribes with the **same filter**, applies
-`insert/update/delete/enter/leave`, keeps the requested order, and refetches on `resync`. With
-`payload: key`, or a `select` that has joins, it refetches the changed keys instead of trusting
-the element.
+### 3.1 New globals
 
-## 7. Server-side publishing (A)
+These are all defined in SETUP with `fixed(...)`, like the existing globals:
 
-- **`publish` action** (`sc-core-actions`): settings `stream`, `topic` (a formula; for a `user`
-  stream the default is `user.id`, the event's user), `value` (a map of formulas). It works as a
-  trigger body and as a workflow `Action` step. A workflow run carries the user who started it
-  (`_fd_runs.user_id`), so `user.id` is "the user who clicked the button". A `user` topic with
-  no user (a periodic trigger) is a run error that names the trigger, not a silent drop.
-- **`live.publish(stream, topic, value)`** in a JS code body and in a Python body, beside `db`,
-  `fetch`, `fs` and `trigger`. Inside a long loop, this is how a progress bar moves.
-- **Durable notifications are a table.** Live delivery is ephemeral: a toast published while the
-  user is offline is lost, and `retain_last` keeps only the latest one. An app that needs a
-  notification inbox inserts a row into a `notifications` table and exposes a `table_changes`
-  stream on it filtered to `recipient === user.id`. That is D, and needs nothing new.
+- `btoa`, `atob`, `TextEncoder`, `TextDecoder` (UTF-8 only): thin wrappers over `__scCodec`.
+- `crypto.getRandomValues(typedArray)` and `crypto.randomUUID()`: one sync op over
+  `getrandom`.
+- `crypto.subtle.digest("SHA-256"|"SHA-384"|"SHA-512", data)`, plus `crypto.subtle` HMAC
+  through `importKey("raw", …, { name: "HMAC", hash })`, `sign` and `verify`. These are async
+  ops; add the `hmac` crate.
+- `crypto.password.hash(pw)` and `crypto.password.verify(pw, hash)`: argon2id with the same
+  parameters `sc-auth` uses. They are async ops on the blocking pool, so they do not count
+  against the JS slice.
 
-## 8. Deliberately left out
+We do not pull in `deno_web` or `deno_crypto`: without a snapshot their JS is read from
+build-machine paths (`Cargo.toml:326-337`).
 
-- **Gap replay by sequence number.** Resync-by-refetch is simpler and always correct. Replay
-  would need a per-topic history, which streams deliberately do not keep (§14.3).
-- **Writes made outside Saltcorn** (direct SQL, another tool) produce no `table_changes`
-  elements. Postgres logical decoding could add them later as a different provider.
-- **Sharing one external subscription across a cluster.** In L6, internal, table-change and
-  document elements cross processes over the bus. An MQTT stream is still subscribed once per
-  process (§14.3's limitation, unchanged).
-- **Offline document editing.** Yjs supports it on the client (`y-indexeddb`), and the server
-  needs nothing extra, but it is not built or tested here.
-- **A seeded `notifications` stream.** Bootstrap seeds no entity nobody asked for (§7.4's rule).
-  The tutorial creates one.
+### 3.2 Status codes and error bodies
+
+- `httpError(status, message, body?)` throws a frozen tagged object.
+  - `__scInvoke` recognises the tag and calls a new `op_sc_http_error(token, status, message, body)`.
+  - The host returns `ApiResponse::with_status(status, body ?? { error: message })`.
+  - Status must be 400–599. Anything else is a 500 with a logged reason.
+- `response({ status, headers, body })` as a return value is the success-side equivalent (§2.6).
+- Any other thrown error or rejection is a **500** to callers who are not admins, with body
+  `{ "error": "internal error", "id": "<log id>" }`. The full text (query name, stack) goes to the
+  log under that id and to admin callers (`Audience::Admin`) as today, without the doubled
+  `invalid:` prefix.
+- Watchdog and heap trips are 503 with `{ "error": "timeout" }` for callers who are not admins.
+
+### 3.3 The code library
+
+A **code library** is named, shared code that code queries and triggers import:
+
+| Column | Notes |
+|---|---|
+| `id` | UUID |
+| `name` | Identifier-like, unique per scope |
+| `description` | |
+| `code` | A function body that assigns to `exports` |
+| `application_id` | NULL = instance-wide |
+
+The table is `_fd_code_libraries`.
+
+- **Using it:** `const { hashPassword } = lib("auth");`. `lib` is synchronous.
+- **Where it runs:** a library body runs **with the calling body's handles and authority** (`db`, `fs`,
+  `fetch`, `user`, …), so a library can never do more than the body that imported it.
+  It is evaluated once per isolate per `(library id, generation, caller authority)` and cached
+  like `BodyCache`.
+- **Name resolution:** the application's own library first, then the instance-wide one. A trigger with no
+  application sees instance-wide libraries only.
+- **Cycles:** a cycle is an error naming the chain.
+- **Saving:** a save compile-checks the code and bumps a generation, which invalidates every isolate's cache.
+- `require` still throws, and its message now points at `lib()`.
+
+**Where to manage it:** the admin UI has Settings → Development → **Code library**. That screen
+is a list plus the same editor and typings (`ui/admin/src/codeTypes.ts`) code queries use, and
+it shows "used by" (queries and triggers whose code mentions `lib("name")`). MCP has
+`describe_code_libraries` and `save_code_library` / `delete_code_library`; saving needs
+`allow_edit` and deleting needs `allow_drop`. Libraries are a backup kind
+(`code-libraries.json`).
+
+## 4. Query contracts and abuse (F4)
+
+- **Response schema.** A custom query has an optional `returns`: a small JSON type language
+  (`"string" | "int" | "float" | "bool" | "json" | {object: {...}} | {array: T} | {optional: T} |
+  {union: [...]}`) lowered to `TypeSchema`. The generator emits `XResponse` from it. Responses are
+  validated in previews only (mismatch → log warning, response unchanged).
+- **Rate limits.** `sc-ratelimit` (or a module of `sc-auth`): an in-memory token bucket keyed by
+  string, generalised from `sc-live/src/limits.rs`. It is used three ways:
+  1. **Per query:** `rate_limit: { per_ip: "20/min", per_user: "120/min" }`. A public code query
+     with none configured gets `60/min` per IP. Over the limit, the answer is 429 with `Retry-After`.
+  2. **Login and password reset**, per IP and per email.
+  3. **In code:** `ratelimit.hit(key, { max, window })` returns `true` while under the limit,
+     and `ratelimit.check(...)` throws `httpError(429)` instead. Keys are namespaced per
+     application. This is how a password-protected share limits guesses **per share**,
+     which per-IP limits cannot do.
+  - The client IP comes from the socket address, or from `X-Forwarded-For` only when the peer is
+    in a new `--trusted-proxies` list.
+
+## 5. Partial restore (F5)
+
+- `Selection::closure_for_application(&app)`: the application, its `tables` (with rows), its
+  `file_stores`, its `triggers` and every trigger on its tables, its `streams`, its code
+  libraries, and the users referenced by its tables' user-reference columns.
+- `feldspar backup --app SUB [--app SUB…]` writes the union of those closures. The manifest
+  records `scope: "applications"`.
+- `feldspar restore FILE` gains:
+  - `--only KIND:NAME[,…]` (kinds: `app`, `table`, `rows`, `store`, `trigger`, `stream`,
+    `library`, `users`, `settings`, …). Dependencies are added unless `--no-dependencies`.
+  - `--no-settings`, `--no-users` (users that rows reference are still matched or created).
+  - `--as-new`: applications get new ids and a free subdomain (`free_subdomain`), instead of
+    overwriting the app with the same id. Tables and stores that already exist are reused, as
+    restore does today.
+  - `--dry-run`, which runs the restore inside a transaction that is rolled back where the database
+    allows it, or otherwise reports the plan without writing.
+- The admin restore screen gains "include dependencies" for each ticked application. Settings,
+  SSL and users start **unticked** when the manifest's `source` differs from this instance.
+- Backup and restore stay out of MCP (§13.6).
+
+## 6. Shared translations (F6)
+
+- The instance-wide catalogue is held in `_fd_translations` rows with `application_id` NULL, one per
+  locale, in the existing `messages` JSON shape.
+- Lookup is **app → instance → key**. The merge happens server-side in
+  `GET {mount}/i18n/{locale}.json`, so the generated client and `useT` are unchanged. A key the app
+  defines wins; an empty string in the app's catalogue counts as missing.
+- The instance catalogue's locales are the instance's `enabled_locales`.
+
+## 7. Deliberately left out
+
+- **Signed, expiring file URLs.** With owners as an authority (§2.1), an upload hook (§2.3)
+  and custom queries that return a file handle (§2.6), private files no longer need unguessable
+  paths. An app that wants expiring links writes them as a query.
+- **Configurable JS slice and per-query limits** (report 2.4). The 1 s slice stays. Host-side file
+  operations (§2.5) and async crypto (§3.1) remove the CPU-heavy work that motivated it.
+- **Unifying the build steps** (report 5.1: `npm run build` not regenerating, `build-app` not
+  reinstalling on a `package.json` change).
+- An explicit `public` flag stored separately from `min_role` (report 3.5). The UI and MCP
+  *show* it (F1.6), but min_role 100 stays the single stored fact.
 
 ---
 
@@ -385,370 +331,271 @@ the element.
 ## Ground rules for every milestone
 
 - **Runnable after every milestone.** When a milestone's last task is ticked, `feldspar serve`
-  starts, the admin UI loads, a React app can be built against the new client, and the
-  milestone's **Try it** walkthrough works by hand in two browser windows signed in as
-  different users. The milestone's last task turns that walkthrough into a part of
-  `docs/tutorial-live.md` and a definition-of-done test.
-- **Authorisation has its own tests, not just happy paths.** Every milestone that adds a way to
-  receive something adds tests that a user who must not receive it **does not**, including
-  denial-looks-like-absence (the same `unavailable` frame for "missing" and "forbidden").
-- **Two users, two connections.** Socket tests use a real server and real WebSocket clients
-  (the `app_streams.rs` pattern), not just unit tests of the hub.
+  starts, the admin UI loads, a React app built from `create_application` builds against the new
+  client, and the milestone's **Try it** works by hand.
+- **Authorisation has its own tests, not just happy paths.** Every task that serves or accepts a
+  file, or exposes a new tool, adds a test that a caller who must not get it **does not**. A refused
+  read is a 404, the same as a missing file.
+- **The agent-facing text follows the code.** Any change a coding agent could use updates
+  `crates/sc-api/src/mcp/code_api_js.md` (`describe_code_api`), `ui/admin/src/codeTypes.ts`,
+  the relevant MCP tool descriptions and the scaffold's `AGENTS.md` (`sc-app/src/scaffold/files.rs`),
+  in the same task.
 - **Clients.** An `sc-api` schema change regenerates `client.ts` in every UI that has a copy
   (`ui/admin`, `ui/ide`, `ui/builder`, `ui/analytics`). The generated app client is checked by
   `typescript_typecheck.rs`.
-- **Browser checks.** Anything that renders (toasts, the kanban demo, the editor) gets a
-  puppeteer check against a scratch DB, as in the analytics milestones.
 - **Migrations.** No backwards compatibility. If stored data must change shape, idempotent SQL
   goes in `TABLES_RENAME.sql`, for Postgres and SQLite.
-- **Documentation follows the code.** Each milestone updates `docs/TECHNICAL_DESIGN.md` (a new
-  §14.10 "Live updates", and edits to §13.2 and §14.3) and grows `docs/tutorial-live.md` by one
-  part.
+- **Documentation follows the code.** Each milestone updates `docs/TECHNICAL_DESIGN.md`: §10.1 for the
+  code body's `fs`, globals and errors; §13.2 for uploads and static dirs; §13.4 for custom
+  queries; and §14.1 for file stores, which is out of date (it lists an S3 driver and an old trait).
 
 ---
 
-## L1 — One live socket, with the access rules (E, done properly)
+## F1 — Quick wins
 
-Moves the existing app-side stream observing onto `{mount}/live`, with the Origin check and
-re-checking. No new providers yet. Everything later builds on this.
+None of these needs a design beyond Part I. Each one deletes a workaround from the report.
 
-### Phase 1: the crate and the protocol
-- [x] **L1.1** Create `sc-live`: the protocol frame types (serde, tagged on `type`), the
-  `Subscription` state machine, the topic index and the limits as configuration. Decide where it
-  sits in the layers and record it in TECHNICAL_DESIGN §2. Unit-test the frame round-trips,
-  including that an unknown client frame type is an `invalid` error and not a dropped
-  connection.
-- [x] **L1.2** Origin check for browser upgrades: one function used by `{mount}/live`, the
-  existing `{mount}/streams/{name}/observe` (until L1.7 removes it) and the admin sockets
-  (`/api/streams/{id}/observe`, chat, LSP). Test: with a shared session cookie, a sibling
-  subdomain's Origin is refused with 403, the app's own Origin and its preview host are
-  accepted, and a request with no Origin is refused when it carries a cookie.
-- [x] **L1.3** `TopicSpec` on `StreamProvider` (default `Single`), and `topic` as an optional
-  field of the envelope. The envelope is a wire contract, so the change goes in the CHANGELOG
-  and the docs. `mqtt` and `PollingProvider` stay `Single`.
-
-### Phase 2: the socket
-- [x] **L1.4** Mount `GET {mount}/live`. Authenticate with the same function the app's REST API
-  uses (cookie or native header). Anonymous is allowed and holds the public role, and each
-  subscription decides. Pre-upgrade refusals are statuses; everything after is a frame.
-- [x] **L1.5** Subscribe and unsubscribe for `Single` streams: exposure (`exposes_stream`), the
-  stream's `min_role`, and the one `unavailable` code for unknown, unexposed and forbidden
-  streams. `ready` + ring replay + `element` + `lagged` + `status`, reusing `observe.rs`'s
-  sending code rather than copying it. Tests: two subscriptions on one socket both receive; a
-  role below the floor gets `unavailable`, the same frame as a misspelt name.
-- [x] **L1.6** Re-checking: each connection re-reads its session and user every
-  `CACHE_TTL_SECONDS`. A gone session closes the socket with a reason. A lowered role sends
-  `revoked` for every subscription that no longer passes. Logout on this node closes that
-  session's sockets immediately (a hook on `SessionStore::logout`). The clock is a parameter, so
-  the test runs in milliseconds.
-- [x] **L1.7** Remove the per-stream app route `{mount}/streams/{name}/observe` and
-  `observeStream_x()`. Keep the admin observe socket. Update tutorial-streams step 6.
-- [x] **L1.8** Limits: subscriptions per connection, connections per user per app, frame size,
-  ping/pong and idle close. Each limit has a test that crosses it and checks the error frame.
-
-### Phase 3: the client
-- [x] **L1.9** Generated client: one shared `LiveConnection` (lazy open, reconnect with capped
-  exponential backoff and jitter, resubscribe everything, `resync` to every handler after a
-  reconnect), and `live.<stream>.subscribe(handlers)` typed from the element type. Update
-  `typescript_typecheck.rs`.
-- [x] **L1.10** React hooks file `src/feldspar/live-react.ts`, emitted for React apps only:
-  `useStream(accessor, onElement)` with cleanup on unmount and a `status` value
-  (`connecting | open | reconnecting`). Add it to the React scaffold's `AGENTS.md` contract
-  (§13.3) so the coding agent knows about it.
-- [x] **L1.11** Admin: the Streams list shows live subscriber counts per stream (from the hub),
-  beside the existing counters.
+- [ ] **F1.1** (3.1) The generated client always gives a POST/PUT/PATCH `javascript`/`python`
+  custom query a `body` argument, typed as the declared params `& Record<string, unknown>`
+  (all optional when nothing is declared). GET/DELETE get an optional `query` argument the same
+  way. `save_api_query` and the admin editor return a note when a code query declares no params.
+  Tests: a no-params code query's generated method sends its body, and the query sees it.
+  `typescript_typecheck.rs` covers both shapes.
+- [ ] **F1.2** (2.1) `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto.getRandomValues` and
+  `crypto.randomUUID` (§3.1). Tests: round-trips against known vectors, including non-ASCII
+  and binary; `getRandomValues` refuses more than 65 536 bytes as the Web API does.
+- [ ] **F1.3** (2.1) `crypto.subtle.digest`, HMAC (`importKey`/`sign`/`verify`) and
+  `crypto.password.hash/verify` (§3.1). Tests: NIST and RFC 4231 vectors; a password hash
+  verifies, a wrong password does not, and hashing does not trip the 1 s slice.
+- [ ] **F1.4** (2.3) `httpError` and `response` (§3.2), plus the 500/503 bodies without stack traces
+  for callers who are not admins. Tests: `httpError(401, …)` is a 401 with `{error}`; a plain throw is a
+  500 with no stack and no query name for an anonymous caller, but the full text for an admin;
+  `response({status: 201, headers, body})` is honoured, and a `set-cookie` header is refused.
+  Triggers called as endpoints behave the same way.
+- [ ] **F1.5** (2.5) Listing entries keep `name`, `isDirectory`, `size` and `modified`, both as
+  properties and in `toJSON`. `stat()` on a listed entry works for files and directories. Test:
+  `JSON.stringify(fs(s).dir("").list())` contains all four fields.
+- [ ] **F1.6** (3.5) "Public" is shown wherever min_role 100 is: a badge in `CustomQueries.tsx`
+  and the app's endpoint list, and `public: true` in `describe_applications`. `save_api_query`
+  accepts `public: true` as a synonym for `min_role: 100` (both together must agree). Test: the
+  MCP round-trip.
+- [ ] **F1.7** (5.4) The React CSP default becomes `img-src 'self' data: blob:` and
+  `media-src 'self' blob:`. `AGENTS.md` gains a CSP paragraph (where the policy is, how to widen it
+  through `update_application`, and that it needs `allow_access_changes`). Test: the default policy
+  string.
+- [ ] **F1.8** (4.2) CLI: `feldspar role list|add NAME --level N [--description]|delete NAME`,
+  `feldspar delete-user EMAIL`, and `modify-user EMAIL --disabled|--enabled`, all over the
+  existing `sc-auth` functions. Tests in the CLI suite.
+- [ ] **F1.9** (4.2) MCP: project `listRoles`, `createRole`, `deleteRole`, `listUsers`,
+  `setUserDisabled` and `deleteUser` with `.mcp(...)`. Creating or changing needs
+  `allow_access_changes`; deleting also needs `allow_drop`. Tests: each refusal names its grant,
+  and an admin cannot disable or delete the last admin.
+- [ ] **F1.10** `describe_code_api` and `AGENTS.md` gain a short "choosing where logic goes"
+  section (Part I §1, the cross-cutting lesson): tables with ownership formulas and File fields
+  first, code queries for the rest, and never hand-written base64 or SHA again.
 
 ### Try it
-1. Run the tutorial-streams broker and `boiler` stream. Set its min role to Member and expose it
-   on a React app.
-2. In the app, `useStream(live.boiler, …)` shows the latest temperature. `mosquitto_pub` a
-   reading and it updates without a reload.
-3. Open the browser's network tab: one socket, `/live`.
-4. Sign out in another tab: within a minute the socket closes. Sign in as a user below Member:
-   the subscription gets `unavailable`.
+1. Save a code query with no params that returns `{ id: crypto.randomUUID(), b: btoa("hi") }`
+   and call it from a React app with `api.q({ anything: 1 })`. The body arrives.
+2. `throw httpError(401, "sign in")` returns a 401 that the client's error carries, with no stack.
+3. `feldspar role add Editor --level 40` from a terminal, then pick it in the query's role select.
 
-- [x] **L1.12** Tutorial part 1 (`docs/tutorial-live.md`: the live socket, observing an external
-  stream from React) and its definition-of-done test. TECHNICAL_DESIGN §14.10 started; §13.2's
-  observe-socket paragraph rewritten.
+- [ ] **F1.11** Tutorial: extend `docs/tutorial-rest-queries.md` with a "code queries from React"
+  part (body, status codes, crypto), and add a definition-of-done test.
 
 ---
 
-## L2 — Internal streams and server-side publishing (A)
+## F2 — Files: owners, streaming and resumable uploads
 
-### Phase 1: the provider
-- [x] **L2.1** The `internal` provider: config spec (declared keys, `topics: single|user|row`,
-  `table` when `row`, `retain_last` + TTL, `client_publish`, `presence`, `presence_fields`), and
-  `element_type` and `TopicSpec` from the configuration. Validation: the `row` table exists and
-  has a single-column primary key, and every `presence_fields` entry is a column of `users`.
-- [x] **L2.2** *(Built with the sink held by the running stream and found by name through the
-  supervisor, not a separate registry — TECHNICAL_DESIGN §14.10 says why.)*
-  `LiveHub`: a process-wide registry from stream name to the internal provider's
-  sink, filled in by `subscribe` and emptied when the subscription is dropped.
-  `LiveHub::publish(stream, topic, value)` validates against the element type (counted as
-  `malformed` and refused on a mismatch) and delivers. Publishing to a stopped or unknown stream
-  is an error the caller sees.
-- [x] **L2.3** `retain_last`: the latest envelope per topic, with a TTL and a cap per stream,
-  sent after `ready` (counted in `replayed`).
+### Phase 1: owners and responses
+- [ ] **F2.1** (1.3) `check_access` takes the caller (role + user id) and applies the owner rule
+  (§2.1). Every caller of `check_access`, `filter_visible` and `visible_entries` passes the caller.
+  Listings show a user's own files inside a folder they could not otherwise read. Tests:
+  - a min_role 1 file owned by user A is served to A and is a 404 to B and to anonymous, on
+    static dirs, `/files/serve` and the REST field route;
+  - B cannot overwrite or delete A's file through `asUser`.
+- [ ] **F2.2** (1.3) Record the owner on every write path in the table in §2.1, and add the
+  `write(bytes, { owner, min_role, filename })` options to the code `fs`. `setMeta` rules as in
+  §2.1. Tests: one per write path, and that a user cannot take ownership through `setMeta`.
+- [ ] **F2.3** (1.3) The shared file response builder (§2.2) with streaming, Range,
+  Content-Disposition (`filename*`) and the cheap ETag, used by static dirs, the REST field
+  route, `/files/serve` and admin download. Tests:
+  - `Range: bytes=0-99` gives 206 with 100 bytes;
+  - a suffix range works, and an out-of-range one gives 416;
+  - a `naïve 名前.png` filename survives;
+  - a 50 MB file is served without the server's RSS growing by 50 MB (an `open_read` test double
+    that counts).
+- [ ] **F2.4** `FileStore::open_read`, `open_append` and `concat` (§2.4), in the local and git
+  drivers, with default fallbacks. Unit tests per driver, including that `concat` with a
+  missing part fails without leaving a partial target.
 
-### Phase 2: topic access
-- [x] **L2.4** `User` topics: the subscriber names no topic and gets their own user id;
-  anonymous gets `unavailable`. Test: user X's elements never reach user Y, including through
-  `retain_last`.
-- [x] **L2.5** `Row` topics: subscribing checks read access to the row with the §7.3 rule
-  (`may_subscribe` in `sc-live`, a pure function over row, user and table access, plus a test
-  table). A missing row and an unreadable row give the same `unavailable`. Test on a runtime-check
-  table and on an RLS table.
-- [x] **L2.6** Re-checking `Row` topics when they could have changed: on a write to the topic's
-  row, or to any table its ownership formula reads (Ⱶ paths and `AggUse`), re-check the affected
-  subscriptions and send `revoked` to those that now fail. Test: removing a user's share row
-  (the tutorial-ownership `shares` pattern) revokes their subscription without waiting for the
-  60 s interval.
+### Phase 2: large uploads
+- [ ] **F2.5** (1.1) An explicit `DefaultBodyLimit` on the router from a new
+  `--max-request-body` setting (default 2 MiB, as today), and the 256 MiB constant
+  (`router.rs:440`) becomes `--max-upload-bytes`. Test: both are honoured, and an oversize body is
+  a JSON 413 `{error}` rather than axum's plain text.
+- [ ] **F2.6** (1.1) `UploadSlot` and `Application.uploads` (§2.3): model, validation in
+  `save_application`, `_fd_uploads`, the admin form section (a repeating group on the application
+  form) and `update_application`'s `uploads { add, remove }` section (needs `allow_edit`).
+  Included in backups with the application.
+- [ ] **F2.7** (1.1) The tus routes `{mount}/_upload/{name}` (§2.3): create (with the role, size,
+  MIME and hook checks), `PATCH` streaming into `open_append`, `HEAD`, `DELETE`, completion
+  (rename, meta, path and URL headers) and the 24 h sweep. Tests:
+  - a 30 MB upload in 5 MB chunks, interrupted after the second chunk, resumes from `HEAD`'s
+    offset and completes;
+  - another user's `PATCH` is a 404;
+  - the hook's `httpError(403)` refuses at creation;
+  - `max_bytes` is enforced mid-stream;
+  - the completed file is owned by the uploader and keeps its original name.
 
-### Phase 3: publishers
-- [x] **L2.7** The `publish` action in `sc-core-actions`: `stream` (a picker over internal
-  streams), `topic` (a formula, defaulting to `user.id` for `user` streams), `value` (a map of
-  formulas). A `user` topic with no user is an error naming the trigger. Works as a trigger body
-  and as a workflow Action step. Test: a workflow started by user X publishes "started", sleeps,
-  publishes "finished", and only X's socket receives both.
-- [x] **L2.8** `live.publish(stream, topic, value)` in JS code bodies (beside `db`) and in
-  Python bodies (`sc-python`), with the same validation. Not bound in formulas. Test: a
-  `run_js_code` loop publishing ten progress elements arrives in order.
-- [x] **L2.9** Admin: the stream form renders the internal provider's settings (it already
-  renders whatever the spec declares, so check the repeating group and the conditional `table`
-  field). The Observe screen gets a **topic** column and a topic filter box. The trigger form's
-  action picker lists `publish`.
-- [x] **L2.10** Client: `live.<s>.subscribe(handlers)` for `user` streams (no topic) and
-  `live.<s>.subscribe(topic, handlers)` for `row` streams, typed. React:
-  `useStream(live.job_status, …)` and a `useLatest(live.job_status)` helper that returns the
-  latest element (what a progress bar wants).
+### Phase 3: code bodies
+- [ ] **F2.8** (1.2) `file.read({offset, length})`, `append`, `concat`, `sha256` and `url` in the
+  code `fs` (§2.5), plus the `--code-max-file-bytes` and `--code-max-copy-bytes` settings. Tests:
+  joining three parts into a 20 MB file and hashing it works, with no 8 MB error.
+- [ ] **F2.9** (1.4) `body_type: bytes`, the `request` binding, and raw `response` bodies (§2.6),
+  through `code_scope`, the admin editor, `save_api_query` and the generator (`Blob` in and out).
+  Tests: a PNG POSTed raw arrives as a `Uint8Array` with the right length; a query returning
+  `response({ body: bytes, headers: { "content-type": "image/png" } })` is served as an image.
+- [ ] **F2.10** (1.3) File handles as `response` bodies (§2.6): served by the shared response
+  builder, with `filename` and `download`. The generator emits `Blob` and `<name>Url(params)`.
+  `describe_code_api` and `AGENTS.md` show the password-protected share pattern. Tests:
+  - a GET query that checks a password and returns a 50 MB file serves it with Range (206) and
+    the original filename, without the 8 MB limit;
+  - a wrong password is the query's `httpError(403)`;
+  - after the share row is deleted, the next range request of the same URL is refused;
+  - a handle opened `asUser` on a file that user cannot read is a 404.
+
+### Phase 4: the client
+- [ ] **F2.11** (1.5) `helper.ts` gains `upload(slot, file, { onProgress, signal, retries,
+  chunkSize })`, a tus client with resume across retries (fingerprint in `localStorage`, wrapped in
+  try/catch), and the generator emits `api.uploads.<name>(file, opts)` for each slot, resolving to
+  `{ path, url }`. Tests: `typescript_typecheck.rs`, and a puppeteer check that uploads a 20 MB
+  file through a throttled connection with one forced disconnect.
 
 ### Try it
-1. Create an internal stream `job_status`: keys `message` (text), `progress` (float, optional),
-   topics `user`, `retain_last` on, min role Member. Expose it on a React app.
-2. Create a workflow `long_report`: `publish` "Started" → `wait` 10 s with progress publishes in
-   a code step → `publish` "Done". Expose it as a trigger.
-3. As Alice, click the button: a toast says "Started", a progress bar moves, and a toast says
-   "Done". Bob, signed in at the same time, sees nothing.
-4. Reload Alice's page halfway through: the progress bar shows the current value straight away.
+1. Add an upload slot `drop` (store `files`, folder `drops`, min role Member, 1 GB) to a React app.
+2. Drag a 300 MB video in, kill the network halfway through, and restore it. The progress bar
+  continues from where it stopped.
+3. Play the video from its returned URL and seek. Range requests are answered.
+4. Open the same URL in a private window. It is a 404.
+5. Write a GET query `shareFile({ token, password })` that looks the share up, verifies the
+   password with `crypto.password.verify` and returns `response({ file, filename, download: true })`.
+   Open its URL in the private window: the file downloads under its original name. Delete the
+   share, reload, and it is refused.
 
-- [x] **L2.11** Tutorial part 2 (notifications and progress from a workflow) and its
-  definition-of-done test. TECHNICAL_DESIGN §14.10 internal streams, topics, `publish`; §10.1
-  `live` in code bodies.
+- [ ] **F2.12** Tutorial `docs/tutorial-file-fields.md` part 2 (private uploads and
+  authorised downloads from React: slots, owners, serving, a password-protected share) and its definition-of-done test. TECHNICAL_DESIGN §13.2 and §14.1
+  updated.
 
 ---
 
-## L3 — Table change streams (B, D)
+## F3 — The code library
 
-### Phase 1: getting the event out of the write path, correctly
-- [x] **L3.1** `SharedTx::after_commit(callback)`: run after commit, dropped on rollback. Test: a
-  workflow step whose write is rolled back publishes nothing; one that commits publishes once,
-  after the commit.
-- [x] **L3.2** *(Done with L2.6, which needed a second listener first; keyed, so a second
-  install under the same key replaces.)* Make the `TableEvents` seam hold more than one listener:
-  `Catalog::add_table_events` instead of the replacing `set_table_events`, with `observes` as the
-  OR over listeners and `emit` called only on the listeners that observe. Update the callers
-  (`sc-server::triggers` and the tests that install a dispatcher). Test: with both the trigger
-  dispatcher and live installed, a table trigger still fires.
-- [x] **L3.3** *(A minimal `table_changes` provider — `table`, `ops`, `PerElementRow`, no
-  replay — came with it, so there is a stream to subscribe to; L3.4 completes it. The element on
-  the stream is `{op, key, old, new}`; the per-subscriber shape is the fan-out's.)* The live `TableEvents` listener: `observes(table, op)` is true only while a
-  connection is **subscribed** to a `table_changes` stream on that table with that op (a counter
-  per `(table, op)` that the hub keeps, read without awaiting anything). A stream that is defined
-  and exposed but has no subscriber does not count. `emit` hands `{op, old, new}` to the stream's
-  sink after commit, and does no filter or access work. Tests: an unobserved update does not
-  fetch its pre-image (the existing choke-point test pattern); after the last subscriber
-  unsubscribes, `observes` is false again; and a write's latency does not grow with the number
-  of subscribers (fan-out work runs off the write path).
-
-### Phase 2: the provider and per-element access
-- [x] **L3.4** The `table_changes` provider: `table`, `ops`, `payload: row|key`. The element type
-  comes from the table's fields (re-derived when the schema changes, through the
-  `SchemaChanged` observer, so a new column reaches the generated types at the next build). The
-  element is `{op, key, row?}`. Saving the stream refuses a table that does not exist. Saving an
-  app refuses an exposed `table_changes` stream whose table is outside the app's subset.
-- [x] **L3.5** Projection: the delivered row is the REST read projection for that table, from
-  the same function REST uses (no second list of hidden fields). `collab_doc` fields are left
-  out. Test on `users`: no password hash.
-- [x] **L3.6** Subscription filters: the REST `where` vocabulary, validated on subscribe
-  (`invalid` for an unknown field), evaluated in Rust. **Parity tests**: for a matrix of filters
-  × rows (with nulls), the Rust verdict equals "the REST read with this filter returns the row".
-- [x] **L3.7** `deliver_to` in `sc-live`, a pure function: (old, new, readable_old,
-  readable_new, matches_old, matches_new) → `insert | update | enter | leave | delete | nothing`.
-  Test it with the full truth table, including that `leave` and `delete` carry no row.
-- [x] **L3.8** Readability per subscriber: the role floor short-circuits; otherwise the
-  ownership formula is evaluated reified, with Ⱶ/Ↄ prefetches batched once per element and
-  verdicts computed once per distinct user. Fast path for `field === user.id`. Tests: the
-  ownership tutorial's formulas (owner, shares via Ↄ, publisher via Ⱶ) × two users × each op.
-  A row a user could never read produces no frame of any kind for that user.
-- [x] **L3.9** Counters for the hub: elements checked, delivered, suppressed by access,
-  suppressed by filter, and evaluator time. Shown on the stream's row in the admin list.
-
-### Phase 3: the client
-- [x] **L3.10** `live.<s>.subscribe({ where }, handlers)` typed with the table's row type and the
-  REST client's filter type (one type, shared).
-- [x] **L3.11** `useLiveRows(client.<table>, { where, orderBy, select })`: fetch, subscribe with
-  the same filter, apply the five ops while keeping order, refetch on `resync` and `lagged`, and
-  refetch changed keys when `payload: key` or when `select` has joins. Unit-test the reducer in
-  TypeScript (vitest, the `ui/admin` setup) without a server.
+- [ ] **F3.1** (2.2) `_fd_code_libraries`, its catalog store, and backup/restore as a kind
+  (§3.3). Tests: CRUD and the backup round-trip.
+- [ ] **F3.2** (2.2) `lib(name)` in the runtime: resolution (app, then instance), evaluation with
+  the caller's handles and authority, the per-isolate cache keyed by generation, cycle errors and
+  the `require` message. Tests:
+  - two queries share a helper;
+  - editing the library changes both on the next call;
+  - a library's `fs` under a query running `asUser` cannot read what that user cannot;
+  - a cycle names the chain;
+  - a trigger with no application cannot see an app library.
+- [ ] **F3.3** (2.2) Admin UI: Settings → Development → Code library (list, editor with the
+  code typings, compile check on save, "used by"). Puppeteer check.
+- [ ] **F3.4** (2.2) MCP: `describe_code_libraries`, `save_code_library` and
+  `delete_code_library` with the grants in §3.3. `describe_code_api` documents `lib()`.
+  Tests: the grant refusals, and a save with a syntax error is refused with the line.
 
 ### Try it
-1. Tables `boards` and `cards` (`board` → boards, `column` text, `position` float, `title`). An
-   ownership formula on `cards`: readable if the user is a member of the card's board (an Ↄ over
-   `board_members`).
-2. A `table_changes` stream `cards_live` on `cards`, min role Member, exposed on a React kanban
-   app that uses `useLiveRows(client.cards, { where: { board: `eq.${id}` }, orderBy: "position" })`.
-3. Alice and Bob both open board 1. Alice drags a card to "Done": it moves on Bob's screen.
-   Alice moves a card to board 2, where Bob is not a member: it disappears from Bob's board 1
-   and nothing about it reaches Bob's socket (check the frames in devtools).
-4. Remove Bob from board 1's members: Bob's next update for that board is nothing, and his
-   existing cards leave.
+1. Create an instance library `auth` exporting `requireUser()` (which throws `httpError(401)`)
+   and `hashShare(pw)`.
+2. Use it from two applications' queries. Change `requireUser`'s message once and see both
+   change.
 
-- [ ] **L3.12** Tutorial part 3 (a live kanban board) and its definition-of-done test, with a
-  puppeteer check of two browser contexts. TECHNICAL_DESIGN §14.10 table changes and the
-  after-commit rule; §10.2's note that `TableEvents` emits before a shared commit, and what live
-  does about it.
+- [ ] **F3.5** Tutorial section (in `docs/tutorial-triggers.md` or a new
+  `docs/tutorial-code-library.md`) and its definition-of-done test. TECHNICAL_DESIGN §10.1.
 
 ---
 
-## L4 — Client publishing and presence (B: who is here, C's cursors)
+## F4 — Query contracts and rate limits
 
-- [x] **L4.1** Client `publish` on `internal` streams with `client_publish: on`, following §3
-  rule 7: `min_role` on `single`, update access on `row`, never on `user`. The value is
-  validated, and `source: {user, connection}` is stamped by the server (a client-sent `source`
-  is ignored). The sender does not get its own element back unless it asks (`echo: true` on
-  subscribe). `can_publish` goes in `ready`. Tests: a reader who may not update the row gets
-  `unavailable` on publish, and a forged `source` never reaches another subscriber.
-- [x] **L4.2** Rate limits per connection for publish and presence, answered with
-  `rate_limited` rather than a closed socket. Presence is coalesced to the latest state per
-  50 ms.
-- [x] **L4.3** Presence on `internal` (`presence: on`) streams: per `(stream, topic)` membership
-  per connection. `presence` snapshot after `ready`, then `presence_diff` (join, leave, state).
-  A member is `{connection, user_id, …presence_fields, state}`, with `presence_fields` read from
-  `users` at join time. A member leaves on unsubscribe, close or `revoked`. State is capped at
-  2 KB. Test: a user who fails the topic check never appears in, and never receives, the
-  member list.
-- [x] **L4.4** Client: `live.<s>.join(topic, handlers)` → `{ members, setState, publish, leave }`.
-  React: `usePresence(accessor, topic)` and `usePublish(accessor, topic)`.
-- [x] **L4.5** Admin: the Observe screen shows current presence per topic.
+- [ ] **F4.1** (3.2) `returns` on custom queries (§4): the type language, lowering to
+  `TypeSchema`, the admin editor (a JSON field with validation), `save_api_query`, and generated
+  `XResponse` types. Validation runs in preview only. Tests: `typescript_typecheck.rs` with an
+  object, array and union return type; a mismatch in preview logs a warning.
+- [ ] **F4.2** (3.4) The token-bucket limiter and the client IP (socket address, or
+  `X-Forwarded-For` behind `--trusted-proxies`). Unit tests with an injected clock.
+- [ ] **F4.3** (3.4) Per-query `rate_limit`, the default for public code queries, and 429 with
+  `Retry-After`. The setting is in the admin editor and `save_api_query`. Tests: the 21st call in a
+  minute is a 429; another IP is unaffected; a forged `X-Forwarded-For` from an untrusted peer is
+  ignored.
+- [ ] **F4.4** (3.4) Login and password-reset throttling, per IP and per email, with the same
+  limiter. The answer looks the same whether or not the account exists. Tests.
+- [ ] **F4.5** (3.4) `ratelimit.hit` and `ratelimit.check` in code bodies, namespaced per
+  application. Test: five wrong passwords for one share key lock that key, and only that key.
 
 ### Try it
-1. Add an internal stream `board_presence`: topics `row` of `boards`, presence on,
-   `presence_fields: name`, `client_publish: on`, keys `dragging` (integer, optional).
-2. In the kanban app, avatars show who else has the board open. While Alice drags a card,
-   Bob sees it highlighted (`setState({ dragging: cardId })`).
-3. Close Alice's tab: her avatar disappears from Bob's board within a second.
+1. A public query `openShare({ token, password })` uses `ratelimit.check("share:" + token,
+   { max: 5, window: "15m" })`. The sixth wrong guess is a 429, and another share still opens.
 
-- [x] **L4.6** *(Part 3, L3.12, is not written yet, so part 4 states the two tables of part 3's
-  it needs, and its test makes them with SQL.)* Tutorial part 4 (presence on the kanban board)
-  and its definition-of-done test.
+- [ ] **F4.6** `docs/tutorial-rest-queries.md` part (typed responses, rate limits) and its
+  definition-of-done test. TECHNICAL_DESIGN §13.4.
 
 ---
 
-## L5 — Collaborative documents (C)
+## F5 — Partial restore and application export
 
-- [x] **L5.1** The `collab_doc` type in `sc-types`: stored as bytea / BLOB, **left out of the
-  REST read projection altogether** (not sent as `null`, so the generated row types omit it
-  too; joins `sc_auth::is_api_hidden_column`), and refused as a write target by REST,
-  `insert_row`/`update_rows` and the admin row editor, with a sentence saying why. It cannot be
-  used in filters, sorting, formulas or ownership formulas. Test the omission and each refusal.
-- [x] **L5.2** Add `yrs`. A `DocRoom` per open `(stream, row)`: load the stored state (an empty
-  doc if it is null), apply incoming updates, relay them to the other members, and close the room
-  when the last member leaves. Test that a Yjs update made by the JS `yjs` package (a recorded
-  fixture) applies in `yrs` and produces the same text, for a `text` root and an `xml` root.
-  This checks the format compatibility we rely on.
-- [x] **L5.3** The `document` provider: `table`, `field` (must be `collab_doc`), `root` (the
-  shared type's name, default `default`, TipTap's), `root_kind` (`text` | `xml`), `text_mirror`
-  (optional `String` field) and `mirror_format` (`text` | `json`; `text` walks the plain text out
-  of an `xml` root). Topic is `Row`. `doc_sync` on subscribe with `read_only` = !update access.
-  A `doc_update` from a read-only member is refused with `unavailable` and not applied.
-  Re-checks (L2.6) apply: a member who loses update access becomes read-only (`doc_sync` again
-  with `read_only: true`), and one who loses read access is `revoked`. Limits (§4, "Document
-  limits"), all from `max_doc_bytes` (2 MB): `doc_sync` up to `max_doc_bytes × 4/3` plus a
-  margin, client `doc_update` frames up to `max_doc_update_bytes` (1 MB; other client frames
-  keep 64 KB), `doc_update` counted against the publish rate, and an update that would pass
-  `max_doc_bytes` refused with `too_large` and a sentence. Test a document over 1 MB opens, and
-  a paste over 64 KB is accepted.
-- [x] **L5.4** Persistence: debounced 2 s and when the room closes, skipped when nothing changed
-  since the last persist. In one transaction: `SELECT … FOR UPDATE`, merge the stored state with
-  the room's state, write the field and the `text_mirror` through the row layer as a system
-  write. Test: two rooms (simulating two processes) persisting interleaved edits lose neither,
-  and the mirror equals the merged text (and the merged JSON, with `mirror_format: json`); and a
-  room closing with no change since its last persist writes nothing.
-- [x] **L5.5** `live.document(stream, key)` in code bodies: read the text (either root kind);
-  write as a CRDT update — any text edit on a `text` root, appending a paragraph on an `xml`
-  root (for an agent or a workflow that appends to a document). The only server-side writer.
-- [x] **L5.6** *(The accessor is `docs.<doc>.open(key)`, not `live.<doc>.open(key)`: `live` is the
-  generated client's object, which may not import `yjs`.)* Client, in its own regenerated file `src/feldspar/live-doc.ts`, emitted only when
-  the app exposes a `document` stream (`helper.ts` and `live-react.ts` never import `yjs`):
-  `live.<doc>.open(key)` → `{ doc: Y.Doc, awareness, readOnly, status, close }`, and for React
-  `useDocument(accessor, key)`. The awareness is `y-protocols/awareness`; a member's presence
-  state is its `encodeAwarenessUpdate` bytes in base64, applied with `applyAwarenessUpdate` and
-  dropped with `removeAwarenessStates` when the member leaves, so the server never looks inside
-  it and existing editor bindings work unchanged. After every `doc_sync` the client sends
-  `Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(syncUpdate))`; test that edits made
-  while disconnected arrive after the reconnect. The generated client passes the stream's `root`
-  to the binding, so the two cannot drift. `yjs` (`^13`, the major the bindings expect) and
-  `y-protocols` are **always** in the scaffold's `package.json` (written once, so a conditional
-  dependency would break `tsc` for an app that exposes a document later; an unimported package
-  costs no bundle bytes). Test: an app without a document stream emits no `live-doc.ts` and its
-  build contains no `yjs`.
-- [x] **L5.7** A worked example in the scaffold docs (`AGENTS.md` contract): TipTap with
-  `@tiptap/extension-collaboration` and `collaboration-cursor`, and CodeMirror with
-  `y-codemirror.next`, so the coding agent can write either. It says: load the editor page with
-  `React.lazy` (so `yjs` is in that chunk only), install the binding as an ordinary dependency,
-  and an update trigger on the table fires about every 2 s while someone types.
+- [ ] **F5.1** (6.1) `Selection::closure_for_application` (§5) and `feldspar backup --app`. Tests:
+  the closure of a fixture app contains its tables, rows, stores, triggers on its tables, streams,
+  libraries and referenced users, and nothing else.
+- [ ] **F5.2** (6.1) `feldspar restore` with `--only`, `--no-dependencies`, `--no-settings` and
+  `--no-users`. Tests: restoring one app from a full backup of another instance leaves this
+  instance's settings, SSL and other apps untouched.
+- [ ] **F5.3** (6.1) `--as-new`: new application ids and a free subdomain, with references
+  (static dirs, upload slots, query hooks) carried over. Test: restoring the same app twice side by
+  side gives two working apps.
+- [ ] **F5.4** (6.1) `--dry-run`. Test: nothing is written, and the report lists what would be.
+- [ ] **F5.5** (6.1) The admin restore screen: "include dependencies" per application, and
+  settings, SSL and users unticked by default for a foreign `source`. Puppeteer check.
 
 ### Try it
-1. Table `notes` (`title`, `body` collab_doc, `body_text` string), ownership formula
-   `owner === user.id || sharesↃnote.some(s => s.user === user.id)`, with `can_edit` on shares.
-2. A `document` stream `note_body` on `notes.body` (`root_kind: xml`, root `default`), mirror
-   `body_text` as `text`, exposed on a React app with a TipTap editor.
-3. Alice and Bob edit the same note: both see each other's text and named cursors as they type.
-   Carol, shared read-only, sees the edits live and cannot type.
-4. Close both tabs and reopen: the text is there. `GET /api/notes` shows it in `body_text`, and
-   has no `body`.
+1. On instance A, `feldspar backup --app paste -o paste.zip`.
+2. On instance B, `feldspar restore paste.zip --as-new --dry-run`, then without `--dry-run`. The
+  app works on B, and B's other apps and settings are untouched.
 
-- [x] **L5.8** Tutorial part 5 (a collaborative notes app) and its definition-of-done test,
-  with a puppeteer check of two contexts typing into one document.
+- [ ] **F5.6** `docs/OPERATIONS.md` §8.2 "Moving one application between instances", and its
+  definition-of-done test.
 
 ---
 
-## L6 — The bus: more than one process
+## F6 — Shared translations
 
-§16 plans `sc-bus`. Until now, everything above is process-local. This milestone makes it work
-when two `feldspar serve` processes share one database.
+- [ ] **F6.1** (5.3) The instance catalogue: `_fd_translations` rows with `application_id`
+  NULL (migration in `TABLES_RENAME.sql` if the column is `NOT NULL`), and the `CatalogStore`
+  for it. Tests: CRUD per locale.
+- [ ] **F6.2** (5.3) Merge app → instance in `GET {mount}/i18n/{locale}.json`, for both file-
+  and row-backed app catalogues. Tests: an app key overrides; an instance-only key is served; a
+  locale the app does not enable is still a 404.
+- [ ] **F6.3** (5.3) Admin: Settings → Translations (shared), reusing the app Translations screen,
+  with "Translate missing" (the LLM fill). The app's Translations screen shows inherited keys
+  greyed, with "override". Puppeteer check.
+- [ ] **F6.4** (5.3) MCP `describe_translations` and `save_translations` take
+  `scope: "instance"`. `feldspar i18n translate --instance`. Tests.
 
-- [ ] **L6.1** `sc-bus`: a `BusDriver` trait (`publish(subject, bytes)`, `subscribe(prefix)`) and
-  the in-process driver. Move `LiveHub::publish`, table-change elements and document updates
-  onto it, so the single-process path is the in-process driver and not a special case.
-- [ ] **L6.2** Postgres LISTEN/NOTIFY driver: one dedicated listening connection with reconnect
-  and backoff. A payload over ~7.5 KB goes into `_fd_bus_spill` (id, bytes, created_at), and the
-  NOTIFY carries the id. A sweeper deletes spill rows older than 5 minutes. SQLite uses the
-  in-process driver (one process anyway). The driver is a setting, `bus_driver`.
-- [ ] **L6.3** Table changes across processes: the process that commits publishes to the bus,
-  and every process (itself included) fans out to its own sockets. Elements carry the origin
-  node id, so nothing is delivered twice.
-- [ ] **L6.4** Presence across processes: each node announces its members per topic and sends a
-  heartbeat. A node silent for 3 heartbeats has its members removed everywhere.
-- [ ] **L6.5** Documents across processes: each process with an open room applies updates from
-  the bus. Persistence is already merge-safe (L5.4). Test with two server instances on one
-  database: edits made through each reach a client on the other.
-- [ ] **L6.6** Session invalidation over the bus: `SessionStore::invalidate` carries a logout or a
-  deleted user to every node, which closes that session's live sockets (L1.6). This also closes
-  the 60 s window §7.2 describes.
-- [ ] **L6.7** OPERATIONS.md: choosing a bus driver, Postgres connection count (+1 per process),
-  what the spill table is, and that MQTT streams are still subscribed once per process.
-- [ ] **L6.8** Tutorial part 6 (two processes behind one proxy, the kanban board still live)
-  and its definition-of-done test, which starts two servers.
+### Try it
+1. Put "Sign in", "Password" and "Copy" in the shared German catalogue once. Two apps show them
+  in German with no per-app translation.
+
+- [ ] **F6.5** `docs/I18N.md` and `docs/tutorial-i18n.md` updated, with a definition-of-done test.
 
 ---
 
 ## Open questions
 
-- Should the admin UI itself use the live socket (workflow run screens, model fit progress,
-  which `fit_progress.rs` currently does its own way)? If yes, it would be a follow-up that
-  replaces those routes.
-- Should the MQTT provider offer `TopicSpec::Row`-style topics mapped from `source.topic`, so an
-  app could subscribe to one sensor? For now a client filters on `source.topic` itself.
-- A small per-topic history (the last *n*, not only the last 1) for `internal` streams, for a
-  chat-like use? A chat that matters is a table plus `table_changes` (D), which suggests no.
+- Passing a password in a GET URL puts it in logs and browser history. Should the share
+  tutorial show the two-step pattern instead? A POST checks the password and stores a
+  short-lived token in a table, and the GET download query takes that token.
+- Should `lib()` also be visible to formulas, or only to code bodies? (Proposed: code bodies only.)
+- Should the 24 h abandoned-upload sweep be configurable per slot?
+- `returns` validation in production as an opt-in, for apps that want the contract enforced?

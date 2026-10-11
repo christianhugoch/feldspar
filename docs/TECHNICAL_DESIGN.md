@@ -9681,7 +9681,7 @@ reads of every row.
 
 The server pushing to an application's page while it is open: a toast when a job finishes, a
 kanban card moving on someone else's board, a document edited by two people, a sensor reading.
-The plan is TODO.md "Live updates" (milestones L1–L6); this section records what is built.
+The plan is TODO-live-updates.md "Live updates" (milestones L1–L6); this section records what is built.
 **Milestones L1 and L2 are built**: one socket per page, the access rules and their re-checking
 (L1); the built-in `internal` provider, `user` and `row` topics, retaining the latest element,
 re-checking a row topic when a write could change it, and server-side publishing from the
