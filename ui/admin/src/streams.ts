@@ -301,6 +301,58 @@ export function counterNotes(counters: Counters): string[] {
   return notes;
 }
 
+/** What a `table_changes` stream's per-element checks decided since the server
+ * started (`sc_live::ChangeCounts`, TODO.md "Live updates" L3.9): every element
+ * × subscription pair checked, how many were sent something, how many were
+ * withheld by the read rule or fell outside the subscriber's filter, and the
+ * time spent deciding readability. */
+export type ChangeCounts = {
+  checked: number;
+  delivered: number;
+  suppressed_access: number;
+  suppressed_filter: number;
+  evaluator_micros: number;
+};
+
+/** The `changes` field of a stream row or status, or `null` for a stream that
+ * has none (any stream but `table_changes`, and one nobody has subscribed to on
+ * this server). */
+export function readChanges(raw: unknown): ChangeCounts | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const count = (key: string): number => {
+    const n = Number(value[key]);
+    return Number.isFinite(n) ? n : 0;
+  };
+  return {
+    checked: count("checked"),
+    delivered: count("delivered"),
+    suppressed_access: count("suppressed_access"),
+    suppressed_filter: count("suppressed_filter"),
+    evaluator_micros: count("evaluator_micros"),
+  };
+}
+
+/** The line under a `table_changes` stream's subscriber count: what was sent,
+ * what the read rule withheld, what the filters left out, and the evaluator's
+ * time — the last only once it is worth a millisecond. Empty before anything
+ * was checked. */
+export function changeNotes(changes: ChangeCounts | null): string[] {
+  if (!changes || changes.checked === 0) return [];
+  const notes = [
+    `${formatCount(changes.delivered)} of ${formatCount(changes.checked)} sent`,
+  ];
+  if (changes.suppressed_access > 0) {
+    notes.push(`${formatCount(changes.suppressed_access)} withheld by access`);
+  }
+  if (changes.suppressed_filter > 0) {
+    notes.push(`${formatCount(changes.suppressed_filter)} outside filters`);
+  }
+  const ms = Math.round(changes.evaluator_micros / 1000);
+  if (ms > 0) notes.push(`${formatCount(ms)} ms evaluating`);
+  return notes;
+}
+
 /** A count, grouped — `1,024`. A stream's element count is the one number on
  * this screen that reaches seven digits in an afternoon. */
 export function formatCount(n: number): string {
@@ -480,7 +532,10 @@ export type ObserveFrame =
     }
   | { type: "element"; envelope: unknown }
   | { type: "lagged"; dropped: number }
-  | { type: "status"; status: unknown; counters: unknown };
+  | { type: "status"; status: unknown; counters: unknown }
+  /** Who has each topic open now, for a stream with presence (TODO.md "Live
+   * updates" L4.5) — sent after `ready` and whenever it changes. */
+  | { type: "presence"; topics: unknown };
 
 /** Parse one text frame, or nothing for anything this version does not know.
  *
@@ -491,7 +546,13 @@ export function parseFrame(data: string): ObserveFrame | null {
     const value: unknown = JSON.parse(data);
     if (!value || typeof value !== "object") return null;
     const type = (value as { type?: unknown }).type;
-    if (type === "ready" || type === "element" || type === "lagged" || type === "status") {
+    if (
+      type === "ready" ||
+      type === "element" ||
+      type === "lagged" ||
+      type === "status" ||
+      type === "presence"
+    ) {
       return value as ObserveFrame;
     }
   } catch {
@@ -499,6 +560,48 @@ export function parseFrame(data: string): ObserveFrame | null {
     // nothing the screen can do about it but keep reading the next one.
   }
   return null;
+}
+
+/** One member of a presence room, as the members see each other: the
+ * connection, the user, the `users` fields the stream shows, and the page's
+ * state. */
+export type PresenceMember = {
+  connection: string;
+  user_id: string | null;
+  /** The shown `users` fields, by name. */
+  fields: Record<string, unknown>;
+  state: unknown;
+};
+
+/** One topic with somebody on it. `null` is a `single` stream's one topic. */
+export type PresenceTopic = { topic: string | null; members: PresenceMember[] };
+
+/** Read a `presence` frame's `topics`, leaving out anything malformed. */
+export function readPresence(raw: unknown): PresenceTopic[] {
+  if (!Array.isArray(raw)) return [];
+  const topics: PresenceTopic[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const { topic, members } = entry as { topic?: unknown; members?: unknown };
+    if (!Array.isArray(members)) continue;
+    topics.push({
+      topic: typeof topic === "string" ? topic : null,
+      members: members.flatMap((m): PresenceMember[] => {
+        if (!m || typeof m !== "object") return [];
+        const { connection, user_id, state, ...fields } = m as Record<string, unknown>;
+        if (typeof connection !== "string") return [];
+        return [
+          {
+            connection,
+            user_id: typeof user_id === "string" ? user_id : null,
+            fields,
+            state: state ?? null,
+          },
+        ];
+      }),
+    });
+  }
+  return topics;
 }
 
 /** How many elements the Observe screen keeps. The server's ring is 100 (§9);
@@ -521,6 +624,8 @@ export type ObserveState = {
   lagged: number;
   /** Whether the `ready` frame has arrived. */
   ready: boolean;
+  /** Who is on each topic now, or `null` for a stream without presence. */
+  presence: PresenceTopic[] | null;
   /** A note the screen shows instead of the tail — a closed socket, mostly. */
   error: string | null;
 };
@@ -535,6 +640,7 @@ export function emptyObserve(): ObserveState {
     replayed: 0,
     lagged: 0,
     ready: false,
+    presence: null,
     error: null,
   };
 }
@@ -566,6 +672,8 @@ export function applyFrame(
       };
     case "lagged":
       return { ...state, lagged: state.lagged + frame.dropped };
+    case "presence":
+      return { ...state, presence: readPresence(frame.topics) };
     case "element": {
       const envelope = readEnvelope(frame.envelope);
       if (!envelope) return state;

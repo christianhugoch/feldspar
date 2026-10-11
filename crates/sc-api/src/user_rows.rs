@@ -36,9 +36,13 @@ pub(crate) fn is_users(table: &Table) -> bool {
     table.name == USERS_TABLE
 }
 
-/// Whether `column` of `table` is one no API reads or writes.
+/// Whether `column` of `table` is one no API reads or writes — sc-auth's
+/// [`is_api_hidden_column`](sc_auth::is_api_hidden_column), the one statement
+/// of the rule, and any `collab_doc` field (live updates L5.1), which is left
+/// out of a read altogether rather than sent as null.
 pub(crate) fn is_hidden_column(table: &Table, column: &str) -> bool {
-    is_users(table) && column == COL_PASSWORD_HASH
+    sc_auth::is_api_hidden_column(&table.name, column)
+        || table.field(column).is_some_and(DataField::is_collab_doc)
 }
 
 /// `table`'s field `name`, unless it is hidden from APIs — the lookup a caller's
@@ -51,10 +55,11 @@ pub(crate) fn visible_field<'a>(table: &'a Table, name: &str) -> Option<&'a Data
     table.field(name)
 }
 
-/// The columns a row read projects: all of them, or — for the users table —
-/// every stored column but the password hash, named one by one.
+/// The columns a row read projects: all of them, or — for the users table, and
+/// a table with a `collab_doc` field — every stored column but the hidden ones,
+/// named one by one.
 pub(crate) fn projection(table: &Table) -> Vec<Projection> {
-    if !is_users(table) {
+    if !is_users(table) && !table.fields.iter().any(DataField::is_collab_doc) {
         return vec![Projection::all()];
     }
     table
@@ -63,6 +68,34 @@ pub(crate) fn projection(table: &Table) -> Vec<Projection> {
         .filter(|f| !f.is_calc() && !is_hidden_column(table, &f.base.name))
         .map(|f| Projection::expr(Expr::col(f.base.name.clone())))
         .collect()
+}
+
+/// A row as an application's API returns it: the table's own columns that
+/// [`visible_field`] lets through, in the table's field order — anything else
+/// the JSON carries (a projected join value, a column REST hides) is dropped.
+///
+/// What the live hub sends a page for a `table_changes` element (TODO.md
+/// "Live updates" L3.5): the row came off the write, not off a read, and this
+/// is how it is held to the read's projection rather than to a second list of
+/// what to leave out. A column the row does not carry stays absent rather than
+/// becoming null — a delete's row, read back by its `RETURNING`, has no
+/// calculated fields, and saying they are null would be saying something
+/// false.
+pub fn api_row(table: &Table, row: &Json) -> Json {
+    let Json::Object(obj) = row else {
+        return Json::Null;
+    };
+    let mut out = Map::with_capacity(obj.len());
+    for field in &table.fields {
+        let name = &field.base.name;
+        if visible_field(table, name).is_none() {
+            continue;
+        }
+        if let Some(value) = obj.get(name) {
+            out.insert(name.clone(), value.clone());
+        }
+    }
+    Json::Object(out)
 }
 
 /// The caller the role rule applies to, or `None` when it does not (not the

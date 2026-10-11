@@ -136,9 +136,9 @@ pub use react::{
     react_runtime_dir, valid_project_name,
 };
 pub use scaffold::{
-    ClientUpdate, GeneratedFile, ScaffoldReport, emit_app_runtime, has_generated_runtime,
-    require_api_provider, require_scaffoldable, require_scaffoldable_in, scaffold_app,
-    update_app_client,
+    ClientUpdate, GeneratedFile, RUNTIME_DOC_FILE, ScaffoldReport, emit_app_runtime,
+    has_generated_runtime, live_doc_ts, require_api_provider, require_scaffoldable,
+    require_scaffoldable_in, scaffold_app, update_app_client,
 };
 pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{
@@ -146,7 +146,7 @@ pub use store::{
     load_application_by_subdomain, save_application,
 };
 pub use streams::{
-    ExposedStream, app_streams, element_value_schema, install_stream_registry, is_live_path,
-    live_socket_path, stream_exports, stream_registry,
+    ExposedStream, app_streams, app_streams_with, catalog_stream_registry, element_value_schema,
+    install_stream_registry, is_live_path, live_socket_path, stream_exports, stream_registry,
 };
 pub use target_ops::{OperationOutcome, run_target_operation};

@@ -102,6 +102,15 @@ const RUNTIME_LIVE_FILE: &str = "live-react.ts";
 /// The same file as an import specifier.
 const RUNTIME_LIVE_FILE_STEM: &str = "live-react";
 
+/// Collaborative documents (TODO.md "Live updates" L5.6): the `Y.Doc` over a
+/// `document` stream, and `useDocument`. A file of its own, emitted only for an
+/// app that exposes a document stream, because it is the one generated file
+/// that imports `yjs` — an app without documents ships none of it.
+pub const RUNTIME_DOC_FILE: &str = "live-doc.ts";
+
+/// The same file as an import specifier.
+const RUNTIME_DOC_FILE_STEM: &str = "live-doc";
+
 /// The generated map of the *other* half of the application: the administration
 /// MCP tools that reach the configuration this project cannot see
 /// ([`generate_skill`](crate::generate_skill)). Rewritten with everything else in
@@ -319,6 +328,12 @@ pub fn runtime_files(ctx: &ProjectContext<'_>) -> Vec<GeneratedFile> {
             runtime_readme(ctx),
         ),
     ];
+    if ctx.streams.iter().any(is_document) {
+        files.push(GeneratedFile::new(
+            format!("{REACT_RUNTIME_SUBDIR}/{RUNTIME_DOC_FILE}"),
+            live_doc_ts(ctx.streams, true),
+        ));
+    }
     files.extend(common_runtime_files(
         ctx,
         REACT_RUNTIME_SUBDIR,
@@ -790,12 +805,26 @@ fn runtime_readme(ctx: &ProjectContext<'_>) -> String {
          socket per page that reconnects by itself, and returns its `status` \
          (`connecting`, `open`, `reconnecting`); `useLatest(live.<stream>)` \
          is the latest element, for a progress bar. A stream with a topic per \
-         row is `live.<stream>.topic(rowKey)`. `live` is the client's \
+         row is `live.<stream>.topic(rowKey)`. `useLiveRows(api.<table>, {{ where, \
+         orderBy, select }})` is a read kept current by the table's stream of \
+         changes. `usePresence(live.<stream>, rowKey)` is who else has a topic \
+         open, with `setState` for this page's own (what it drags, a cursor) and \
+         `publish`; `usePublish(live.<stream>, rowKey)` publishes without \
+         joining. `live` is the client's \
          accessors, present once the application exposes a stream.\n\
          - `{RUNTIME_SKILL_FILE}` — for a coding agent: the half of this \
          application that is **not** in this repository, and the administration \
          MCP tools that reach it. Read it before adding a field or a trigger.\n"
     );
+    if ctx.streams.iter().any(is_document) {
+        let _ = writeln!(
+            files,
+            "- `{RUNTIME_DOC_FILE}` — collaborative documents: \
+             `useDocument(docs.<stream>, rowKey)` opens one row's document as a `Y.Doc` \
+             with its `awareness`, for an editor binding (see AGENTS.md). The only \
+             generated file that imports `yjs`."
+        );
+    }
     if ctx.graphql.is_some() {
         files.push_str(
             "- `graphql.ts` — the GraphQL client, posting to this application's \
@@ -1082,13 +1111,134 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          `useStream(live.board_activity.topic(boardId), onElement)`. The server \
          lets the subscription in only if the signed-in user may read that row, \
          and ends it (`revoked`) if they stop being able to.\n\
+         - **A table's changes** (`live.cards_live`, also `api.cards.changes`): \
+         use `useLiveRows(api.cards, {{ where: {{ board: `eq.${{boardId}}` }}, orderBy: \
+         \"position\" }})` in place of a read. It reads the rows with the same \
+         `filter`, `order` and `select` vocabulary as `api.cards.list`, subscribes \
+         with the same filter, and keeps `rows` current as rows are inserted, \
+         changed, moved into or out of the filter, or deleted — by anyone — in \
+         the order asked for. It reads again by itself after a reconnect. It \
+         returns `{{ rows, loading, error, status, refresh }}`. A user is only \
+         ever sent changes to rows they may read.\n\
+         - **Who else is here** (`live.board_presence`, a stream with presence): \
+         `const {{ members, me, setState }} = usePresence(live.board_presence, boardId)`. \
+         `members` is everybody with that topic open — this page included, `me` \
+         is its `connection` — each `{{ connection, user_id, state }}` plus the \
+         user fields the stream shows (avatars are one per `connection`, not per \
+         user: one person can have two tabs open). `setState({{ dragging: cardId }})` \
+         is shown to the others as that member's `state`; call it as often as \
+         you like, it is throttled. A member who closes the tab disappears from \
+         the others' lists by itself.\n\
          \n\
          Elements are published by the server — a trigger's `publish` action, \
-         `live.publish(stream, topic, value)` in a trigger's code — never by \
-         this project. Never open a `WebSocket` yourself — the socket \
+         `live.publish(stream, topic, value)` in a trigger's code — and, on a \
+         stream whose settings let pages publish, by this project: \
+         `usePresence(…).publish(value)` or `usePublish(live.<stream>, rowKey)`. \
+         A page's own publish is not sent back to it, and on a topic per row only \
+         a user who may update that row may publish (`canPublish` says whether \
+         this one may). Never open a `WebSocket` yourself — the socket \
          authenticates with the user's session and refuses pages from any other \
          origin. Which streams are exposed is configuration in the server (see \
          the half of this application that is not in this project).\n\
+         \n\
+         ## Collaborative documents\n\
+         \n\
+         A **document stream** keeps a document — rich text or code — in a field \
+         of a row, edited by several people at once, each seeing the others' \
+         cursors. Open one row's document with the hook in \
+         `./{REACT_RUNTIME_SUBDIR}/{RUNTIME_DOC_FILE_STEM}` (generated once the \
+         application exposes a document stream):\n\
+         \n\
+         ```tsx\n\
+         import {{ docs, useDocument }} from \"./{REACT_RUNTIME_SUBDIR}/{RUNTIME_DOC_FILE_STEM}\";\n\
+         \n\
+         const {{ doc, awareness, root, field, readOnly, status, error }} = useDocument(docs.note_body, noteId);\n\
+         ```\n\
+         \n\
+         `doc` is a `Y.Doc` (the `yjs` package) and `awareness` its `y-protocols` \
+         awareness — what the standard editor bindings take, unchanged. Render the \
+         editor once `doc` is there, and make it non-editable while `readOnly` \
+         (the user may read the row but not update it, and the server refuses \
+         their edits). `status` is `connecting`, `synced` or `reconnecting`; edits \
+         made while reconnecting are kept and sent when the connection is back. \
+         The document's field is not in the generated row types and the server \
+         refuses to write it through the client — a whole value would overwrite \
+         everybody else's typing. Its text is readable as an ordinary column if \
+         the stream keeps a text mirror.\n\
+         \n\
+         **TipTap** (a stream whose root kind is `xml`): install `@tiptap/react`, \
+         `@tiptap/starter-kit`, `@tiptap/extension-collaboration` and \
+         `@tiptap/extension-collaboration-cursor` as ordinary dependencies.\n\
+         \n\
+         ```tsx\n\
+         import {{ EditorContent, useEditor }} from \"@tiptap/react\";\n\
+         import StarterKit from \"@tiptap/starter-kit\";\n\
+         import Collaboration from \"@tiptap/extension-collaboration\";\n\
+         import CollaborationCursor from \"@tiptap/extension-collaboration-cursor\";\n\
+         import type * as Y from \"yjs\";\n\
+         import type {{ Awareness }} from \"y-protocols/awareness\";\n\
+         \n\
+         function NoteEditor(props: {{ doc: Y.Doc; awareness: Awareness; field: string; readOnly: boolean; name: string }}) {{\n\
+         \x20 const editor = useEditor(\n\
+         \x20   {{\n\
+         \x20     editable: !props.readOnly,\n\
+         \x20     extensions: [\n\
+         \x20       StarterKit.configure({{ history: false }}), // Yjs keeps the undo history\n\
+         \x20       Collaboration.configure({{ document: props.doc, field: props.field }}),\n\
+         \x20       CollaborationCursor.configure({{\n\
+         \x20         provider: {{ awareness: props.awareness }},\n\
+         \x20         user: {{ name: props.name, color: \"#f783ac\" }},\n\
+         \x20       }}),\n\
+         \x20     ],\n\
+         \x20   }},\n\
+         \x20   [props.doc, props.readOnly],\n\
+         \x20 );\n\
+         \x20 return <EditorContent editor={{editor}} />;\n\
+         }}\n\
+         ```\n\
+         \n\
+         **CodeMirror** (root kind `text`): install `codemirror`, `@codemirror/state` \
+         and `y-codemirror.next`.\n\
+         \n\
+         ```tsx\n\
+         import {{ useEffect, useRef }} from \"react\";\n\
+         import {{ EditorView, basicSetup }} from \"codemirror\";\n\
+         import {{ EditorState }} from \"@codemirror/state\";\n\
+         import {{ yCollab }} from \"y-codemirror.next\";\n\
+         import type * as Y from \"yjs\";\n\
+         import type {{ Awareness }} from \"y-protocols/awareness\";\n\
+         \n\
+         function CodeEditor(props: {{ root: Y.Text; awareness: Awareness; readOnly: boolean; name: string }}) {{\n\
+         \x20 const host = useRef<HTMLDivElement>(null);\n\
+         \x20 useEffect(() => {{\n\
+         \x20   if (!host.current) return;\n\
+         \x20   props.awareness.setLocalStateField(\"user\", {{ name: props.name, color: \"#30bced\" }});\n\
+         \x20   const view = new EditorView({{\n\
+         \x20     parent: host.current,\n\
+         \x20     state: EditorState.create({{\n\
+         \x20       doc: props.root.toString(),\n\
+         \x20       extensions: [basicSetup, yCollab(props.root, props.awareness), EditorView.editable.of(!props.readOnly)],\n\
+         \x20     }}),\n\
+         \x20   }});\n\
+         \x20   return () => view.destroy();\n\
+         \x20 }}, [props.root, props.awareness, props.readOnly]);\n\
+         \x20 return <div ref={{host}} />;\n\
+         }}\n\
+         ```\n\
+         \n\
+         Load the page that holds the editor with `React.lazy` \
+         (`const NotePage = React.lazy(() => import(\"./pages/NotePage\"));` inside a \
+         `<Suspense>`), so `yjs` and the editor are in that page's chunk only and \
+         every other page stays small. `yjs` and `y-protocols` are already \
+         dependencies of this project; never add a second copy of `yjs` (two in \
+         one bundle break it).\n\
+         \n\
+         The server saves the document into its row a couple of seconds after \
+         the last keystroke, as an ordinary update: **an update trigger on that \
+         table fires about every 2 s while someone types**, so do not hang an \
+         e-mail on one. A trigger's code can read and append to a document with \
+         `live.document(stream, rowKey)` (`await doc.text()`, `await \
+         doc.append(text)`).\n\
          \n\
          ## When the API you need is missing\n\
          \n\
@@ -1140,6 +1290,13 @@ fn names_list(tables: &[Table]) -> String {
 /// server falls back to the TypeScript it was installed with; that one is a
 /// major behind, which can make the editor and the build disagree about an
 /// edge case. The build is the one that decides.
+///
+/// `yjs` (the major the editor bindings expect — two copies in one bundle
+/// break its constructor checks) and `y-protocols` are **always** here, for
+/// collaborative documents (L5.6): this file is written once, so a dependency
+/// added only when an app exposes a document stream would break `tsc` for an
+/// app that exposes one after it was scaffolded, and a package installed but
+/// never imported costs no bundle bytes.
 fn package_json(project: &str) -> String {
     format!(
         r#"{{
@@ -1156,7 +1313,9 @@ fn package_json(project: &str) -> String {
   "dependencies": {{
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.9.0"
+    "react-router-dom": "^7.9.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.0"
   }},
   "devDependencies": {{
     "@types/react": "^19.2.0",
@@ -2897,10 +3056,322 @@ fn live_react_ts(streams: &[sc_api::StreamExport]) -> String {
     out
 }
 
+/// Whether a stream is a collaborative document's.
+fn is_document(stream: &sc_api::StreamExport) -> bool {
+    matches!(stream.topics, sc_api::StreamTopics::Document { .. })
+}
+
+/// `live-doc.ts` (TODO.md "Live updates" L5.6): a `document` stream's rows as
+/// `Y.Doc`s, with the editor's awareness riding presence.
+///
+/// `react` adds `useDocument` and the app's `docs` accessors (over the
+/// client in `./hooks`); without it the file is the framework-neutral core
+/// alone — what a test runs under Node, and what a page outside React would
+/// use with its own client.
+///
+/// The protocol it speaks, so the server never looks inside a document or an
+/// awareness: a `doc_sync` is applied and answered with what the server lacks
+/// (`Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(sync))`, so edits
+/// made while disconnected arrive), local edits go out as `doc_update` while
+/// synced and allowed to edit, and the page's awareness is its presence state —
+/// `encodeAwarenessUpdate` in base64 — applied to the others' with
+/// `applyAwarenessUpdate` and dropped with `removeAwarenessStates` when they
+/// leave. Existing editor bindings (TipTap's Collaboration, `y-codemirror.next`)
+/// work on the `doc` and `awareness` unchanged.
+pub fn live_doc_ts(streams: &[sc_api::StreamExport], react: bool) -> String {
+    let mut out = String::from(GENERATED_HEADER);
+    if react {
+        out.push_str("import { useEffect, useState } from \"react\";\n");
+    }
+    out.push_str(LIVE_DOC_IMPORTS);
+    if react {
+        out.push_str("import { api } from \"./hooks\";\n");
+    }
+    out.push_str(LIVE_DOC_TS);
+    if react {
+        out.push_str(LIVE_DOC_REACT_TS);
+        out.push_str(
+            "\n/** The document streams this application exposes: `docs.<stream>.open(key)`, or \
+             `useDocument(docs.<stream>, key)`. */\nexport const docs = {\n",
+        );
+        for stream in streams.iter().filter(|s| is_document(s)) {
+            let _ = writeln!(
+                out,
+                "  {}: documentStream(api.live.{}),",
+                stream.name, stream.name
+            );
+        }
+        out.push_str("};\n");
+    }
+    out
+}
+
+/// The imports every `live-doc.ts` has.
+const LIVE_DOC_IMPORTS: &str = r#"import * as Y from "yjs";
+import {
+  Awareness,
+  applyAwarenessUpdate,
+  encodeAwarenessUpdate,
+  removeAwarenessStates,
+} from "y-protocols/awareness";
+import type { LiveDocumentSession, LiveDocumentStream, LiveError, LiveTopic } from "./helper";
+"#;
+
+/// The framework-neutral half of `live-doc.ts`.
+const LIVE_DOC_TS: &str = r#"
+/** The shared type a root kind is: a `Y.XmlFragment` (TipTap, ProseMirror) or a `Y.Text` (CodeMirror, Monaco). */
+export type DocRoot<K extends "text" | "xml"> = K extends "xml" ? Y.XmlFragment : Y.Text;
+
+/** Where an open document is: waiting for its first sync, in sync, or reconnecting (edits are kept and sent after). */
+export type DocumentStatus = "connecting" | "synced" | "reconnecting";
+
+/** One row's collaborative document, open. Give `doc`, `field` (or `root`) and `awareness` to the editor's binding. */
+export interface LiveDocument<K extends "text" | "xml" = "text" | "xml"> {
+  readonly doc: Y.Doc;
+  readonly awareness: Awareness;
+  /** The root's name — what TipTap's Collaboration extension calls `field`. */
+  readonly field: string;
+  /** The root shared type itself — what `y-codemirror.next`'s `yCollab` takes. */
+  readonly root: DocRoot<K>;
+  /** Whether this page may only read: make the editor non-editable while it is true. */
+  readonly readOnly: boolean;
+  readonly status: DocumentStatus;
+  /** Why the server refused or ended this document (`unavailable`, `revoked`, `too_large`, …). */
+  readonly error: LiveError | undefined;
+  /** Be told when `readOnly`, `status` or `error` change. Returns the function that stops it. */
+  onChange(listener: () => void): () => void;
+  close(): void;
+}
+
+/** A document stream as a page uses it: `open(key)`. */
+export interface DocumentStream<K extends "text" | "xml" = "text" | "xml"> {
+  readonly stream: LiveDocumentStream<K>;
+  open(key: LiveTopic): LiveDocument<K>;
+}
+
+/** The accessor for a document stream of the generated client. */
+export function documentStream<K extends "text" | "xml">(stream: LiveDocumentStream<K>): DocumentStream<K> {
+  return { stream, open: (key: LiveTopic) => openDocument(stream, key) };
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(text);
+}
+
+function fromBase64(text: string): Uint8Array {
+  const raw = atob(text);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
+}
+
+/** What `Y` and the awareness are told a change came from, so it is not sent back. */
+const REMOTE = "feldspar-live";
+
+/** Open row `key`'s document on `stream`. Close it when the page is done with it. */
+export function openDocument<K extends "text" | "xml">(
+  stream: LiveDocumentStream<K>,
+  key: LiveTopic,
+): LiveDocument<K> {
+  const doc = new Y.Doc();
+  const awareness = new Awareness(doc);
+  const root = (stream.rootKind === "xml" ? doc.getXmlFragment(stream.root) : doc.getText(stream.root)) as DocRoot<K>;
+  const listeners = new Set<() => void>();
+  let readOnly = true;
+  let status: DocumentStatus = "connecting";
+  let error: LiveError | undefined;
+  let closed = false;
+  const changed = () => listeners.forEach((listener) => listener());
+  // The awareness client ids each other member's connection holds, dropped when it leaves.
+  const clientsOf = new Map<string, Set<number>>();
+  let applyingFor: string | undefined;
+  const ownState = () => toBase64(encodeAwarenessUpdate(awareness, [doc.clientID]));
+
+  const session: LiveDocumentSession<string> = stream.connect<string>(key, {
+    sync(update, ro) {
+      const bytes = fromBase64(update);
+      Y.applyUpdate(doc, bytes, REMOTE);
+      readOnly = ro;
+      status = "synced";
+      error = undefined;
+      // What the server lacks — edits made before this sync, or while disconnected.
+      if (!ro) {
+        const missing = Y.encodeStateAsUpdate(doc, Y.encodeStateVectorFromUpdate(bytes));
+        if (missing.length > 2) session.send(toBase64(missing));
+      }
+      if (awareness.getLocalState() !== null) session.setState(ownState());
+      changed();
+    },
+    update(update) {
+      Y.applyUpdate(doc, fromBase64(update), REMOTE);
+    },
+    presence(members) {
+      const present = new Set<string>();
+      for (const member of members) {
+        if (member.connection === session.me) continue;
+        present.add(member.connection);
+        if (typeof member.state !== "string") continue;
+        applyingFor = member.connection;
+        try {
+          applyAwarenessUpdate(awareness, fromBase64(member.state), REMOTE);
+        } catch {
+          // A state that is not an awareness update is somebody else's business.
+        } finally {
+          applyingFor = undefined;
+        }
+      }
+      for (const [connection, ids] of clientsOf) {
+        if (present.has(connection)) continue;
+        removeAwarenessStates(awareness, [...ids], REMOTE);
+        clientsOf.delete(connection);
+      }
+    },
+    resync() {
+      status = "reconnecting";
+      changed();
+    },
+    error(e) {
+      error = e;
+      changed();
+    },
+  });
+
+  // A lost socket is a document out of sync: edits are kept and answered to the next `sync`.
+  const stopStatus = stream.connection.onStatus((connection) => {
+    if (connection === "reconnecting" && status === "synced") {
+      status = "reconnecting";
+      changed();
+    }
+  });
+
+  doc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (closed || origin === REMOTE || readOnly || status !== "synced") return;
+    session.send(toBase64(update));
+  });
+  awareness.on(
+    "update",
+    ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
+      if (closed) return;
+      if (origin === REMOTE) {
+        if (applyingFor === undefined) return;
+        const ids = clientsOf.get(applyingFor) ?? new Set<number>();
+        for (const id of [...added, ...updated]) if (id !== doc.clientID) ids.add(id);
+        clientsOf.set(applyingFor, ids);
+        return;
+      }
+      if ([...added, ...updated, ...removed].includes(doc.clientID)) session.setState(ownState());
+    },
+  );
+
+  return {
+    doc,
+    awareness,
+    field: stream.root,
+    root,
+    get readOnly() {
+      return readOnly;
+    },
+    get status() {
+      return status;
+    },
+    get error() {
+      return error;
+    },
+    onChange(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      listeners.clear();
+      stopStatus();
+      session.close();
+      awareness.destroy();
+      doc.destroy();
+    },
+  };
+}
+"#;
+
+/// React's half of `live-doc.ts`: `useDocument`.
+const LIVE_DOC_REACT_TS: &str = r#"
+/** What `useDocument` returns: the document once open (`undefined` before), and where it is. */
+export type DocumentState<K extends "text" | "xml"> = {
+  doc: Y.Doc | undefined;
+  awareness: Awareness | undefined;
+  root: DocRoot<K> | undefined;
+  /** The root's name, for TipTap's Collaboration `field`. */
+  field: string;
+  readOnly: boolean;
+  status: DocumentStatus;
+  error: LiveError | undefined;
+};
+
+/**
+ * Row `key`'s document on `stream`, open while the component is mounted (and
+ * reopened when `key` changes). Render the editor once `doc` is there, and make
+ * it non-editable while `readOnly`.
+ */
+export function useDocument<K extends "text" | "xml">(
+  stream: DocumentStream<K>,
+  key: LiveTopic | null | undefined,
+): DocumentState<K> {
+  const [open, setOpen] = useState<LiveDocument<K> | undefined>(undefined);
+  const [, setTick] = useState(0);
+  const id = key === null || key === undefined ? undefined : String(key);
+  useEffect(() => {
+    if (id === undefined) return;
+    const document = stream.open(id);
+    setOpen(document);
+    const stop = document.onChange(() => setTick((n) => n + 1));
+    return () => {
+      stop();
+      document.close();
+      setOpen(undefined);
+    };
+  }, [stream, id]);
+  return {
+    doc: open?.doc,
+    awareness: open?.awareness,
+    root: open?.root,
+    field: stream.stream.root,
+    readOnly: open?.readOnly ?? true,
+    status: open?.status ?? "connecting",
+    error: open?.error,
+  };
+}
+"#;
+
 /// The imports every `live-react.ts` has.
 const LIVE_REACT_IMPORTS: &str = r#"
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { LiveConnection, LiveError, LiveHandlers, LiveStatus, LiveStream } from "./helper";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { LiveRows } from "./helper";
+import type {
+  LiveConnection,
+  LiveError,
+  LiveHandlers,
+  LiveJoinHandlers,
+  LiveMember,
+  LivePresence,
+  LivePublish,
+  LiveRoom,
+  LiveRowPresence,
+  LiveRowPublish,
+  LiveRowsOptions,
+  LiveStatus,
+  LiveStream,
+  LiveTable,
+  LiveTopic,
+  Selected,
+  TableSchema,
+} from "./helper";
 "#;
 
 /// The body of `live-react.ts` that is the same in every application.
@@ -2971,6 +3442,174 @@ export function useLatest<E>(stream: LiveStream<E>): E | undefined {
   useStream(stream, (envelope) => setLatest({ stream, envelope }));
   // A value from the previous stream is not this one's.
   return latest !== undefined && latest.stream === stream ? latest.envelope : undefined;
+}
+
+/** What `usePresence` answers with. */
+export type PresenceState<V, S> = {
+  /** Everybody on the topic now, this page included; empty until the list arrives. */
+  members: LiveMember<S>[];
+  /** This page's own `connection`, as `members` names it. */
+  me: string | undefined;
+  /** Set this page's state (what it is dragging, a cursor); the others see it. */
+  setState(state: S): void;
+  /** Publish on the topic; everybody else on it receives it. */
+  publish(value: V): void;
+  /** Whether the server lets this page publish here. */
+  canPublish: boolean;
+  /** The connection's status: `connecting`, `open` or `reconnecting`. */
+  status: LiveStatus;
+  /** Why the server refused or ended the subscription, if it did. */
+  error: LiveError | undefined;
+};
+
+/**
+ * Join a topic's presence while this component is mounted: who else has it
+ * open (`members`), this page's own state (`setState`), and publishing on it.
+ * `live.board_presence` with a board's key for a stream with a topic per row;
+ * no topic for a stream with one. Leaves on unmount, and the others see the
+ * page go. `handlers` may be new functions on every render.
+ */
+export function usePresence<E, V, S = unknown>(
+  stream: LiveRowPresence<E, V, S>,
+  topic: LiveTopic,
+  handlers?: LiveJoinHandlers<E, S>,
+): PresenceState<V, S>;
+export function usePresence<E, V, S = unknown>(
+  stream: LivePresence<E, V, S>,
+  topic?: undefined,
+  handlers?: LiveJoinHandlers<E, S>,
+): PresenceState<V, S>;
+export function usePresence<E, V, S = unknown>(
+  stream: LiveRowPresence<E, V, S> | LivePresence<E, V, S>,
+  topic?: LiveTopic,
+  handlers: LiveJoinHandlers<E, S> = {},
+): PresenceState<V, S> {
+  const latest = useRef(handlers);
+  useEffect(() => {
+    latest.current = handlers;
+  });
+  const [members, setMembers] = useState<LiveMember<S>[]>([]);
+  const [error, setError] = useState<LiveError | undefined>(undefined);
+  const [canPublish, setCanPublish] = useState(false);
+  const room = useRef<LiveRoom<V, S> | undefined>(undefined);
+  const key = topic === undefined ? undefined : String(topic);
+  useEffect(() => {
+    setMembers([]);
+    setError(undefined);
+    const joined: LiveJoinHandlers<E, S> = {
+      echo: latest.current.echo,
+      element: (envelope) => latest.current.element?.(envelope),
+      ready: (info) => {
+        setCanPublish(info.can_publish);
+        latest.current.ready?.(info);
+      },
+      lagged: (dropped) => latest.current.lagged?.(dropped),
+      resync: () => latest.current.resync?.(),
+      status: (status) => latest.current.status?.(status),
+      presence: (list) => {
+        setMembers(list);
+        latest.current.presence?.(list);
+      },
+      error: (refusal) => {
+        setError(refusal);
+        latest.current.error?.(refusal);
+      },
+    };
+    const current =
+      key === undefined
+        ? (stream as LivePresence<E, V, S>).join(joined)
+        : (stream as LiveRowPresence<E, V, S>).join(key, joined);
+    room.current = current;
+    return () => {
+      room.current = undefined;
+      current.leave();
+    };
+  }, [stream, key]);
+  const setState = useCallback((state: S) => room.current?.setState(state), []);
+  const publish = useCallback((value: V) => room.current?.publish(value), []);
+  const me = room.current?.me;
+  const status = useLiveStatus(stream.connection);
+  return { members, me, setState, publish, canPublish, status, error };
+}
+
+/**
+ * A function that publishes on a topic of `stream` — a stream pages may
+ * publish on. Stable across renders, so it can go in a dependency list. A page
+ * that has joined the topic publishes on its own subscription; otherwise a
+ * short-lived one is opened for each value.
+ */
+export function usePublish<E, V>(stream: LiveRowPublish<E, V>, topic: LiveTopic): (value: V) => void;
+export function usePublish<E, V>(stream: LivePublish<E, V>, topic?: undefined): (value: V) => void;
+export function usePublish<E, V>(
+  stream: LiveRowPublish<E, V> | LivePublish<E, V>,
+  topic?: LiveTopic,
+): (value: V) => void {
+  const key = topic === undefined ? undefined : String(topic);
+  return useCallback(
+    (value: V) =>
+      key === undefined
+        ? (stream as LivePublish<E, V>).publish(value)
+        : (stream as LiveRowPublish<E, V>).publish(key, value),
+    [stream, key],
+  );
+}
+
+/** What `useLiveRows` answers with. */
+export type LiveRowsResult<R> = {
+  /** The rows, in the order asked for, as they are now. */
+  rows: R[];
+  /** A full read is in flight: the first, or one after a reconnect or a lag. */
+  loading: boolean;
+  /** A read that failed, or the server refusing the subscription. */
+  error: Error | LiveError | undefined;
+  /** The connection's status: `connecting`, `open` or `reconnecting`. */
+  status: LiveStatus;
+  /** Read every row again. */
+  refresh(): void;
+};
+
+/**
+ * The rows of `table` that a read with `where`, `orderBy` and `select` answers,
+ * kept current while this component is mounted: inserts, changes, rows moving
+ * into or out of `where`, and deletes — by anyone — are applied in place, in
+ * order. `table` is a table of the client whose changes the application
+ * exposes (`api.cards`, which carries them as `api.cards.changes`).
+ *
+ * The subscription uses the same `where` as the read, so a page is told about
+ * exactly the rows it shows. After a reconnect or a lag it reads again; a
+ * `select` with embeds, or a stream that sends keys only, reads changed rows
+ * again rather than trusting the change.
+ *
+ * Options are compared by value, so an object literal written in the render
+ * does not resubscribe on every render.
+ */
+export function useLiveRows<Sch extends TableSchema, Key, S extends string = "">(
+  table: LiveTable<Sch, Key>,
+  options: LiveRowsOptions<Sch["row"], S> = {},
+): LiveRowsResult<Selected<Sch, S>> {
+  const signature = JSON.stringify([options.where ?? null, options.orderBy ?? null, options.select ?? null]);
+  const rows = useMemo(
+    () =>
+      new LiveRows<Selected<Sch, S>>(
+        table as unknown as LiveTable,
+        options as LiveRowsOptions<object, string>,
+      ),
+    // `options` is read through its signature: a new object with the same
+    // filter is the same read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [table, signature],
+  );
+  useEffect(() => {
+    rows.start();
+    return () => rows.close();
+  }, [rows]);
+  const state = useSyncExternalStore(
+    (onChange) => rows.onChange(onChange),
+    () => rows.current,
+    () => rows.current,
+  );
+  const status = useLiveStatus(table.changes.connection);
+  return { ...state, status, refresh: () => rows.refresh() };
 }
 "#;
 
@@ -3761,6 +4400,8 @@ mod tests {
             path: "/api/live".to_owned(),
             value: sc_api::TypeSchema::text(),
             topics: sc_api::StreamTopics::Single,
+            presence: false,
+            client_publish: false,
         }];
         let with = runtime_files(&ProjectContext {
             streams: &streams,
@@ -3778,6 +4419,309 @@ mod tests {
             "{agents}"
         );
         assert!(file(&with, "src/feldspar/README.md").contains("live-react.ts"));
+    }
+
+    /// L5.6: `live-doc.ts` — the one generated file that imports `yjs` — is
+    /// emitted only for an app exposing a document stream; `yjs` and
+    /// `y-protocols` are in the write-once `package.json` either way; and the
+    /// contract names the editors' worked examples (L5.7).
+    #[test]
+    fn the_document_runtime_is_emitted_only_with_a_document_stream() {
+        let tables = [tasks()];
+        let app = todo();
+        let endpoints = endpoints(&tables);
+        let boiler = sc_api::StreamExport {
+            name: "boiler".to_owned(),
+            path: "/api/live".to_owned(),
+            value: sc_api::TypeSchema::text(),
+            topics: sc_api::StreamTopics::Single,
+            presence: false,
+            client_publish: false,
+        };
+        let without = runtime_files(&ProjectContext {
+            streams: std::slice::from_ref(&boiler),
+            ..ctx(&app, &tables, &endpoints, None)
+        });
+        assert!(
+            !without.iter().any(|f| f.path.ends_with(RUNTIME_DOC_FILE)),
+            "no document stream, no live-doc.ts"
+        );
+        assert!(
+            without.iter().all(|f| !f.contents.contains("from \"yjs\"")),
+            "nothing else imports yjs"
+        );
+        let note_body = sc_api::StreamExport {
+            name: "note_body".to_owned(),
+            topics: sc_api::StreamTopics::Document {
+                root: "default".to_owned(),
+                root_kind: "xml".to_owned(),
+            },
+            ..boiler.clone()
+        };
+        let with = runtime_files(&ProjectContext {
+            streams: &[boiler, note_body],
+            ..ctx(&app, &tables, &endpoints, None)
+        });
+        let doc = file(&with, "src/feldspar/live-doc.ts");
+        assert!(doc.contains("DO NOT EDIT"), "{doc}");
+        assert!(doc.contains("export function useDocument<"), "{doc}");
+        assert!(
+            doc.contains("note_body: documentStream(api.live.note_body),"),
+            "{doc}"
+        );
+        assert!(!doc.contains("boiler"), "only document streams: {doc}");
+        assert!(!file(&with, "src/feldspar/live-react.ts").contains("yjs"));
+
+        let project = project_files(&ctx(&app, &tables, &endpoints, None));
+        let package: serde_json::Value =
+            serde_json::from_str(file(&project, "package.json")).unwrap();
+        assert_eq!(package["dependencies"]["yjs"], "^13.6.0");
+        assert_eq!(package["dependencies"]["y-protocols"], "^1.0.6");
+        let agents = file(&project, "AGENTS.md");
+        for needle in [
+            "## Collaborative documents",
+            "@tiptap/extension-collaboration",
+            "y-codemirror.next",
+            "React.lazy",
+            "every 2 s",
+        ] {
+            assert!(agents.contains(needle), "{needle} in {agents}");
+        }
+    }
+
+    /// L3.10–L3.11: an exposed stream of a table's changes is typed with the
+    /// table's row and its read's filter, the table's object carries it as
+    /// `changes`, and `useLiveRows(api.tasks, …)` infers its rows from the
+    /// `select` — checked by compiling a component against the generated
+    /// runtime, with `ui/admin`'s compiler and React types (skipped without
+    /// them).
+    #[test]
+    fn use_live_rows_type_checks_against_the_generated_runtime() {
+        let tables = [tasks()];
+        let app = todo();
+        let endpoints = endpoints(&tables);
+        let streams = [sc_api::StreamExport {
+            name: "tasks_live".to_owned(),
+            path: "/api/live".to_owned(),
+            value: sc_api::TypeSchema::json(),
+            topics: sc_api::StreamTopics::Changes {
+                table: "tasks".to_owned(),
+            },
+            presence: false,
+            client_publish: false,
+        }];
+        let files = runtime_files(&ProjectContext {
+            streams: &streams,
+            ..ctx(&app, &tables, &endpoints, None)
+        });
+        let client = file(&files, "src/feldspar/client.ts");
+        assert!(
+            client.contains("readonly changes: LiveChangesStream<TasksSchema, number>;"),
+            "{client}"
+        );
+        assert!(
+            client.contains(
+                "tasks_live: connection.changesStream<TasksSchema, number>(\"tasks_live\", \"tasks\", \"id\"),"
+            ),
+            "{client}"
+        );
+        assert!(client.contains("changes: live.tasks_live,"), "{client}");
+        let hooks = file(&files, "src/feldspar/live-react.ts");
+        assert!(hooks.contains("export function useLiveRows<"), "{hooks}");
+
+        type_check_component(
+            &files,
+            "live-rows",
+            "src/pages/LiveTasks.tsx",
+            r#"import { api, type TasksRow } from "../feldspar/hooks";
+import { useLiveRows, type LiveRowsResult } from "../feldspar/live-react";
+
+export function LiveTasks() {
+  const all: LiveRowsResult<TasksRow> = useLiveRows(api.tasks, {
+    where: { done: "is_null.false" },
+    orderBy: "title.desc",
+  });
+  const narrow = useLiveRows(api.tasks, { select: "title" });
+  const title: string = narrow.rows[0].title;
+  // @ts-expect-error `done` was selected away
+  void narrow.rows[0].done;
+  // @ts-expect-error `nope` is not a column of tasks
+  useLiveRows(api.tasks, { where: { nope: "eq.1" } });
+  // @ts-expect-error a filter is `op.value`, as in a read
+  useLiveRows(api.tasks, { where: { title: 7 } });
+  // The same stream, by either name.
+  const same: typeof api.live.tasks_live = api.tasks.changes;
+  same.subscribe(
+    { where: { title: "eq.x" } },
+    {
+      element: (envelope) => {
+        const change = envelope.value;
+        const key: number = change.key;
+        if (change.op === "leave" || change.op === "delete") return void key;
+        const row: TasksRow | undefined = change.row;
+        void row;
+      },
+    },
+  );
+  return (
+    <ul data-status={all.status} onClick={all.refresh}>
+      {all.loading ? null : all.rows.map((row) => <li key={row.id}>{row.title}{title}</li>)}
+    </ul>
+  );
+}
+"#,
+            "useLiveRows",
+        );
+    }
+
+    /// Compile `source` at `path` against the generated runtime `files` with
+    /// `ui/admin`'s compiler and React types, strictly — skipped (with a note)
+    /// when they are not installed.
+    fn type_check_component(
+        files: &[GeneratedFile],
+        tag: &str,
+        path: &str,
+        source: &str,
+        what: &str,
+    ) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let admin_modules = root.join("ui/admin/node_modules");
+        let tsc = std::env::var("SC_TSC")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| admin_modules.join(".bin/tsc"));
+        if !tsc.exists() || !admin_modules.join("@types/react").is_dir() {
+            eprintln!("skipping the type check: no tsc or React types (run `npm ci` in ui/admin)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sc-app-{tag}-{}", std::process::id()));
+        for generated in files {
+            let path = dir.join(&generated.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &generated.contents).unwrap();
+        }
+        let page = dir.join(path);
+        std::fs::create_dir_all(page.parent().unwrap()).unwrap();
+        std::fs::write(&page, source).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&admin_modules, dir.join("node_modules")).unwrap();
+        let output = std::process::Command::new(&tsc)
+            .current_dir(&dir)
+            .args([
+                "--noEmit",
+                "--strict",
+                "--noUnusedLocals",
+                "--skipLibCheck",
+                "--jsx",
+                "react-jsx",
+                "--target",
+                "es2020",
+                "--lib",
+                "es2020,dom",
+                "--module",
+                "esnext",
+                "--moduleResolution",
+                "bundler",
+                path,
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "{what} does not type-check against the generated runtime:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// L4.4: a stream with presence and page publishes gets `join` and
+    /// `publish` on its accessor, and `usePresence` / `usePublish` type-check
+    /// against the generated runtime; a stream without them offers neither.
+    #[test]
+    fn use_presence_type_checks_against_the_generated_runtime() {
+        let tables = [tasks()];
+        let app = todo();
+        let endpoints = endpoints(&tables);
+        let dragging = sc_api::TypeSchema::struct_of([sc_api::StructField::new(
+            "dragging",
+            sc_api::TypeSchema::optional(sc_api::TypeSchema::value(sc_api::ValueType::Int)),
+        )]);
+        let stream = |name: &str, topics, presence, client_publish| sc_api::StreamExport {
+            name: name.to_owned(),
+            path: "/api/live".to_owned(),
+            value: dragging.clone(),
+            topics,
+            presence,
+            client_publish,
+        };
+        let streams = [
+            stream("board_presence", sc_api::StreamTopics::Row, true, true),
+            stream("lobby", sc_api::StreamTopics::Single, true, false),
+            stream("board_activity", sc_api::StreamTopics::Row, false, false),
+        ];
+        let files = runtime_files(&ProjectContext {
+            streams: &streams,
+            ..ctx(&app, &tables, &endpoints, None)
+        });
+        let client = file(&files, "src/feldspar/client.ts");
+        assert!(
+            client.contains(
+                "readonly board_presence: LiveRowStream<BoardPresenceEnvelope> & \
+                 LiveRowPresence<BoardPresenceEnvelope> & LiveRowPublish<BoardPresenceEnvelope>;"
+            ),
+            "{client}"
+        );
+        assert!(
+            client.contains(
+                "readonly lobby: LiveStream<LobbyEnvelope> & LivePresence<LobbyEnvelope>;"
+            ),
+            "{client}"
+        );
+        let hooks = file(&files, "src/feldspar/live-react.ts");
+        assert!(hooks.contains("export function usePresence<"), "{hooks}");
+        assert!(hooks.contains("export function usePublish<"), "{hooks}");
+        type_check_component(
+            &files,
+            "presence",
+            "src/pages/Board.tsx",
+            r#"import { live, usePresence, usePublish } from "../feldspar/live-react";
+
+export function Board({ id }: { id: number }) {
+  const { members, me, setState, publish, canPublish, status, error } = usePresence(
+    live.board_presence,
+    id,
+  );
+  const lobby = usePresence(live.lobby);
+  const send = usePublish(live.board_presence, id);
+  const onDrag = (card: number) => {
+    setState({ dragging: card });
+    if (canPublish) publish({ dragging: card });
+    send({ dragging: null });
+  };
+  // @ts-expect-error a per-row stream is joined naming the row
+  usePresence(live.board_presence);
+  // @ts-expect-error a stream without presence cannot be joined
+  usePresence(live.board_activity, id);
+  // @ts-expect-error a stream pages may not publish on
+  usePublish(live.lobby);
+  // @ts-expect-error `nope` is not a declared key
+  send({ nope: 1 });
+  return (
+    <ul data-status={status} data-error={error?.code} onClick={() => onDrag(1)}>
+      {members.map((member) => (
+        <li key={member.connection}>
+          {member.user_id}
+          {member.connection === me ? " (you)" : ""}
+          {String(member["name"] ?? "")}
+        </li>
+      ))}
+      <li>{lobby.members.length}</li>
+    </ul>
+  );
+}
+"#,
+            "usePresence",
+        );
     }
 
     #[test]

@@ -30,6 +30,11 @@
 //!   channel and lost `n` elements. **Told, never hidden** (§7): a consumer
 //!   that cannot keep up is the consumer's problem, and a screen showing a
 //!   silent gap is worse than one showing a gap it named.
+//! - `{"type":"presence","topics":[{"topic":"7"|null,"members":[…]}]}` — for a
+//!   stream with presence (TODO.md "Live updates" L4.5), who has each topic
+//!   open right now, as the members see each other: after `ready`, and again
+//!   whenever it changed, looked at on the status clock. Every topic, which a
+//!   page never sees.
 //! - `{"type":"status","status":{…},"counters":{…}}` — the stream reconnected,
 //!   failed, or stopped. Polled rather than pushed, because the supervisor has
 //!   no observer seam per stream and a second one would be a channel to keep in
@@ -103,6 +108,7 @@ const MAX_CLOSE_REASON: usize = 120;
 pub(crate) async fn stream_observe_upgrade(
     ws: WebSocketUpgrade,
     supervisor: Option<&Arc<StreamSupervisor>>,
+    hub: Arc<sc_live::LiveHub>,
     id: StreamId,
 ) -> axum::response::Response {
     let Some(supervisor) = supervisor else {
@@ -118,7 +124,7 @@ pub(crate) async fn stream_observe_upgrade(
         );
         return ws.on_upgrade(move |socket| refuse(socket, reason));
     };
-    ws.on_upgrade(move |socket| observe(socket, running))
+    ws.on_upgrade(move |socket| observe(socket, running, hub))
 }
 
 /// Close a socket, saying why.
@@ -179,6 +185,35 @@ pub(crate) fn element_type_json(running: &RunningStream) -> Json {
         .unwrap_or(Json::Null)
 }
 
+/// [`element_type_json`], typed against the schema the configuration names
+/// ([`StreamProvider::element_type_in`](sc_stream::StreamProvider::element_type_in))
+/// — a `table_changes` stream's `row` with the table's columns. What the live
+/// socket's `ready` announces, so a page reads the type its generated client
+/// was written from. Falls back to the cached type when the provider cannot
+/// say (its table dropped under it).
+pub(crate) fn element_type_json_in(running: &RunningStream, catalog: &sc_catalog::Catalog) -> Json {
+    running
+        .provider()
+        .and_then(|provider| {
+            provider
+                .element_type_in(&running.configuration(), catalog)
+                .ok()
+        })
+        .and_then(|ty| serde_json::to_value(ty).ok())
+        .unwrap_or_else(|| element_type_json(running))
+}
+
+/// The Observe socket's `presence` frame: every topic with somebody on it.
+pub(crate) fn presence_frame(rooms: &[(Option<String>, Vec<Json>)]) -> Json {
+    json!({
+        "type": "presence",
+        "topics": rooms
+            .iter()
+            .map(|(topic, members)| json!({ "topic": topic, "members": members }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// A running stream's status and counters as a frame carries them. Shared with
 /// the live socket's `ready` and `status`.
 pub(crate) fn status_parts(running: &RunningStream) -> (Json, Json) {
@@ -194,7 +229,11 @@ pub(crate) fn status_parts(running: &RunningStream) -> (Json, Json) {
 /// close: a socket whose reader is never polled would leave a browser that
 /// navigated away holding a subscription until the next element arrived, which
 /// on a quiet stream is never.
-pub(crate) async fn observe(socket: WebSocket, running: Arc<RunningStream>) {
+pub(crate) async fn observe(
+    socket: WebSocket,
+    running: Arc<RunningStream>,
+    hub: Arc<sc_live::LiveHub>,
+) {
     use futures::{SinkExt, StreamExt};
 
     let (mut sender, mut receiver) = socket.split();
@@ -220,6 +259,23 @@ pub(crate) async fn observe(socket: WebSocket, running: Arc<RunningStream>) {
         if sender.send(Message::text(frame.to_string())).await.is_err() {
             return;
         }
+    }
+
+    // Who is present, for a stream with presence: sent now, and again when it
+    // changes.
+    let presence = |running: &RunningStream| -> Option<Json> {
+        let config = running.configuration();
+        // A document's editors are always present (L5): who has it open.
+        let shows = (running.provider().is_some_and(|p| p.accepts_publish())
+            && sc_stream::providers::internal::presence(&config))
+            || running.provider_name() == sc_stream::DOCUMENT;
+        shows.then(|| presence_frame(&hub.presence_of(running.id())))
+    };
+    let mut last_presence = presence(&running);
+    if let Some(frame) = &last_presence
+        && sender.send(Message::text(frame.to_string())).await.is_err()
+    {
+        return;
     }
 
     let mut last = status_frame(&running);
@@ -249,6 +305,15 @@ pub(crate) async fn observe(socket: WebSocket, running: Arc<RunningStream>) {
                 Err(RecvError::Closed) => break,
             },
             _ = ticker.tick() => {
+                let present = presence(&running);
+                if present != last_presence {
+                    last_presence = present.clone();
+                    if let Some(frame) = present
+                        && sender.send(Message::text(frame.to_string())).await.is_err()
+                    {
+                        break;
+                    }
+                }
                 let current = status_frame(&running);
                 if current == last {
                     continue;

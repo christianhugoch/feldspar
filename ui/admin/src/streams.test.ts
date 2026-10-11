@@ -23,6 +23,7 @@ import {
   TAIL_LIMIT,
   applyFrame,
   cellText,
+  changeNotes,
   counterNotes,
   elementCells,
   elementColumns,
@@ -37,9 +38,11 @@ import {
   nameProblem,
   parseFrame,
   providerSpec,
+  readChanges,
   readCounters,
   readElementType,
   readEnvelope,
+  readPresence,
   readStatus,
   readTopics,
   statusLabel,
@@ -241,6 +244,31 @@ describe("status and counters", () => {
     ).toEqual(["3 dropped for triggers", "2 over the rate cap", "1 malformed"]);
   });
 
+  it("reads a table-changes stream's checks and says what they decided", () => {
+    expect(readChanges(null)).toBeNull();
+    expect(changeNotes(readChanges(null))).toEqual([]);
+    expect(changeNotes(readChanges({ checked: 0 }))).toEqual([]);
+    const changes = readChanges({
+      checked: 10,
+      delivered: 6,
+      suppressed_access: 3,
+      suppressed_filter: 1,
+      evaluator_micros: 2500,
+    });
+    expect(changes).toMatchObject({ checked: 10, delivered: 6 });
+    expect(changeNotes(changes)).toEqual([
+      "6 of 10 sent",
+      "3 withheld by access",
+      "1 outside filters",
+      "3 ms evaluating",
+    ]);
+    // Zeroes say nothing, and the evaluator's time only once it is worth a
+    // millisecond.
+    expect(changeNotes(readChanges({ checked: 2, delivered: 2, evaluator_micros: 10 }))).toEqual([
+      "2 of 2 sent",
+    ]);
+  });
+
   it("groups a count, because a busy stream reaches seven digits", () => {
     expect(formatCount(1024)).toBe((1024).toLocaleString());
     expect(formatCount(Number.NaN)).toBe("—");
@@ -432,5 +460,54 @@ describe("the observe socket", () => {
   it("ignores an element frame whose envelope is not one", () => {
     const state = applyFrame(emptyObserve(), { type: "element", envelope: { nope: true } });
     expect(state.tail).toEqual([]);
+  });
+});
+
+describe("presence on the Observe screen (L4.5)", () => {
+  it("reads the frame the server writes, every topic and member", () => {
+    const frame = parseFrame(
+      JSON.stringify({
+        type: "presence",
+        topics: [
+          {
+            topic: "1",
+            members: [
+              { connection: "c1", user_id: "u-alice", name: "Alice", state: { dragging: 7 } },
+              { connection: "c2", user_id: null, state: null },
+            ],
+          },
+          { topic: null, members: [] },
+        ],
+      }),
+    );
+    expect(frame?.type).toBe("presence");
+    const state = applyFrame(emptyObserve(), frame as ObserveFrame);
+    expect(state.presence).toEqual([
+      {
+        topic: "1",
+        members: [
+          { connection: "c1", user_id: "u-alice", fields: { name: "Alice" }, state: { dragging: 7 } },
+          { connection: "c2", user_id: null, fields: {}, state: null },
+        ],
+      },
+      { topic: null, members: [] },
+    ]);
+  });
+
+  it("starts with no presence, and a later frame replaces the earlier one", () => {
+    expect(emptyObserve().presence).toBeNull();
+    let state = applyFrame(emptyObserve(), {
+      type: "presence",
+      topics: [{ topic: "1", members: [{ connection: "c1", user_id: null, state: null }] }],
+    });
+    state = applyFrame(state, { type: "presence", topics: [] });
+    expect(state.presence).toEqual([]);
+  });
+
+  it("leaves out what is malformed rather than throwing", () => {
+    expect(readPresence(null)).toEqual([]);
+    expect(readPresence([{ topic: "1" }, "x", { topic: 2, members: [{ user_id: "u" }, 3] }])).toEqual([
+      { topic: null, members: [] },
+    ]);
   });
 });

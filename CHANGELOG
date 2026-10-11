@@ -2,6 +2,406 @@
 
 Changes in reverse chronological order.
 
+## Live updates L5: the full suite, run against Postgres
+
+The whole workspace (`scripts/test.sh --workspace`, 4,560 tests), the `python-host` suite and the
+TypeScript type-check tests were run on a machine with Postgres. Five fixes:
+
+- **`ui/admin/package-lock.json` broke `npm ci`.** When L5 added `yjs` and `y-protocols`, the
+  rewrite also dropped vitest's nested `esbuild` 0.28.2, which `package.json` still needs, so
+  `npm ci` (what `sc-cli`'s build script runs) refused to install. The lock was rebuilt from the
+  pre-L5 file plus the two new packages. `npm ci`, `tsc`, vitest (708) and `vite build` pass.
+- **Python `fetch()` sent every request as if it carried a body.** `saltcorn.py` defined
+  `_MISSING` twice: once above `fetch` and again above `Live` (L2.8). `fetch`'s `json=` default
+  was the first sentinel, but its body compared against the global, which was by then the
+  second. So a plain GET was refused ("a GET request cannot carry a body"), and `data=` was
+  refused as "not both". The second definition is gone. The 9 `python_fetch` tests that caught
+  this now pass.
+- **`python_live` named `LiveError` bare.** A body reaches the errors as `saltcorn.LiveError`,
+  like `saltcorn.DbError` (§ "The errors are a hierarchy the Rust half owns"). Both tests, the
+  L4 one and the L5 `live.document` one, now import `saltcorn`.
+- **`sc-app` `live_doc` compared JSON as strings.** Whether an object's keys print sorted depends
+  on serde_json's `preserve_order`. Feature unification turns it on in a workspace build and
+  leaves it off under `-p sc-app`, so the test passed only in the latter. It now compares values.
+- **`sc-api` `typescript_typecheck` now passes `--target es2020` and `--moduleResolution
+  bundler`.** TypeScript 5's default ES5 target can't iterate the helper's `Map`, and
+  TypeScript 7 has no `--moduleResolution node`. A scaffolded app already uses ES2022/bundler.
+  Verified with `SC_TSC` pointed at `ui/admin`'s TypeScript 5.9 (5 pass).
+
+## Live updates L5: collaborative documents
+
+A note two people type into at once, each seeing the other's words and cursor, while a third
+person who may only read it watches: a `collab_doc` field, a `document` stream, and `yrs` (Yjs's
+CRDT in Rust) merging on the server. `docs/TECHNICAL_DESIGN.md` §14.10 "Collaborative documents"
+describes what was built; `docs/tutorial-live.md` has part 5.
+
+- **L5.1 — the `collab_doc` type** (`sc-types`, on `bytea`/`BLOB`). It is **left out of every API
+  read** (absent, not `null`; a table holding one is projected column by column), of the
+  generated row types and of `table_changes` element types; **refused as a write target** by the
+  row layer (so REST, GraphQL, the admin row editor and a code body's `db`), by `insert_row` /
+  `update_rows` when their configuration is saved, and by a code body's plan; refused by
+  filters and orderings; and invisible to formulas (left out of the schema shape). The admin UI's
+  grid and row form treat it as read-only. The one writer is `rows::write_document_in`.
+- **L5.2 — `yrs`** (new workspace dependency, 0.28). `sc-live::doc::CollabDoc`: load, apply (an
+  untrusted update cannot panic the room), merge, text and JSON for a `text` or an `xml` root,
+  UTF-16 positions, text edits and paragraph appends. A fixture recorded from the JS `yjs`
+  package (`crates/sc-live/tests/fixtures/`, with the script that records it) replays through
+  `yrs` to the same text and JSON for both root kinds.
+- **L5.3 — the `document` provider** (`table`, `field`, `root`, `root_kind`, `text_mirror`,
+  `mirror_format`; `Row` topics) and **document rooms** (`sc-live::docroom`): one per open
+  document, relaying each edit to the other members through a per-connection inbox (a resync as
+  `doc_sync` past its cap). On the socket: `doc_sync {update, read_only}` after `ready`;
+  `doc_update` both ways; a read-only member's edit `unavailable`; edits counted against the
+  publish rate; losing the edit right sends `doc_sync` again with `read_only: true`, losing the
+  read right is `revoked`. New limits `max_doc_bytes` (2 MB, `too_large`) and
+  `max_doc_update_bytes` (1 MB for a `doc_update` frame; every other frame keeps 64 KB); the
+  transport takes twice the latter. Presence is always on for a document; the admin's Observe
+  screen shows its editors. An application exposing a `document` stream must include its table.
+- **L5.4 — persisting**: debounced (`doc_persist_debounce`, 2 s) and when the last member leaves,
+  skipped when nothing changed, in one transaction: `SELECT … FOR UPDATE` (new
+  `sc_query::Select::lock` / `for_update()` and `SqlDialect::row_lock`; SQLite renders none),
+  merge with what is stored (and relay what another process added), write the field and the
+  mirror through the row layer as a system write.
+- **L5.5 — `live.document(stream, key)`** in JavaScript bodies (asynchronous op `op_sc_live_doc`:
+  `text`, `append`, `insert`, `delete`, `edit`) and Python bodies (`live.document(...)` → a
+  `Document`), over the new `LiveHost::document` (defaulted to a refusal). An edit merges, reaches
+  open editors at once, and is persisted before the call returns.
+- **L5.6 — the client.** The helper (and so the four UIs' copies, regenerated) gains the
+  transport — `LiveDocumentStream`, `doc_sync`/`doc_update` handling, `sendDocUpdate` — and imports
+  nothing. The React scaffold's new `src/feldspar/live-doc.ts`, emitted only for an app exposing a
+  document stream, is the only generated file importing `yjs`: `openDocument`, `docs.<stream>.open`
+  and `useDocument`, answering every `doc_sync` with what the server lacks (offline edits arrive),
+  and carrying the awareness as presence state. **Deviation from the plan:** the accessor is
+  `docs.<stream>.open(key)` rather than `live.<stream>.open(key)`, because `live` is the generated
+  client's object, which may not import `yjs`. `yjs` (`^13.6.0`) and `y-protocols` (`^1.0.6`) are in
+  every scaffold's `package.json`. They are also new dev dependencies of `ui/admin` (where the
+  repository's TypeScript tests find their `node_modules`); npm rewrote part of
+  `ui/admin/package-lock.json` (it deduplicated vitest's nested esbuild) — vitest (708 tests),
+  `tsc` and `vite build` of the admin UI pass with it.
+- **L5.7 — `AGENTS.md`**: a "Collaborative documents" section with TipTap and CodeMirror
+  examples, `React.lazy` for the editor page, and the 2-second update trigger.
+- **L5.8 — tutorial part 5** and its definition of done,
+  `crates/sc-server/tests/tutorial_live_documents.rs`.
+- **Tests** — run here and passing: `sc-types`, `sc-query`, `sc-db-sqlite`, `sc-stream`,
+  `sc-core-actions`, `sc-core-traits` (lib); `sc-live` lib and every SQLite/no-database test
+  (`doc_format`, `documents`, `hub`, `publish`, `readers`); `sc-api` `collab_doc`,
+  `admin_client_sync`, `live_connection`; `sc-expr` (`--features eval`) document tests; `sc-app`
+  lib and `live_doc` (Node with the real `yjs`, and `tsc`); `sc-server` `app_live_documents` and
+  `tutorial_live_documents` — **both on SQLite with a real server and real sockets**, the latter
+  including two headless Chromium contexts typing into one note through the scaffold's generated
+  runtime bundled by `esbuild`; `ui/admin` vitest and `tsc` in all four UIs.
+- **Not run here** (no Postgres, no libpython on this machine): every Postgres-backed test (they
+  fail here only on connecting), and `sc-python`'s `python_live::a_python_body_reads_and_edits_a_document`
+  (compiled; it needs `--features python-host`). Step 3 of the tutorial test type-checks the
+  TipTap page only when TipTap is installed in `ui/admin/node_modules`; it is not, so that step
+  says so and is skipped. `sc-api`'s `typescript_typecheck` fails here for reasons that predate L5:
+  this machine's global `tsc` is TypeScript 7, which rejects the test's `--moduleResolution
+  node`, and with the admin UI's TypeScript 5 (`SC_TSC=…/ui/admin/node_modules/.bin/tsc`) the L4
+  helper's `for … of` over a `Map` needs a `--target` the test does not pass.
+- **Noticed, not changed:** creating a table through the admin API (`POST /api/tables`, no
+  fields) fails on SQLite, which cannot hold a table with no columns; the tutorial test creates
+  each table with its key through the catalog and adds the rest through the admin API.
+
+## Live updates L5: plan revised before building
+
+The L5 plan (TODO.md §3–§6 and the L5 items) was reviewed and kept as a CRDT design, with these
+changes; `docs/TECHNICAL_DESIGN.md` §14.10 records them under "Collaborative documents".
+
+- **Document limits come from one setting**, `max_doc_bytes` (2 MB, was 5 MB). The old numbers
+  contradicted each other: a 5 MB document could not fit a 1 MB `doc_sync`, and a paste over
+  64 KB would have been `too_large`. `doc_update` frames get their own 1 MB cap.
+- **`root` defaults to `default`** (TipTap's name, was `content`), and a new `root_kind`
+  (`text` | `xml`) tells `yrs` what to read.
+- **The mirror has a `mirror_format`** (`text` | `json`), so documents with an `xml` or a map
+  root are readable over REST too.
+- **Reconnect is specified**: after every `doc_sync` the client sends what the server lacks.
+- **`collab_doc` is left out of REST reads** (not `null`) and the generated row types.
+- **Persisting skips unchanged documents**, and the docs say plainly that an update trigger fires
+  about every 2 s while someone types.
+- **`live.document` writes** text edits on a `text` root and paragraph appends on an `xml` root.
+- **Awareness is opaque presence state** (`encodeAwarenessUpdate` in base64).
+- **The document client is its own file**, `src/feldspar/live-doc.ts`, so `yjs` never reaches
+  apps without documents or the admin/IDE UIs. `yjs` and `y-protocols` are always in the
+  scaffold's `package.json`, because `package.json` is written once.
+- **The limits item was folded into L5.3**, so L5 is now L5.1–L5.8.
+
+## Live updates L4: the Postgres-backed tests run, and an app's streams use its own server's registry
+
+The L4 tests that could not be run where L4 was built have now been run. The four
+`app_live_presence` tests passed first time. `tutorial_live::part_four_presence_on_the_board`
+failed in two ways, neither of them in L4's own code:
+
+- **The tutorial's server had no JavaScript evaluator.** `serve` always attaches one; the test's
+  `AppMounts` did not, so the board's ownership formula could not be evaluated and `ready` said
+  `can_publish: false`. The test now attaches `default_js_evaluator()`, as `app_live_presence`
+  already did.
+- **An app's streams were typed against the last stream registry installed in the process.**
+  `sc_app::app_streams` (used by scaffolding and the build's client emit) read one process-wide
+  registry, and every server a test binary starts installs its own. When the tests ran together,
+  another test's registry could replace the tutorial's between boot and scaffold, and `boiler`'s
+  `mqtt` provider was then "unknown". Parts 1 and 2 had the same race and were just luckier.
+  `sc_app::install_stream_registry` now takes the catalog and stores the registry on it as well
+  (`Catalog::{set_,}stream_registry`, opaque like `host_llm_provider`), and the new
+  `sc_app::catalog_stream_registry` reads the catalog's first and falls back to the process's.
+  `app_streams` and the live socket's topic lookup use it. This also fixes something in
+  production: a module change rebuilt the supervisor's registry but never reinstalled the one
+  clients are typed from. Until a restart, building or scaffolding an app that exposed a stream from
+  a module installed since boot failed with "unknown stream provider". `ModuleServices` now installs it too.
+- **Tests**: new `sc-app` `stream_registry::an_app_is_typed_against_its_own_servers_registry`
+  (two catalogs, the second registry installed last, the first app still resolves its scripted
+  provider). Run and passing: `sc-server` (all 523 `it` tests plus its units and other targets),
+  `sc-app`, `sc-live`, `sc-stream`. Clippy is clean on `sc-catalog`, `sc-app` and `sc-server`.
+- **Note:** `scripts/test.sh` cannot pass test-binary arguments: it appends `--no-run` after
+  whatever it is given, so `scripts/test.sh -p sc-server --test it -- app_live_presence` fails with
+  `Unrecognized option: 'no-run'`. Run a filtered binary with `scripts/cargo-guarded.sh test …`
+  instead. Not changed here.
+
+## Live updates L4: a page publishes, and sees who else is here
+
+A page can now publish on an `internal` stream whose settings let it, and a stream with presence
+shows each topic's members — who has a board open, and what each is dragging. TODO.md L4.1–L4.6.
+The Postgres-backed tests (`sc-server`'s `app_live_presence` and
+`tutorial_live::part_four_presence_on_the_board`) were first run in the entry above, which fixes
+what they found.
+
+- **Wire contract**: `subscribe` takes `echo` (default off). New server frames: `presence {sub,
+  connection, members}` after `ready` on a stream with presence, and `presence_diff {sub, joined?,
+  left?, updated?}` after it. A page-published envelope's `source` is `{user, connection}`, which
+  the server stamps; a `source` in the frame is ignored. `publish` and `presence` are no longer
+  refused outright.
+- **Publishing (L4.1)**: `sc_live::may_publish` (pure; `client_publish` on, then `single` → the
+  floor already met, `row` → update access, `user` and row changes → never) and
+  `sc_api::row_updatable_as` (the update rule on one row, read as the system so it works on RLS
+  tables, decided reified by `row_allowed`). The socket decides it at attach and again at every
+  access re-check (a touched row or read-rule table, the clock) and sends it as `ready`'s
+  `can_publish`; a refused publish is `unavailable`. `Connection::publish` →
+  `RunningStream::publish_value_from` (same checks as a server-side publish, plus the stamped
+  `source`). The fan-out leaves out the sender's own element unless it subscribed with `echo`.
+  Each socket has a random `Connection::tag`, which is what `connection` is everywhere.
+- **Limits (L4.2)**: `LiveLimits` gains `publishes_per_second` (20), `presence_per_second` (20),
+  `presence_coalesce` (50 ms) and `max_presence_state_bytes` (2 KB). Past a rate the answer is
+  `rate_limited`, and an oversized state is `too_large`. The connection stays up either way. The
+  token bucket is `sc_live::RateLimit`. Presence is coalesced per connection: the first update is
+  applied at once, and the latest one held during the window is applied when it ends.
+- **Presence (L4.3)**: new `sc-live::presence`. Rooms are keyed by `(stream id, topic)`, with one
+  member per connection, shown as `{connection, user_id, …presence_fields, state}`. The fields are
+  read from `users` at join time. A `Seat` is held by the subscription, so unsubscribing, a revoke
+  or a closed socket leaves the room. Changes go to the other members' inboxes and leave as
+  ordered `presence_diff`s; an overfull inbox resends the whole list instead.
+  `sc_stream::providers::internal::{client_publish, presence}` read the settings.
+- **Client (L4.4)**: `StreamExport` gains `presence` and `client_publish`. An accessor's type adds
+  `LivePresence`/`LiveRowPresence` (`join`) and `LivePublish`/`LiveRowPublish` (`publish`) only
+  where the settings allow; a `user` stream never gets `publish`. `LiveConnection` gains `join` (a
+  `LiveRoom`: `members`, `me`, `canPublish`, `setState`, `publish`, `leave`), `publish`,
+  `publishOn` (opens a short-lived subscription when the page holds none) and `setState`
+  (throttled to one per `presenceInterval`, 60 ms by default, and resent after a reconnect). The
+  pure `applyPresence` applies the frames. `LiveHandlers` gains `echo` and `presence`. React:
+  `usePresence(accessor, topic?)` and `usePublish(accessor, topic?)` in `live-react.ts`, both
+  named in the scaffold's `AGENTS.md`. `helper.ts` is regenerated in `ui/admin`, `ui/ide`,
+  `ui/builder` and `ui/analytics`.
+- **Admin (L4.5)**: the Observe socket sends `presence {topics}` for a stream with presence,
+  after `ready` and whenever it changes (`LiveHub::presence_of`). The Observe screen shows it as a
+  **Present now** card. New strings are translated into the five admin locales.
+- **Docs (L4.6)**: `docs/tutorial-live.md` part 4 (presence on the kanban board), and
+  TECHNICAL_DESIGN §14.10 "Client publishing and presence (L4)", plus updates to its protocol
+  block, limits, client, admin and tests paragraphs. Part 3 (L3.12) is still unwritten, so part 4
+  states the two tables it needs from part 3.
+- **Tests**:
+  - Run and passing here:
+    - `sc-live`: units for frames, `may_publish`, `RateLimit` and presence rooms;
+      `tests/publish.rs` (stamped source, echo, malformed value, seats through the hub,
+      `row_updatable_as` on SQLite).
+    - `sc-server`'s `live::tests`, the diff grouping.
+    - `sc-api`: `live_connection::joining_keeps_the_members_and_sends_state_and_publishes` (run
+      under Node) and the extended `typescript_typecheck` stream client.
+    - `sc-app`: `use_presence_type_checks_against_the_generated_runtime`.
+    - `sc-stream`'s internal provider.
+    - `ui/admin`: `streams.test.ts` presence cases, and `tsc` in all four UIs.
+  - Postgres, written but not run: `sc-server/tests/app_live_presence.rs` and
+    `tutorial_live::part_four_presence_on_the_board`.
+
+## Live updates L3, phases 2–3 run against Postgres; the suite is green again
+
+Phases 2 and 3 of L3 were built where only the database-free tests could run. The whole workspace
+has now run here (`scripts/test.sh --workspace`, doctests included, plus vitest and `tsc` in all
+four UIs): 4,500 tests pass. All of the tests the two phases left unrun pass:
+`app_live_changes`, `filters::the_rust_verdict_is_the_postgres_reads`, `sc-live`'s `changes`,
+`sc-workflow`'s `step_transaction`, and `app_live`'s boiler substring check. Two L3 tests needed
+fixing, and six older failures that had nothing to do with L3 were fixed with them.
+
+- **L3: the change streams' socket tests** (`sc-server/tests/app_live_changes.rs`).
+  - The `save_application` refusal test stopped at the framework, which requires `store`, `output`
+    and `command`. It never reached the change-stream check it was written for. The fixture's
+    `code` framework now carries all three.
+  - `a_column_added_to_the_table_reaches_the_generated_element_type` passed alone and failed in
+    the suite with "unknown stream provider `table_changes`". `sc_app::app_streams` resolves
+    against the process-wide registry, which is whichever test's server installed one last, and
+    `app_live`'s registry has no `table_changes`. The new `sc_app::app_streams_with(app, catalog,
+    registry)` takes the registry from its caller. `app_streams` is now that function applied to
+    the installed registry. Both test files now pass their own server's registry. The server's
+    behaviour is unchanged.
+- **Older failures, not L3.**
+  - `sc-files`: the backend-operations test now lists the git `discard` operation.
+  - `plugins/react-native`: the module card now names `node-forge` in `installs`, as its
+    `package.json` requires.
+  - `ui/admin` admin move: `moveSteps(address, reachable, t)` translates its own labels (and the
+    DNS hint, which was never translated). `AdminMove.tsx` no longer calls `t(step.label)`.
+  - `ui/analytics` map toolbox: called `t()` on the server's tool texts. The new
+    `mapToolText(text, t)` in `labels.ts` matches them by their English, as the module's other
+    data names already are. A module's own tool falls through untranslated. The dropdown's
+    tooltip, which was untranslated, now goes through it too. New test
+    `sc-analytics::tools::tests::every_built_in_tool_text_is_translated_by_the_analytics_ui`:
+    every built-in group, label, description, field and choice has a case there.
+  - `repo_hygiene::every_integration_test_file_reaches_a_target` now follows `#[path]` modules
+    nested in a module of `it.rs`. `backup_remote.rs` is reached through `backup_api.rs` and
+    always ran, as `backup_api::remote::*`.
+  - `repo_hygiene::linked_test_binaries_stay_within_the_debug_info_budget`: the ceiling goes from
+    600 to 800 MB. The `sc-server` binary is 624 MB with the budget applying. Of that, 87 MB is
+    DWARF, 219 MB is `.text` and 205 MB is symbol tables, so the growth is code, not debug info.
+
+## Live updates L3, phase 3: the client follows a table's changes
+
+A React page can now show a table's rows and keep them current as anyone writes them:
+`useLiveRows(api.cards, { where: { board: "eq.7" }, orderBy: "position" })` reads, subscribes with
+the same filter, and applies inserts, updates, rows entering or leaving the filter, and deletes in
+place, in order. TODO.md L3.10–L3.11.
+
+- **Typed change subscriptions (L3.10)**: `sc_api::StreamTopics` gains `Changes { table }`
+  (`sc-app` maps `TopicSpec::PerElementRow` to it; it was `Single`), and loses `Copy`. When the
+  client reads the table, `live.<stream>` is a `LiveChangesStream<CardsSchema, Key>`:
+  `subscribe({ where }, handlers)` takes the REST read's own `Filters<CardsRow>` — one filter type
+  for both — and its envelope is `LiveEnvelope<LiveChange<CardsRow, Key>>` (`insert | update |
+  enter` with an optional `row`, `leave | delete` with none). The table's object carries the same
+  accessor as `changes`. The helper lowers `"op.value"` to the socket's filter object
+  (`whereObject`), sent in the `subscribe` frame and again after a reconnect.
+  `LiveConnection.subscribe` takes an optional filter; new `LiveConnection.changesStream`. The
+  generated `createClient` now binds `live` before the tables (a `const live: LiveStreams`).
+- **Live rows (L3.11)**: in the helper, framework-neutral — `liveRowsPlan`, the pure reducer
+  `applyLiveChange`, `mergeLiveRows`, `sortLiveRows`, and `LiveRows`, which reads once the
+  subscription is `ready` (again after a reconnect or `lagged`), applies changes that arrive during
+  a read on top of it, keeps `orderBy`'s order, cuts rows to a plain `select`, and reads changed
+  keys again (batched per tick, `in.(…)`) for a key-only payload or a `select` with embeds or
+  aliases; an overtaken key read is dropped. The read's `select` gains the key and order columns
+  it lacks. React: `useLiveRows(table, { where, orderBy, select })` in the scaffold's
+  `live-react.ts`, returning `{ rows, loading, error, status, refresh }` with `rows` typed like
+  `list`'s for that `select`. Named in the scaffold's `AGENTS.md` and runtime README.
+- **The design's examples** (TODO.md §6) now write the filter as a read does: `{ board: "eq.7" }`.
+- `helper.ts` regenerated in `ui/admin`, `ui/ide`, `ui/builder`, `ui/analytics` (their `client.ts`
+  is unchanged).
+- **Tests**: `ui/admin/src/liveRows.test.ts` (vitest, no server: the filter lowering, the plan,
+  the five ops with ordering, nulls and projection, refetch keys, and `LiveRows` against a fake
+  table — reads after `ready`/`lagged`/reconnect, changes during a read, overtaken reads, batched
+  key reads, refusals); `sc-api` `live_connection` (the filter frame, run under Node);
+  `typescript_typecheck::generated_changes_client_type_checks`; `sc-app`
+  `use_live_rows_type_checks_against_the_generated_runtime` (a component compiled against the
+  generated `client.ts`, `helper.ts` and `live-react.ts`).
+
+## Live updates L3, phase 2: table change streams, decided per element and per subscriber
+
+A page can now subscribe to a `table_changes` stream and be sent exactly the changes its own REST
+read would have seen: a card moving on someone else's board, a row entering or leaving a filtered
+view, and nothing at all about a row the user may not read. TODO.md L3.4–L3.9. The generated
+client's typed `subscribe({ where })` and `useLiveRows` are L3.10–L3.11.
+
+- **The provider, completed (L3.4)** (`sc-stream::providers::table_changes`): `payload`
+  (`row` | `key`); saving refuses a table with no one-column primary key as well as a missing one.
+  **The element on the stream is now `{op, key, row, old}`** (was `{op, key, old, new}`): `row` is
+  the row as the write left it (null for a delete), `old` as it was (absent for an insert), and
+  `old` is deliberately undeclared — no page is sent it. A page receives `{op, key, row?}`.
+- **Element types can describe an object's keys**: `ElementField::keys` (`with_keys`), validated
+  (only on a `json` key; names unique), carried sparsely on the wire, and rendered by the client
+  generator as a nested record. New provider hook `StreamProvider::element_type_in(config,
+  catalog)` (defaults to `element_type`): `table_changes` answers `row` with the table's columns
+  as the REST read returns them. `sc_app::app_streams` and the socket's `ready` use it, so a
+  column added to a table reaches the generated client at the next emit (the schema observer
+  already re-emits every app that includes the table).
+- **Saving an application** refuses an exposed `table_changes` stream whose table is outside the
+  application's table subset, naming both; the socket refuses one as absent too.
+- **Projection (L3.5)**: `sc_api::api_row(table, row)` — the REST read's columns, through
+  `visible_field`. The hidden-column rule itself moved to `sc_auth::is_api_hidden_column`, which
+  `sc-api`'s row layer and the provider's typing both read (one statement of it).
+- **Filters (L3.6)**: `sc_api::filter::api_where` / `api_filter_fields` (the REST read's filter
+  object over the fields REST may filter on) and `sc_live::RowFilter`, which evaluates the
+  lowered predicate in Rust with SQL's three-valued logic, `LIKE` per the table's database
+  (`LikeRules::of`, read off the dialect). A filter naming an unknown, calculated or hidden field is
+  an `invalid` frame.
+- **`deliver_to` (L3.7)** (`sc_live::changes`): the pure decision table → `insert | update |
+  enter | leave | delete | nothing`; `leave` and `delete` carry the key only.
+- **Readability per subscriber (L3.8)**: `sc_api::RowImage` applies §7.3's rule to a row image —
+  the role floor, then `column === user.id` as a field comparison with no isolate, else the
+  formula reified with its Ⱶ/Ↄ bindings prefetched once per image. The fan-out matches each
+  distinct filter once and decides each distinct `(user, role)` once, asking readability only of
+  an image the filter matched. `Connection::attach_changes(running, ChangeAccess)` attaches with
+  the filter and row access; `Connection::set_user` (a `CallerCell` the socket refreshes at every
+  session re-read) is who each verdict is for. A plain `attach` to such a stream is sent nothing.
+  `may_subscribe` now admits `PerElementRow` subscriptions (no topic; table in the app's subset).
+- **Counters (L3.9)**: per stream, `checked`, `delivered`, `suppressed_access`,
+  `suppressed_filter`, `evaluator_micros` (`LiveHub::change_counts`), as `changes` on
+  `listStreams`, `getStream`, `saveStream` and `streamStatus` (client.ts regenerated in `ui/admin`,
+  `ui/ide`, `ui/builder`, `ui/analytics`), printed under the Streams list's subscriber count.
+- **Layering**: `sc-live` now depends on `sc-api` (and `sc-db`, `sc-query`, `sc-types`, `sc-log`)
+  and moves from layer 7 to layer 8, beside `sc-app` — so a change is decided by the row layer's
+  own projection, filter vocabulary and read rule rather than a copy. §2's table and diagram
+  updated.
+- **A property worth knowing**: the rows an ownership formula reads through Ⱶ/Ↄ are read when the
+  fan-out decides, not as of the write — a share added right after an insert may let its subject
+  hear of the insert, and a share removed may withhold an earlier change. Never more than the rule
+  grants at that moment.
+- **Tests**: `sc-live` unit tests (the full truth table, what is sent, suppression reasons, the
+  filter's logic and refusals, per-element `may_subscribe` rows); `tests/filters.rs` — filter
+  parity, 33 filters × 5 rows with nulls, against SQLite's and Postgres's reads;
+  `tests/readers.rs` (SQLite, real evaluator, two users) — owner / Ⱶ / Ↄ formulas × insert,
+  update, move, delete, filters, a `key` payload, a bare attachment, a users stream without the
+  password hash, the counters; `sc-server` `app_live_changes.rs` (Postgres, real sockets);
+  `sc-stream` and `sc-app` unit tests for nested keys and the provider's settings; `ui/admin`
+  vitest for the counters' notes. Updated for the new element shape: `sc-live` `tests/changes.rs`
+  and `sc-workflow` `step_transaction.rs`.
+- **Docs**: TECHNICAL_DESIGN §2 (layer and dependencies), §14.10 (the provider, the element
+  type, and a new "Per element: what each subscriber is sent").
+
+## Live updates L3, phase 1: writes leave the write path after their commit
+
+A row write can now reach a `table_changes` stream — only once it has committed, only while
+somebody is subscribed, and without the write paying for the subscribers. TODO.md L3.1 and L3.3
+(L3.2 was done with L2.6). Pages cannot subscribe to a `table_changes` stream yet: what each
+subscriber may be sent is decided per element, which is L3.5–L3.8.
+
+- **`SharedTx::after_commit(callback)`** (`sc-catalog`): runs once the commit has succeeded, in
+  the order added, on the committing task; dropped unrun on a rollback and on a commit the
+  database refuses; added after the end, it runs at once (committed) or never (rolled back).
+  `savepoint` / `release_savepoint` / `rollback_to_savepoint` track which callbacks a savepoint
+  covers, so rolling back to one drops exactly those added since. The CSV import's per-row
+  savepoints now go through them, so a row it skips announces nothing.
+- **The `table_changes` stream provider** (`sc-stream::providers::table_changes`, always built
+  in): `table` and `ops` (any of insert/update/delete, default all), `TopicSpec::PerElementRow`,
+  `Replay::Nothing`, no publishing from Saltcorn code; saving refuses a table that does not exist.
+  The element is the change, `{op, key, old, new}`; L3.4 adds `payload` and the element type
+  derived from the table. `RunningStream::publish_change(change)` is the hub's way in: the running
+  subscription's sink, as any element, refused for a stream that does not carry row changes.
+- **The hub as the write seam's `table_changes` listener** (`sc-live`): `Connection::attach`
+  registers a `ChangeWatch` for a `table_changes` stream before joining its fan-out, held by the
+  `Attached`. `observes(table, op)` is now "a row topic watches the table, or a subscribed
+  `table_changes` stream carries `op`" (`LiveHub::observes_changes`), read under one lock with no
+  await — so a stream defined and exposed but with nobody subscribed costs nothing, and an update
+  reads its pre-image only when somebody is subscribed. `emit` builds `{op, key, old, new}` and
+  hands it, with the row-topic touch, to `LiveHub::announce` **after the commit**: at once on the
+  pooled path, through `after_commit` inside a `SharedTx`. No filter, access or socket work runs
+  on the write's path.
+- **Removed**: the hub's second touch two seconds after a write inside a `SharedTx` (the interim
+  from L2.6). Row-topic re-checks are now made once, after the commit, and not after a rollback.
+- **Tests**: `sc-catalog` `shared_tx.rs` (order, rollback, a failed deferred-key commit,
+  savepoints); `sc-workflow` `step_transaction.rs` (with the real hub: a step's insert is handed to
+  the stream zero times during the step and once after; a failing step hands over nothing);
+  `sc-live` `tests/changes.rs`, new, on a statement-counting driver (subscription-only observing,
+  no pre-image read when unobserved, the write returning before any of 500 subscribers is served);
+  `table_changes` settings unit tests. `sc-live` and `sc-workflow` gained dev-dependencies for
+  these.
+- **Fixed**: `sc-stream`'s `docs_streams` test still expected `sc-stream`'s dependency row
+  without `sc-auth`, which L2.1 added.
+- **Docs**: TECHNICAL_DESIGN §10.2 (when "after the write" is not "after the commit", and
+  `after_commit`), §10.3, §14.3 (the third built-in provider), §14.10 ("Table changes: the write,
+  after its commit").
+
 ## Development servers serve their applications under `localhost`
 
 A server with no `base_domain` that listens on loopback without TLS (the default

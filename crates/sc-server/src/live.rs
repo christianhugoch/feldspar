@@ -43,6 +43,42 @@
 //! wakes this connection, which re-asks the same read for the subscriptions it
 //! could affect and revokes those that now fail, without waiting for the clock.
 //!
+//! ## Row changes (L3)
+//!
+//! A `table_changes` stream is subscribed without a topic and with an optional
+//! `filter` in the REST read's vocabulary. Its table must be in the
+//! application's subset (otherwise it is `unavailable`, like any absent
+//! stream); the filter is lowered against that table by the REST read's own
+//! walk ([`sc_live::RowFilter`]) and an unknown field is `invalid`. The
+//! subscription is attached with the filter, the catalog and the evaluator
+//! ([`sc_live::ChangeAccess`]), and the stream's fan-out decides for every
+//! element what this connection's caller is sent — `insert`, `update`,
+//! `enter`, `leave`, `delete` or nothing — reading the caller from the
+//! connection each time, so a re-read session reaches the next element.
+//!
+//! ## Publishing and presence (L4)
+//!
+//! A page publishes on a subscription it holds. Whether it may is decided when
+//! the subscription is attached, by [`sc_live::may_publish`] — the stream's
+//! `client_publish`, and on a `row` topic the caller's **update** access to the
+//! row ([`sc_api::row_updatable_as`]) — sent as `can_publish` in `ready`, and
+//! decided again whenever the subscription's read access is (a touched row, the
+//! clock). A refused publish is `unavailable`, worded like any absence. The
+//! element is the hub's to stamp ([`Connection::publish`]): `source` is
+//! `{user, connection}` from this connection, never from the frame. Publishes
+//! and presence updates are each rate-limited per connection and answered
+//! `rate_limited` past the limit, the connection staying up.
+//!
+//! A subscription to a stream with `presence` on takes a seat in its topic's
+//! room once attached ([`Connection::join_presence`]), with the `users`
+//! columns the stream shows read at that moment, and is sent the member list
+//! as a `presence` frame; the hub's changes to the room arrive in the
+//! connection's inbox and leave as `presence_diff`. A state update is applied
+//! at once when the connection has been quiet, and the ones that follow within
+//! [`presence_coalesce`](sc_live::LiveLimits::presence_coalesce) are held and
+//! applied as the latest one when it ends. Unsubscribing, a revoke and the
+//! socket closing give the seat back.
+//!
 //! ## Following the stream
 //!
 //! A subscription to a stream that is not running here (disabled, or failing
@@ -56,21 +92,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use sc_auth::{SessionStore, User};
 use sc_catalog::{Catalog, TableId};
 use sc_live::{
-    Attached, Caller, ClientFrame, CloseReason, Connection, ConnectionInfo, Delivery, ErrorCode,
-    FrameError, LiveHub, LiveLimits, Refusal, RowFact, ServerFrame, StoredStream, StreamFacts,
-    Subscription, SubscriptionSet, Touch, Watch, may_open, may_subscribe, read_rule_tables,
+    Attached, Caller, ChangeAccess, ClientFrame, CloseReason, Connection, ConnectionInfo, Delivery,
+    DocNews, DocRefusal, DocSeat, DocTarget, ErrorCode, FrameError, LikeRules, LiveHub, LiveLimits,
+    PresenceEvent, PublishFacts, RateLimit, Refusal, RoomKey, RowFact, RowFilter, Seat,
+    ServerFrame, StoredStream, StreamFacts, Subscription, SubscriptionSet, Touch, Watch, may_open,
+    may_publish, may_subscribe, read_rule_tables,
 };
-use sc_stream::{RunningStream, Stream, StreamSupervisor, TopicSpec};
+use sc_stream::providers::internal;
+use sc_stream::{DOCUMENT, RunningStream, Stream, StreamSupervisor, TopicSpec};
 use serde_json::{Value as Json, json};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
 use crate::apps::{AppMounts, MountedApp};
-use crate::observe::{element_type_json, fit_close_reason, status_parts};
+use crate::observe::{element_type_json_in, fit_close_reason, status_parts};
 
 /// The live machinery a server holds: the hub every application's connections
 /// register with. Rides on [`AppMounts`] beside the stream services, for their
@@ -175,6 +216,9 @@ enum Event {
     Recheck,
     Status,
     Ping,
+    Presence,
+    PresenceFlush,
+    Docs,
 }
 
 type Sender = SplitSink<WebSocket, Message>;
@@ -196,10 +240,19 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
         }
     };
     let mut close_signal = connection.close_signal();
+    // Who the caller is, as a `table_changes` subscription's verdicts read it;
+    // replaced at every re-read of the session.
+    connection.set_user(caller.user.clone());
+    let now = std::time::Instant::now();
     let mut live = Live {
         subs: SubscriptionSet::new(limits.max_subscriptions),
         by_attachment: HashMap::new(),
         row_subs: HashMap::new(),
+        change_subs: HashMap::new(),
+        extras: HashMap::new(),
+        publish_rate: RateLimit::new(limits.publishes_per_second, now),
+        presence_rate: RateLimit::new(limits.presence_per_second, now),
+        flush_at: None,
         connection,
         env,
         caller,
@@ -211,12 +264,16 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
     let mut heard = Instant::now();
 
     let ending = loop {
+        let flush_at = live.flush_at;
         let event = tokio::select! {
             reason = close_signal.closed() => Event::Closed(reason),
             incoming = receiver.next() => Event::Incoming(incoming),
             Some(delivery) = deliveries.recv() => Event::Delivery(delivery),
             () = live.connection.lagged() => Event::Lagged,
             () = live.connection.touched() => Event::Touched,
+            () = live.connection.presence_changed() => Event::Presence,
+            () = live.connection.doc_inbox().rung() => Event::Docs,
+            () = sleep_until(flush_at) => Event::PresenceFlush,
             _ = recheck.tick() => Event::Recheck,
             _ = status.tick() => Event::Status,
             _ = ping.tick() => Event::Ping,
@@ -236,6 +293,12 @@ async fn serve(socket: WebSocket, env: LiveEnv, caller: LiveCaller) {
                 Err(reason) => break Some(reason),
             },
             Event::Status => live.status_pass().await,
+            Event::Presence => live.presence_news(),
+            Event::Docs => live.doc_news(),
+            Event::PresenceFlush => {
+                live.flush_presence();
+                Vec::new()
+            }
             Event::Ping => {
                 if heard.elapsed() >= limits.idle_timeout {
                     break Some(CloseReason {
@@ -273,10 +336,41 @@ struct Live {
     /// depends on, and the watch that wakes this connection when one of them
     /// is written to.
     row_subs: HashMap<String, RowSub>,
+    /// The `table_changes` subscriptions, by `sub`: what their fan-out
+    /// decides each element by, kept to attach again after a restart.
+    change_subs: HashMap<String, ChangeAccess>,
+    /// Every subscription's publishing and presence, by `sub` (L4).
+    extras: HashMap<String, Extras>,
+    /// Publishes this connection may still make this second.
+    publish_rate: RateLimit,
+    /// Presence updates this connection may still send this second.
+    presence_rate: RateLimit,
+    /// When the presence window ends: until then a state update is held, and
+    /// the latest one held is applied then. `None` when the connection is
+    /// quiet.
+    flush_at: Option<Instant>,
     connection: Connection,
     env: LiveEnv,
     caller: LiveCaller,
     limits: LiveLimits,
+}
+
+/// One subscription's publishing and presence.
+#[derive(Default)]
+struct Extras {
+    /// Whether this connection's own elements come back to it.
+    echo: bool,
+    /// Whether the page may publish on it, as last decided.
+    can_publish: bool,
+    /// Its seat in its topic's room, on a stream with presence.
+    seat: Option<Seat>,
+    /// A state update held until the presence window ends.
+    pending_state: Option<Json>,
+    /// Its seat in the document's room, on a `document` stream (L5).
+    doc: Option<DocSeat>,
+    /// Whether the page may edit that document, as last decided — `doc_sync`'s
+    /// `read_only` is its negation.
+    can_edit: bool,
 }
 
 /// A `row` subscription's access, as far as writes can change it.
@@ -314,13 +408,27 @@ impl Live {
         match message {
             Message::Text(text) => {
                 if text.len() > self.limits.max_frame_bytes {
+                    // A `doc_update` has its own, larger cap (pasting a long
+                    // passage is ordinary editing); every other frame keeps
+                    // the small one.
+                    if text.len() <= self.limits.max_doc_update_bytes
+                        && let Ok(frame @ ClientFrame::DocUpdate { .. }) =
+                            ClientFrame::parse(text.as_str())
+                    {
+                        return self.frame(frame).await;
+                    }
+                    let cap = if text.contains("\"doc_update\"") {
+                        self.limits.max_doc_update_bytes
+                    } else {
+                        self.limits.max_frame_bytes
+                    };
                     return vec![
                         FrameError::new(
                             None,
                             ErrorCode::TooLarge,
                             format!(
-                                "a frame may be at most {} bytes and this one was {}; it was not read",
-                                self.limits.max_frame_bytes,
+                                "a frame may be at most {cap} bytes and this one was {}; it was not \
+                                 read",
                                 text.len()
                             ),
                         )
@@ -350,7 +458,8 @@ impl Live {
                 stream,
                 topic,
                 filter,
-            } => self.subscribe(sub, stream, topic, filter).await,
+                echo,
+            } => self.subscribe(sub, stream, topic, filter, echo).await,
             ClientFrame::Unsubscribe { sub } => match self.subs.remove(&sub) {
                 Ok(gone) => {
                     self.forget(&gone);
@@ -358,40 +467,9 @@ impl Live {
                 }
                 Err(error) => vec![error.frame()],
             },
-            ClientFrame::Publish { sub, .. } => match self.subs.get(&sub) {
-                // Not a stream a page may publish on — the only kind there is
-                // until L4's `internal` streams with `client_publish` — and
-                // worded like any other "not here".
-                Some(found) => vec![
-                    FrameError::new(
-                        Some(sub.clone()),
-                        ErrorCode::Unavailable,
-                        format!("there is nowhere on `{}` you can publish", found.stream),
-                    )
-                    .frame(),
-                ],
-                None => vec![not_subscribed(sub)],
-            },
-            ClientFrame::Presence { sub, .. } => match self.subs.get(&sub) {
-                Some(found) => vec![
-                    FrameError::invalid(
-                        Some(sub.clone()),
-                        format!("`{}` has no presence", found.stream),
-                    )
-                    .frame(),
-                ],
-                None => vec![not_subscribed(sub)],
-            },
-            ClientFrame::DocUpdate { sub, .. } => match self.subs.get(&sub) {
-                Some(found) => vec![
-                    FrameError::invalid(
-                        Some(sub.clone()),
-                        format!("`{}` is not a document", found.stream),
-                    )
-                    .frame(),
-                ],
-                None => vec![not_subscribed(sub)],
-            },
+            ClientFrame::Publish { sub, value } => self.publish(sub, value),
+            ClientFrame::Presence { sub, state } => self.set_presence(sub, state),
+            ClientFrame::DocUpdate { sub, update } => self.doc_update(sub, &update),
             ClientFrame::Ping => vec![ServerFrame::Pong],
         }
     }
@@ -404,6 +482,7 @@ impl Live {
         stream: String,
         topic: Option<String>,
         filter: Option<Json>,
+        echo: bool,
     ) -> Vec<ServerFrame> {
         if let Err(error) = self.subs.check_new(&sub) {
             return vec![error.frame()];
@@ -424,32 +503,590 @@ impl Live {
                 ];
             }
         };
-        if filter.is_some() {
-            return vec![
-                FrameError::invalid(
-                    Some(sub),
-                    format!("`{stream}` takes no filter; only a stream of row changes does"),
-                )
-                .frame(),
-            ];
-        }
+        let change = match &grant.stored.topics {
+            TopicSpec::PerElementRow { table } => {
+                match self.change_access(table, filter.as_ref()) {
+                    Ok(access) => Some(access),
+                    Err(message) => {
+                        return vec![
+                            FrameError::invalid(Some(sub), format!("`{stream}`: {message}"))
+                                .frame(),
+                        ];
+                    }
+                }
+            }
+            _ if filter.is_some() => {
+                return vec![
+                    FrameError::invalid(
+                        Some(sub),
+                        format!("`{stream}` takes no filter; only a stream of row changes does"),
+                    )
+                    .frame(),
+                ];
+            }
+            _ => None,
+        };
         let row_sub = self.watch_row(&grant);
+        let can_publish = self.publish_right(&stream, grant.topic.as_deref()).await;
         let mut subscription = Subscription::waiting(sub.clone(), stream, grant.topic);
-        let frames = start(
+        let mut frames = start(
             &self.connection,
             &mut self.by_attachment,
             self.env.supervisor.as_ref(),
+            &self.env.catalog,
+            change.as_ref(),
+            Rights { echo, can_publish },
             &mut subscription,
         )
         .await;
         // `check_new` passed above and nothing has been added since, so this
         // cannot fail; if it somehow did, dropping the subscription detaches it.
-        if self.subs.insert(subscription).is_ok()
-            && let Some(row_sub) = row_sub
-        {
-            self.row_subs.insert(sub, row_sub);
+        if self.subs.insert(subscription).is_ok() {
+            if let Some(row_sub) = row_sub {
+                self.row_subs.insert(sub.clone(), row_sub);
+            }
+            if let Some(change) = change {
+                self.change_subs.insert(sub.clone(), change);
+            }
+            self.extras.insert(
+                sub.clone(),
+                Extras {
+                    echo,
+                    can_publish,
+                    ..Extras::default()
+                },
+            );
+            frames.extend(self.seat(&sub).await);
+            frames.extend(self.join_doc(&sub).await);
         }
         frames
+    }
+
+    /// Whether this connection's page may publish on a subscription to
+    /// `stream` on `topic` (§3 rule 7): the running stream's settings, and on
+    /// a `row` topic the caller's update access to the row. `false` while the
+    /// stream is not running here — there is nothing to publish into.
+    async fn publish_right(&self, stream: &str, topic: Option<&str>) -> bool {
+        let Some(running) = self
+            .env
+            .supervisor
+            .as_ref()
+            .and_then(|supervisor| supervisor.by_name(stream))
+        else {
+            return false;
+        };
+        let client_publish = running.provider().is_some_and(|p| p.accepts_publish())
+            && internal::client_publish(&running.configuration());
+        if !client_publish {
+            return false;
+        }
+        let Ok(spec) = running.topic_spec() else {
+            return false;
+        };
+        let row_updatable = match (&spec, topic) {
+            (TopicSpec::Row { table }, Some(key)) => self.row_updatable(table, key).await,
+            _ => false,
+        };
+        may_publish(
+            &spec,
+            PublishFacts {
+                client_publish,
+                row_updatable,
+            },
+        )
+    }
+
+    /// Whether this connection's caller may update `table`'s row `key`.
+    async fn row_updatable(&self, table: &str, key: &str) -> bool {
+        let found = match self.env.catalog.get(table) {
+            Ok(Some(found)) => found,
+            _ => return false,
+        };
+        match sc_api::row_updatable_as(
+            &self.env.catalog,
+            &found,
+            key,
+            self.caller().role,
+            self.caller.user.as_ref(),
+            self.env.evaluator.as_ref(),
+        )
+        .await
+        {
+            Ok(verdict) => verdict,
+            // Refused rather than guessed at, as a read that fails is.
+            Err(e) => {
+                sc_log::log_warn!(
+                    "the live socket could not decide whether row `{key}` of `{table}` may be \
+                     updated, so publishing on it is refused: {}",
+                    sc_error::format_chain(&e)
+                );
+                false
+            }
+        }
+    }
+
+    /// Decide again whether each of `names` may be published on — after
+    /// access was re-checked, which is when an update right can change too.
+    ///
+    /// A document member whose update right changed is sent the document
+    /// again with the new `read_only` (L5.3): a reader who becomes an editor
+    /// may type, and an editor who loses the right stops.
+    async fn refresh_rights(&mut self, names: &[String]) -> Vec<ServerFrame> {
+        let mut frames = Vec::new();
+        for name in names {
+            let Some((stream, topic)) = self
+                .subs
+                .get(name)
+                .map(|s| (s.stream.clone(), s.topic.clone()))
+            else {
+                continue;
+            };
+            let can_publish = self.publish_right(&stream, topic.as_deref()).await;
+            if let Some(extras) = self.extras.get_mut(name) {
+                extras.can_publish = can_publish;
+            }
+            let doc_table = self
+                .extras
+                .get(name)
+                .and_then(|extras| extras.doc.as_ref())
+                .map(|seat| seat.room().target().table.clone());
+            if let (Some(table), Some(key)) = (doc_table, topic) {
+                let can_edit = self.row_updatable(&table, &key).await;
+                let Some(extras) = self.extras.get_mut(name) else {
+                    continue;
+                };
+                if extras.can_edit != can_edit {
+                    extras.can_edit = can_edit;
+                    if let Some(seat) = &extras.doc {
+                        frames.push(doc_sync(name, seat, can_edit));
+                    }
+                }
+            }
+        }
+        frames
+    }
+
+    /// Give `sub` its seat in its document's room if it is attached to a
+    /// `document` stream, and send it the document (L5.3): `doc_sync`, with
+    /// `read_only` unless the caller may update the row. On a restart that
+    /// kept the room, the page has had a fresh `ready` and is sent the
+    /// document again.
+    async fn join_doc(&mut self, sub: &str) -> Vec<ServerFrame> {
+        let Some(subscription) = self.subs.get(sub) else {
+            return Vec::new();
+        };
+        let target = subscription.attached().and_then(|attached| {
+            let running = attached.running();
+            (running.provider_name() == DOCUMENT)
+                .then(|| {
+                    subscription
+                        .topic
+                        .as_deref()
+                        .map(|key| DocTarget::of(running, key))
+                })
+                .flatten()
+        });
+        let target = match target {
+            None => {
+                if let Some(extras) = self.extras.get_mut(sub) {
+                    extras.doc = None;
+                }
+                return Vec::new();
+            }
+            Some(Err(e)) => {
+                return vec![
+                    FrameError::invalid(Some(sub.to_owned()), sc_error::format_chain(&e)).frame(),
+                ];
+            }
+            Some(Ok(target)) => target,
+        };
+        let can_edit = self.row_updatable(&target.table, &target.key).await;
+        let same_room = self
+            .extras
+            .get(sub)
+            .and_then(|extras| extras.doc.as_ref())
+            .is_some_and(|seat| *seat.room().target() == target);
+        if !same_room {
+            // Leave the old room (if any) before joining the new one.
+            if let Some(extras) = self.extras.get_mut(sub) {
+                extras.doc = None;
+            }
+            match self.connection.join_doc(&self.env.catalog, &target).await {
+                Ok((seat, _)) => {
+                    if let Some(extras) = self.extras.get_mut(sub) {
+                        extras.doc = Some(seat);
+                    }
+                }
+                Err(e) => {
+                    sc_log::log_warn!(
+                        "the live socket could not open document `{}` of `{}`: {}",
+                        target.key,
+                        target.stream_name,
+                        sc_error::format_chain(&e)
+                    );
+                    return vec![
+                        FrameError::new(
+                            Some(sub.to_owned()),
+                            ErrorCode::Unavailable,
+                            format!("the document could not be opened: {}", e),
+                        )
+                        .frame(),
+                    ];
+                }
+            }
+        }
+        let Some(extras) = self.extras.get_mut(sub) else {
+            return Vec::new();
+        };
+        extras.can_edit = can_edit;
+        match &extras.doc {
+            Some(seat) => vec![doc_sync(sub, seat, can_edit)],
+            None => Vec::new(),
+        }
+    }
+
+    /// A page's `doc_update` frame: an edit of the document its subscription
+    /// is on (L5.3). Refused `unavailable` for a member who may not edit —
+    /// worded like any absence — and counted against the publish rate.
+    fn doc_update(&mut self, sub: String, update: &str) -> Vec<ServerFrame> {
+        let Some(found) = self.subs.get(&sub) else {
+            return vec![not_subscribed(sub)];
+        };
+        let Some(extras) = self.extras.get(&sub) else {
+            return vec![not_subscribed(sub)];
+        };
+        let Some(seat) = &extras.doc else {
+            return vec![
+                FrameError::invalid(
+                    Some(sub.clone()),
+                    format!("`{}` is not a document", found.stream),
+                )
+                .frame(),
+            ];
+        };
+        if !extras.can_edit {
+            return vec![
+                FrameError::new(
+                    Some(sub.clone()),
+                    ErrorCode::Unavailable,
+                    format!("there is nothing on `{}` you can edit", found.stream),
+                )
+                .frame(),
+            ];
+        }
+        if !self.publish_rate.take(std::time::Instant::now()) {
+            return vec![
+                FrameError::new(
+                    Some(sub),
+                    ErrorCode::RateLimited,
+                    format!(
+                        "this connection may send at most {} edits and publishes a second; this \
+                         edit was not applied — send it again",
+                        self.limits.publishes_per_second
+                    ),
+                )
+                .frame(),
+            ];
+        }
+        let Ok(bytes) = BASE64.decode(update) else {
+            return vec![FrameError::invalid(Some(sub), "`update` is not base64").frame()];
+        };
+        match seat.apply(&bytes) {
+            Ok(()) => Vec::new(),
+            Err(DocRefusal::TooLarge(why)) => {
+                vec![FrameError::new(Some(sub), ErrorCode::TooLarge, why).frame()]
+            }
+            Err(DocRefusal::Invalid(why)) => vec![FrameError::invalid(Some(sub), why).frame()],
+        }
+    }
+
+    /// Other members edited documents this connection has open: send each
+    /// edit as `doc_update`, or the whole document where edits were dropped.
+    fn doc_news(&mut self) -> Vec<ServerFrame> {
+        let news = self.connection.doc_inbox().take();
+        if news.is_empty() {
+            return Vec::new();
+        }
+        let by_seat: HashMap<u64, String> = self
+            .extras
+            .iter()
+            .filter_map(|(sub, extras)| extras.doc.as_ref().map(|seat| (seat.id(), sub.clone())))
+            .collect();
+        let mut frames = Vec::new();
+        for (seat_id, item) in news {
+            let Some(sub) = by_seat.get(&seat_id) else {
+                continue;
+            };
+            match item {
+                DocNews::Update(update) => frames.push(ServerFrame::DocUpdate {
+                    sub: sub.clone(),
+                    update: BASE64.encode(update.as_slice()),
+                }),
+                DocNews::Resync => {
+                    if let Some(extras) = self.extras.get(sub)
+                        && let Some(seat) = &extras.doc
+                    {
+                        frames.push(doc_sync(sub, seat, extras.can_edit));
+                    }
+                }
+            }
+        }
+        frames
+    }
+
+    /// Give `sub` its seat in its topic's room if its stream has presence on
+    /// and it is attached, and say who is there; give it back if not.
+    async fn seat(&mut self, sub: &str) -> Vec<ServerFrame> {
+        let Some(subscription) = self.subs.get(sub) else {
+            return Vec::new();
+        };
+        let wanted: Option<(RoomKey, Vec<String>)> = subscription.attached().and_then(|attached| {
+            let running = attached.running();
+            let config = running.configuration();
+            let accepts = running.provider().is_some_and(|p| p.accepts_publish());
+            // A document's members always see each other: their presence
+            // state is their editor's awareness (L5.6).
+            let document = running.provider_name() == DOCUMENT;
+            ((accepts && internal::presence(&config)) || document).then(|| {
+                (
+                    (running.id(), subscription.topic.clone()),
+                    internal::presence_fields(&config).unwrap_or_default(),
+                )
+            })
+        });
+        let Some(extras) = self.extras.get_mut(sub) else {
+            return Vec::new();
+        };
+        let Some((room, shown)) = wanted else {
+            extras.seat = None;
+            extras.pending_state = None;
+            return Vec::new();
+        };
+        let members = match &extras.seat {
+            // Still in the same room (a restart that kept presence on): the
+            // page has had a fresh `ready`, so it is handed the list again.
+            Some(seat) if *seat.room() == room => self.env.hub.presence_members(&room),
+            _ => {
+                let fields =
+                    shown_fields(&self.env.catalog, self.caller.user.as_ref(), &shown).await;
+                let (seat, members) = self.connection.join_presence(
+                    room,
+                    self.caller.user.as_ref().map(|user| user.id),
+                    fields,
+                );
+                if let Some(extras) = self.extras.get_mut(sub) {
+                    extras.seat = Some(seat);
+                }
+                members
+            }
+        };
+        vec![ServerFrame::Presence {
+            sub: sub.to_owned(),
+            connection: self.connection.tag().to_owned(),
+            members,
+        }]
+    }
+
+    /// A page's `publish` frame (§3 rule 7).
+    fn publish(&mut self, sub: String, value: Json) -> Vec<ServerFrame> {
+        let Some(found) = self.subs.get(&sub) else {
+            return vec![not_subscribed(sub)];
+        };
+        let allowed = self
+            .extras
+            .get(&sub)
+            .is_some_and(|extras| extras.can_publish);
+        let Some(attached) = found.attached().filter(|_| allowed) else {
+            // Worded like any other "not here": a reader who may not update
+            // the row learns nothing from it that `ready` did not say.
+            return vec![
+                FrameError::new(
+                    Some(sub.clone()),
+                    ErrorCode::Unavailable,
+                    format!("there is nowhere on `{}` you can publish", found.stream),
+                )
+                .frame(),
+            ];
+        };
+        if !self.publish_rate.take(std::time::Instant::now()) {
+            return vec![
+                FrameError::new(
+                    Some(sub),
+                    ErrorCode::RateLimited,
+                    format!(
+                        "this connection may publish at most {} times a second; this one was not \
+                         published",
+                        self.limits.publishes_per_second
+                    ),
+                )
+                .frame(),
+            ];
+        }
+        match self
+            .connection
+            .publish(attached.running(), found.topic.clone(), value)
+        {
+            Ok(_) => Vec::new(),
+            Err(e) => vec![FrameError::invalid(Some(sub), sc_error::format_chain(&e)).frame()],
+        }
+    }
+
+    /// A page's `presence` frame: its state on the subscription's topic.
+    fn set_presence(&mut self, sub: String, state: Json) -> Vec<ServerFrame> {
+        let Some(found) = self.subs.get(&sub) else {
+            return vec![not_subscribed(sub)];
+        };
+        let seated = self
+            .extras
+            .get(&sub)
+            .is_some_and(|extras| extras.seat.is_some());
+        if !seated {
+            return vec![
+                FrameError::invalid(
+                    Some(sub.clone()),
+                    format!("`{}` has no presence", found.stream),
+                )
+                .frame(),
+            ];
+        }
+        let size = state.to_string().len();
+        if size > self.limits.max_presence_state_bytes {
+            return vec![
+                FrameError::new(
+                    Some(sub),
+                    ErrorCode::TooLarge,
+                    format!(
+                        "a presence state may be at most {} bytes of JSON and this one was {size}; \
+                         the state is unchanged",
+                        self.limits.max_presence_state_bytes
+                    ),
+                )
+                .frame(),
+            ];
+        }
+        if !self.presence_rate.take(std::time::Instant::now()) {
+            return vec![
+                FrameError::new(
+                    Some(sub),
+                    ErrorCode::RateLimited,
+                    format!(
+                        "this connection may update its presence at most {} times a second; this \
+                         update was not applied",
+                        self.limits.presence_per_second
+                    ),
+                )
+                .frame(),
+            ];
+        }
+        let Some(extras) = self.extras.get_mut(&sub) else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        if self.flush_at.is_some_and(|at| at > now) {
+            // Within the window: only the latest is kept, and applied when it
+            // ends.
+            extras.pending_state = Some(state);
+        } else {
+            if let Some(seat) = &extras.seat {
+                seat.set_state(state);
+            }
+            extras.pending_state = None;
+            self.flush_at = Some(now + self.limits.presence_coalesce);
+        }
+        Vec::new()
+    }
+
+    /// The presence window ended: apply the latest state held for each
+    /// subscription, and open another window if anything was.
+    fn flush_presence(&mut self) {
+        self.flush_at = None;
+        let mut applied = false;
+        for extras in self.extras.values_mut() {
+            if let Some(state) = extras.pending_state.take()
+                && let Some(seat) = &extras.seat
+            {
+                seat.set_state(state);
+                applied = true;
+            }
+        }
+        if applied {
+            self.flush_at = Some(Instant::now() + self.limits.presence_coalesce);
+        }
+    }
+
+    /// Rooms this connection is in changed: tell each subscription in them,
+    /// in order — patched with `presence_diff`, or whole with `presence` when
+    /// the hub had to drop the room's changes.
+    fn presence_news(&mut self) -> Vec<ServerFrame> {
+        let news = self.connection.take_presence();
+        if news.events.is_empty() && news.resync.is_empty() {
+            return Vec::new();
+        }
+        let mut by_room: HashMap<RoomKey, Vec<String>> = HashMap::new();
+        for (sub, extras) in &self.extras {
+            if let Some(seat) = &extras.seat {
+                by_room
+                    .entry(seat.room().clone())
+                    .or_default()
+                    .push(sub.clone());
+            }
+        }
+        for subs in by_room.values_mut() {
+            subs.sort();
+        }
+        let mut frames = Vec::new();
+        for room in &news.resync {
+            let Some(subs) = by_room.get(room) else {
+                continue;
+            };
+            let members = self.env.hub.presence_members(room);
+            for sub in subs {
+                frames.push(ServerFrame::Presence {
+                    sub: sub.clone(),
+                    connection: self.connection.tag().to_owned(),
+                    members: members.clone(),
+                });
+            }
+        }
+        for (room, diff) in presence_diffs(news.events) {
+            let Some(subs) = by_room.get(&room) else {
+                // A room this connection has left since.
+                continue;
+            };
+            for sub in subs {
+                frames.push(ServerFrame::PresenceDiff {
+                    sub: sub.clone(),
+                    joined: diff.joined.clone(),
+                    left: diff.left.clone(),
+                    updated: diff.updated.clone(),
+                });
+            }
+        }
+        frames
+    }
+
+    /// What a subscription to a `table_changes` stream on `table` is attached
+    /// with: its filter, lowered by the REST read's own walk against the table
+    /// (an `Err` is the sentence an `invalid` frame carries), and the catalog
+    /// and evaluator its elements are decided with.
+    fn change_access(&self, table: &str, filter: Option<&Json>) -> Result<ChangeAccess, String> {
+        let found = match self.env.catalog.get(table) {
+            Ok(Some(found)) => found,
+            // Access already found the table in the app; one dropped since is
+            // a stream nobody can be sent anything from.
+            _ => return Err(format!("its table `{table}` is not there")),
+        };
+        let like = match self.env.catalog.driver_for(&found) {
+            Ok(driver) => LikeRules::of(driver.as_ref()),
+            Err(_) => LikeRules::POSTGRES,
+        };
+        let filter = RowFilter::parse(&found, filter, like)
+            .map_err(|e| format!("`filter`: {}", sc_error::format_chain(&e)))?;
+        Ok(ChangeAccess {
+            catalog: Arc::clone(&self.env.catalog),
+            evaluator: self.env.evaluator.clone(),
+            filter,
+        })
     }
 
     /// For a `row` subscription, watch its table and every table its read rule
@@ -515,10 +1152,22 @@ impl Live {
             stored,
             row: RowFact::NotAsked,
         };
-        if let (Some(key), Ok(stored)) = (topic, may_open(&facts, caller))
-            && let TopicSpec::Row { table } = &stored.topics
-        {
-            facts.row = self.row_fact(app, table, key).await;
+        if let Ok(stored) = may_open(&facts, caller) {
+            match (&stored.topics, topic) {
+                (TopicSpec::Row { table }, Some(key)) => {
+                    facts.row = self.row_fact(app, table, key).await;
+                }
+                // Rule 3: a stream of a table's changes exists for this app
+                // only if the table does — in its subset, and in the catalog.
+                (TopicSpec::PerElementRow { table }, _) => {
+                    let exposed = app.app.can_access_table(&TableId(table.clone()))
+                        && matches!(self.env.catalog.get(table), Ok(Some(_)));
+                    if !exposed {
+                        facts.row = RowFact::TableNotExposed;
+                    }
+                }
+                _ => {}
+            }
         }
         facts
     }
@@ -573,7 +1222,7 @@ impl Live {
         }
         let registry = match &self.env.supervisor {
             Some(supervisor) => supervisor.registry(),
-            None => sc_app::stream_registry(),
+            None => sc_app::catalog_stream_registry(&self.env.catalog),
         };
         match registry.get(&row.provider) {
             Some(provider) => provider.topic_spec(&row.configuration).ok(),
@@ -629,7 +1278,12 @@ impl Live {
     async fn status_pass(&mut self) -> Vec<ServerFrame> {
         let mut frames = Vec::new();
         let supervisor = self.env.supervisor.clone();
-        for subscription in self.subs.iter_mut() {
+        let catalog = Arc::clone(&self.env.catalog);
+        let mut followed = Vec::new();
+        for name in self.subs.names() {
+            let Some(subscription) = self.subs.get(&name) else {
+                continue;
+            };
             let current = supervisor
                 .as_ref()
                 .and_then(|supervisor| supervisor.by_name(&subscription.stream));
@@ -639,17 +1293,35 @@ impl Live {
                 _ => false,
             };
             if follow {
+                // A restart may have changed the settings publishing and
+                // presence are decided by.
+                let (stream, topic) = (subscription.stream.clone(), subscription.topic.clone());
+                let can_publish = self.publish_right(&stream, topic.as_deref()).await;
+                let echo = self.extras.get(&name).is_some_and(|extras| extras.echo);
+                if let Some(extras) = self.extras.get_mut(&name) {
+                    extras.can_publish = can_publish;
+                }
+                let Some(subscription) = self.subs.get_mut(&name) else {
+                    continue;
+                };
                 frames.extend(
                     start(
                         &self.connection,
                         &mut self.by_attachment,
                         supervisor.as_ref(),
+                        &catalog,
+                        self.change_subs.get(&name),
+                        Rights { echo, can_publish },
                         subscription,
                     )
                     .await,
                 );
+                followed.push(name);
                 continue;
             }
+            let Some(subscription) = self.subs.get_mut(&name) else {
+                continue;
+            };
             if let Some(attached) = subscription.attached() {
                 let (status, counters) = status_parts(attached.running());
                 if subscription.last_status.as_ref() != Some(&status) {
@@ -662,6 +1334,10 @@ impl Live {
                 }
             }
         }
+        for name in followed {
+            frames.extend(self.seat(&name).await);
+            frames.extend(self.join_doc(&name).await);
+        }
         frames
     }
 
@@ -670,7 +1346,12 @@ impl Live {
     async fn recheck(&mut self) -> Result<Vec<ServerFrame>, CloseReason> {
         if let Some(token) = &self.caller.session {
             match self.env.sessions.user_for(token).await {
-                Ok(Some(user)) => self.caller.user = Some(user),
+                Ok(Some(user)) => {
+                    // The next element of every `table_changes` subscription
+                    // is decided as the user is now.
+                    self.connection.set_user(Some(user.clone()));
+                    self.caller.user = Some(user);
+                }
                 Ok(None) => {
                     return Err(CloseReason {
                         code: ErrorCode::SignedOut,
@@ -697,7 +1378,10 @@ impl Live {
             });
         };
         let names = self.subs.names();
-        Ok(self.recheck_subs(&app, names).await)
+        let mut frames = self.recheck_subs(&app, names).await;
+        let kept = self.subs.names();
+        frames.extend(self.refresh_rights(&kept).await);
+        Ok(frames)
     }
 
     /// Writes this connection watches have happened: re-check every `row`
@@ -720,7 +1404,15 @@ impl Live {
         let Some(app) = self.env.app.current() else {
             return Vec::new();
         };
-        self.recheck_subs(&app, affected).await
+        let mut frames = self.recheck_subs(&app, affected.clone()).await;
+        // A write that could change who may read a row could change who may
+        // update it.
+        let kept: Vec<String> = affected
+            .into_iter()
+            .filter(|name| self.subs.get(name).is_some())
+            .collect();
+        frames.extend(self.refresh_rights(&kept).await);
+        frames
     }
 
     /// Ask access again for each of `names`, and revoke those that no longer
@@ -773,6 +1465,9 @@ impl Live {
         // Its watch goes with it, and with the last watcher of a table the
         // hub stops observing writes to it.
         self.row_subs.remove(&gone.sub);
+        self.change_subs.remove(&gone.sub);
+        // And its seat: the member leaves the room.
+        self.extras.remove(&gone.sub);
     }
 }
 
@@ -784,6 +1479,9 @@ async fn start(
     connection: &Connection,
     by_attachment: &mut HashMap<u64, String>,
     supervisor: Option<&Arc<StreamSupervisor>>,
+    catalog: &Catalog,
+    change: Option<&ChangeAccess>,
+    rights: Rights,
     subscription: &mut Subscription<Attached>,
 ) -> Vec<ServerFrame> {
     let running = supervisor.and_then(|supervisor| supervisor.by_name(&subscription.stream));
@@ -800,17 +1498,59 @@ async fn start(
             counters: Json::Null,
         }];
     };
-    attach(connection, by_attachment, subscription, &running).await
+    attach(
+        connection,
+        by_attachment,
+        catalog,
+        change,
+        rights,
+        subscription,
+        &running,
+    )
+    .await
 }
 
-/// Attach `subscription` to `running`: `ready`, then the replay.
+/// The whole document `seat` is in, as `doc_sync` for `sub`.
+fn doc_sync(sub: &str, seat: &DocSeat, can_edit: bool) -> ServerFrame {
+    match seat.state() {
+        Ok(state) => ServerFrame::DocSync {
+            sub: sub.to_owned(),
+            update: BASE64.encode(state),
+            read_only: !can_edit,
+        },
+        Err(e) => FrameError::invalid(Some(sub.to_owned()), sc_error::format_chain(&e)).frame(),
+    }
+}
+
+/// What a subscription is attached with besides its stream and topic.
+#[derive(Debug, Clone, Copy)]
+struct Rights {
+    /// Whether this connection's own elements come back to it.
+    echo: bool,
+    /// Whether the page may publish on it — `ready`'s `can_publish`.
+    can_publish: bool,
+}
+
+/// Attach `subscription` to `running`: `ready`, then the replay. A
+/// `table_changes` subscription is attached with what its elements are decided
+/// by.
 async fn attach(
     connection: &Connection,
     by_attachment: &mut HashMap<u64, String>,
+    catalog: &Catalog,
+    change: Option<&ChangeAccess>,
+    rights: Rights,
     subscription: &mut Subscription<Attached>,
     running: &Arc<RunningStream>,
 ) -> Vec<ServerFrame> {
-    let (attached, replay) = connection.attach(running, subscription.topic.clone()).await;
+    let (attached, replay) = match change {
+        Some(change) => connection.attach_changes(running, change.clone()).await,
+        None => {
+            connection
+                .attach_echo(running, subscription.topic.clone(), rights.echo)
+                .await
+        }
+    };
     by_attachment.insert(attached.attachment(), subscription.sub.clone());
     if let Some(previous) = subscription.activate(attached) {
         by_attachment.remove(&previous.attachment());
@@ -821,9 +1561,9 @@ async fn attach(
     frames.push(ServerFrame::Ready {
         sub: subscription.sub.clone(),
         stream: subscription.stream.clone(),
-        element_type: element_type_json(running),
+        element_type: element_type_json_in(running, catalog),
         replayed: replay.len(),
-        can_publish: false,
+        can_publish: rights.can_publish,
         status,
         counters,
     });
@@ -832,6 +1572,107 @@ async fn attach(
         envelope: (*envelope).clone(),
     }));
     frames
+}
+
+/// The `users` columns `shown` of `user`, read now — what a presence member
+/// shows the others (§3 rule 9). Nothing for an anonymous page, and a column
+/// that is not there is left out rather than shown as null.
+async fn shown_fields(
+    catalog: &Catalog,
+    user: Option<&User>,
+    shown: &[String],
+) -> serde_json::Map<String, Json> {
+    let mut fields = serde_json::Map::new();
+    let Some(user) = user else {
+        return fields;
+    };
+    if shown.is_empty() {
+        return fields;
+    }
+    // Read afresh rather than taken from the session's copy, which can be a
+    // minute old: a name changed a moment ago is the name shown.
+    let current = match sc_auth::load_user(catalog, user.id).await {
+        Ok(Some(current)) => current,
+        Ok(None) => return fields,
+        Err(e) => {
+            sc_log::log_warn!(
+                "the live socket could not read the fields a presence member shows: {}",
+                sc_error::format_chain(&e)
+            );
+            user.clone()
+        }
+    };
+    for name in shown {
+        // Never the hash, whatever the settings say (`users` rows never carry
+        // it onto a `User`, and the stream form refuses it).
+        if let Some(value) = current.extra.get(name) {
+            fields.insert(name.clone(), sc_types::value_to_json(value));
+        }
+    }
+    fields
+}
+
+/// One `presence_diff`'s worth of changes to a room.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Diff {
+    joined: Vec<Json>,
+    left: Vec<String>,
+    updated: Vec<Json>,
+}
+
+/// Group a connection's presence changes, in order, into `presence_diff`s per
+/// room. A client applies a diff's `joined`, then `updated`, then `left`, so a
+/// change that would be applied out of order in the current diff — a join, or
+/// an update, of a connection that already left in it — starts the next one.
+/// Updates of one member within a diff keep only the latest.
+fn presence_diffs(events: Vec<(RoomKey, PresenceEvent)>) -> Vec<(RoomKey, Diff)> {
+    let mut out: Vec<(RoomKey, Diff)> = Vec::new();
+    // Per room, the index in `out` of its diff being filled.
+    let mut open: HashMap<RoomKey, usize> = HashMap::new();
+    for (room, event) in events {
+        let connection = match &event {
+            PresenceEvent::Joined(member) => member
+                .get("connection")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            PresenceEvent::Left(connection) | PresenceEvent::Updated { connection, .. } => {
+                connection.clone()
+            }
+        };
+        let starts_over = !matches!(event, PresenceEvent::Left(_))
+            && open
+                .get(&room)
+                .is_some_and(|at| out[*at].1.left.contains(&connection));
+        let at = match open.get(&room) {
+            Some(at) if !starts_over => *at,
+            _ => {
+                out.push((room.clone(), Diff::default()));
+                open.insert(room.clone(), out.len() - 1);
+                out.len() - 1
+            }
+        };
+        let diff = &mut out[at].1;
+        match event {
+            PresenceEvent::Joined(member) => diff.joined.push(member),
+            PresenceEvent::Left(connection) => diff.left.push(connection),
+            PresenceEvent::Updated { connection, state } => {
+                diff.updated
+                    .retain(|u| u.get("connection").and_then(Json::as_str) != Some(&connection));
+                diff.updated
+                    .push(json!({ "connection": connection, "state": state }));
+            }
+        }
+    }
+    out
+}
+
+/// Resolves at `at`, or never.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// The answer to a frame about a subscription this connection does not have.
@@ -874,4 +1715,63 @@ fn ticker(period: Duration) -> Interval {
     let mut interval = tokio::time::interval_at(Instant::now() + period, period);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sc_stream::StreamId;
+
+    fn room(topic: &str) -> RoomKey {
+        (StreamId(uuid::Uuid::from_u128(1)), Some(topic.to_owned()))
+    }
+
+    fn joined(connection: &str) -> PresenceEvent {
+        PresenceEvent::Joined(json!({ "connection": connection, "user_id": null, "state": null }))
+    }
+
+    fn updated(connection: &str, state: Json) -> PresenceEvent {
+        PresenceEvent::Updated {
+            connection: connection.to_owned(),
+            state,
+        }
+    }
+
+    #[test]
+    fn changes_to_one_room_are_one_diff_with_the_latest_state() {
+        let diffs = presence_diffs(vec![
+            (room("1"), joined("a")),
+            (room("1"), updated("a", json!(1))),
+            (room("1"), updated("a", json!(2))),
+            (room("2"), joined("b")),
+            (room("1"), PresenceEvent::Left("c".to_owned())),
+        ]);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].0, room("1"));
+        assert_eq!(diffs[0].1.joined.len(), 1);
+        assert_eq!(
+            diffs[0].1.updated,
+            vec![json!({ "connection": "a", "state": 2 })]
+        );
+        assert_eq!(diffs[0].1.left, vec!["c".to_owned()]);
+        assert_eq!(diffs[1].0, room("2"));
+    }
+
+    #[test]
+    fn a_return_after_a_leave_is_a_second_diff_so_it_is_applied_after_it() {
+        // Applied as one diff — joined, then left — `a` would end up gone.
+        let diffs = presence_diffs(vec![
+            (room("1"), PresenceEvent::Left("a".to_owned())),
+            (room("1"), joined("a")),
+        ]);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].1.left, vec!["a".to_owned()]);
+        assert_eq!(diffs[1].1.joined.len(), 1);
+        // A join and then a leave in one diff is applied in that order.
+        let diffs = presence_diffs(vec![
+            (room("1"), joined("b")),
+            (room("1"), PresenceEvent::Left("b".to_owned())),
+        ]);
+        assert_eq!(diffs.len(), 1);
+    }
 }

@@ -102,14 +102,6 @@ feldspar/
 │  │                              #    that advances a run of it (§10.3)
 │  ├─ sc-agent/                   # 7. Agent record + AgentTrait trait + registry + inference
 │  │                              #    loop + `_fd_agents`/`_fd_runs` storage (§11.2)
-│  ├─ sc-live/                    # 7. Live updates (§14.10): the multiplexed socket's protocol,
-│  │                              #    a connection's subscriptions, the topic index, the access
-│  │                              #    decisions as pure functions, and the hub that fans a
-│  │                              #    running stream's elements out, publishes into internal
-│  │                              #    streams (sc-expr's `LiveHost`) and watches the tables a row
-│  │                              #    topic's read rule reads (sc-catalog's `TableEvents`).
-│  │                              #    Above sc-stream and sc-auth; below sc-server, which mounts
-│  │                              #    `{mount}/live`
 │  ├─ sc-model/                   # 6. Predictive models: a named dataset (sc-dataset) resolved,
 │  │                              #    the columnar Frame, the row-identity-hash split, the
 │  │                              #    DatasetSource + ModelProvider seams, `_fd_models` /
@@ -140,6 +132,19 @@ feldspar/
 │  ├─ sc-api/                     # 8. Endpoint model (typed Rust values) + API providers
 │  │                              #    (REST/GraphQL/gRPC/tRPC/MCP) + TypeScript consumer gen
 │  ├─ sc-app/                     # 8. Application, Framework provider trait, routing/subdomains
+│  ├─ sc-live/                    # 8. Live updates (§14.10): the multiplexed socket's protocol,
+│  │                              #    a connection's subscriptions, the topic index, the access
+│  │                              #    decisions as pure functions, and the hub that fans a
+│  │                              #    running stream's elements out, publishes into internal
+│  │                              #    streams (sc-expr's `LiveHost`), watches the tables a row
+│  │                              #    topic's read rule reads and hands committed writes to
+│  │                              #    `table_changes` streams (sc-catalog's `TableEvents`),
+│  │                              #    deciding per element and per subscriber what each is sent,
+│  │                              #    and the collaborative documents' rooms (`yrs`, Yjs's CRDT).
+│  │                              #    Above sc-stream, sc-auth and sc-api (whose row layer is the
+│  │                              #    projection, the filter vocabulary and the read rule a
+│  │                              #    change is decided by); below sc-server, which mounts
+│  │                              #    `{mount}/live`
 │  ├─ sc-core-actions/            # 8. the built-in action set (insert_row, update_rows,
 │  │                              #    delete_rows, fetch, run_js_code, run_python_code,
 │  │                              #    send_email, and fit_model) — above the row layer,
@@ -216,6 +221,7 @@ graph TD
   server --> stream["sc-stream"]
   server --> live["sc-live"]
   live --> stream
+  live --> api
   stream --> auth
   app --> stream
   module --> stream
@@ -290,9 +296,9 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-live` | `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-stream` |
 | `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-dataset` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-model` `sc-query` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
+| `sc-live` | `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-types` |
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
@@ -1952,7 +1958,9 @@ means something for one provider is a cost paid by everybody.
   host surfaces: `db`, the tables (below), `fetch`, an HTTP request (below), `fs`, the file
   stores (below), `trigger`, this server's other triggers (below), `modfn`, an installed
   module's functions (§15.1), and `live`, whose `live.publish(stream, topic, value)` puts an
-  element on an internal stream (§14.10) — synchronously, on a budget of its own. Those six are
+  element on an internal stream (§14.10) — synchronously, on a budget of its own — and whose
+  `live.document(stream, key)` reads and edits a collaborative document (`await doc.text()`,
+  `.append`, `.insert`, `.delete`, `.edit`; §14.10, "Collaborative documents"). Those six are
   exactly the surface: no subprocess, no timers, no schema changes, no path to a file that is not
   a store an admin connected, and no way to fire an event except by being one more caller of the
   dispatcher every event already goes through. Beside them a body is handed Saltcorn 1's `Table`
@@ -2600,7 +2608,8 @@ same database.
 
 **The seam holds a list of listeners, keyed** (`Catalog::add_table_events(key, listener)`): the
 trigger dispatcher under `TRIGGER_EVENTS` and the live hub under `LIVE_EVENTS` (§14.10), which
-re-checks a row topic's access when a table its read rule reads is written to. Installing under a
+re-checks a row topic's access when a table its read rule reads is written to, and hands each
+write somebody is subscribed to to its `table_changes` streams. Installing under a
 key that is taken replaces — two dispatchers would fire every trigger twice — and a different key
 adds, so the second kind of listener can never silently switch the first off, which is what a
 replacing `set_table_events` would have done the day live updates were installed.
@@ -2610,6 +2619,18 @@ replacing `set_table_events` would have done the day live updates were installed
 the feature free for writes that do not use it: an update fetches its pre-image only when
 something will read it. A write is handed only to the listeners that observe it, each its own
 copy, and one listener's failure does not keep the write from the next.
+
+**"After the write" is not always "after the commit".** A write on the pooled path has
+committed when it is emitted. One made inside a `SharedTx` — a workflow step's, an import's
+(§10.3) — is emitted **before** that transaction commits, with the transaction in
+`TableWrite::tx`. A trigger wants exactly that: it joins the transaction and shares its fate. A
+listener that *tells somebody outside* about the write must not: a live page shown a row that
+the step then rolls back has been shown something that never happened. So such a listener hands
+what it would do to `SharedTx::after_commit(callback)`, which runs it once the commit has
+succeeded (in the order callbacks were added, on the committing task) and drops it unrun on a
+rollback, on a commit the database refuses, and when a savepoint taken before it was added is
+rolled back to (`SharedTx::savepoint` / `release_savepoint` / `rollback_to_savepoint`, which the
+CSV import's per-row savepoints use). The live hub is that listener (§14.10).
 
 Every other event is raised by something that already sits above `sc-action` and can simply
 hold the dispatcher: `login` from the one place a session starts, `startup` from the boot path,
@@ -2837,7 +2858,9 @@ trace row **per item** — the durability granularity of a loop is the item.
   (`rows::Executor::Transaction`); `TableWrite::tx` carries it into the emit seam so a cascade
   lands where its cause landed; and a code body's `db` operations and `trigger(…)` calls take it
   the same way. It **begins on its first statement**, so a step that calls an HTTP endpoint and
-  writes nothing holds no transaction while it waits.
+  writes nothing holds no transaction while it waits. What must happen only once the step's
+  writes are durable — a live page told about them (§14.10) — is registered with
+  `SharedTx::after_commit` and runs after the commit, or never (§10.2).
 
   Because the writers sharing one transaction are *not* the same caller, the caller-context GUCs
   travel with the **statement** rather than with the transaction: `SharedTx::run` re-applies them
@@ -8231,6 +8254,9 @@ tests are offline — the decoder, `element_type` over each `payload` setting, t
 validation and the topic-filter check need no broker. The live half is a human's, and
 `docs/tutorial-streams.md` is the recipe.
 
+The third built-in provider, **`table_changes`**, is also always compiled in: one element per
+committed write on a table, handed to it by the live hub while somebody is subscribed (§14.10).
+
 The second built-in provider, **`internal`**, observes nothing outside Saltcorn: its elements are
 published by Saltcorn's own code, it is always compiled in (a `--no-default-features` build still
 offers it, and the Streams screen's notice says only that MQTT was left out), and it is described
@@ -9659,9 +9685,22 @@ The plan is TODO.md "Live updates" (milestones L1–L6); this section records wh
 **Milestones L1 and L2 are built**: one socket per page, the access rules and their re-checking
 (L1); the built-in `internal` provider, `user` and `row` topics, retaining the latest element,
 re-checking a row topic when a write could change it, and server-side publishing from the
-`publish` action and `live.publish` in a code body (L2). `PerElementRow` topics, the
-`table_changes` and `document` providers, client publishing, presence and the bus are the later
-milestones.
+`publish` action and `live.publish` in a code body (L2). **L3's three phases are built**:
+writes are announced after their commit, and the hub hands each committed write somebody is
+subscribed to to its `table_changes` stream (phase 1); a page subscribes to one with a filter in
+the REST read's vocabulary, and each element is decided per subscriber — projected, filtered and
+read-checked — into `insert`, `update`, `enter`, `leave`, `delete` or nothing (phase 2); and the
+generated client types `subscribe({ where }, handlers)` with the table's row and its read's
+`Filters`, and keeps a read current with `LiveRows` / `useLiveRows` (phase 3). **L4 is built**:
+a page publishes on an `internal` stream whose settings allow it — on a `row` topic only with
+update access to the row — with `source` stamped by the server, and a stream with `presence` keeps
+each topic's members and their state, rate-limited and coalesced, shown to the members and on the
+admin's Observe screen; the client has `join`, `publish`, `usePresence` and `usePublish`. **L5 is
+built**: a `collab_doc` field holds a collaborative document that no API reads or writes; the
+`document` provider opens one row's document in a room on the server, merging Yjs updates with
+`yrs`, relaying them to the other members, persisting debounced and on close, and re-checking
+edit and read rights; a code body reads and edits a document with `live.document`; and the
+client opens one as a `Y.Doc` from its own generated file, `live-doc.ts`. The bus is L6.
 
 #### Everything is a stream, and a stream has topics
 
@@ -9699,16 +9738,17 @@ is byte-for-byte unchanged. It is not MQTT's topic, which stays in `source`.
 the client's own `sub`:
 
 ```
-client → server   subscribe {sub, stream, topic?, filter?} · unsubscribe {sub} · publish {sub, value}
-                  presence {sub, state} · doc_update {sub, update} · ping
+client → server   subscribe {sub, stream, topic?, filter?, echo?} · unsubscribe {sub}
+                  publish {sub, value} · presence {sub, state} · doc_update {sub, update} · ping
 server → client   ready {sub, stream, element_type, replayed, can_publish, status, counters}
                   element {sub, envelope} · lagged {sub, dropped} · status {sub, status, counters}
+                  presence {sub, connection, members} · presence_diff {sub, joined?, left?, updated?}
+                  doc_sync {sub, update, read_only} · doc_update {sub, update}
                   revoked {sub} · error {sub?, code, message} · pong
 ```
 
-`publish`, `presence` and `doc_update` are part of the protocol now, so a client is written
-against one contract, and are refused until their milestones (`publish` as `unavailable`, the
-others as `invalid`). A frame the server does not understand — malformed, an unknown `type`, a
+`doc_sync` and `doc_update` carry a document's Yjs updates in base64 (L5, "Collaborative
+documents" below); a `doc_update` on a subscription that is not a document's is `invalid`. A frame the server does not understand — malformed, an unknown `type`, a
 field of the wrong shape — is an `error` with `code: "invalid"` and the frame's `sub`, never a
 closed connection: one bad frame must not take every other subscription down with it, and a
 client a version ahead must still be able to use the server.
@@ -9732,7 +9772,7 @@ rule and answers a `Grant` naming the topic the subscription is routed under:
 | `single` | nothing | no topic | below the floor |
 | `user` | nothing | their own user id | below the floor, or anonymous |
 | `row { table }` | a row's key (`"7"` or `7`) | the key | below the floor, the table outside the app's subset, or the caller's REST read of that row returns nothing |
-| `per_element_row` | — | — | always, until L3 |
+| `per_element_row { table }` | nothing (a `filter`, optionally) | no topic | below the floor, or the table outside the app's subset; then **per element** (see "Per element" below) |
 
 A **row topic's** verdict is a fact the socket looks up through `sc_api::row_readable_as`, which
 is `read_row_values_as` with `pk = key` — the very read the application's REST API makes, with the
@@ -9808,9 +9848,138 @@ and sends `revoked` for those that now fail. Removing a share revokes the subscr
 without waiting for the clock. The last subscription watching a table takes the watch with it.
 
 A write made inside a `SharedTx` (a workflow step's) is emitted before that transaction commits
-(§10.2), so a re-check made at once would read the old state. Until L3.1 publishes after commit,
-the hub hands such a write over a second time two seconds later; the clock re-check is the
-backstop behind both.
+(§10.2), so a re-check made at once would read the old state. The hub therefore hands the touch
+over **after the commit** (`SharedTx::after_commit`), and not at all after a rollback — see "Table
+changes" below.
+
+#### Table changes: the write, after its commit (L3.1, L3.3, L3.4)
+
+`sc-stream::providers::table_changes` is the third built-in provider: one element per committed
+insert, update or delete on `table`, for the writes `ops` lists (all three by default), and
+`payload` — `row` (the default) or `key`, which sends a page `{op, key}` only so it fetches the row
+itself (a wide row, a joined read). Saving one refuses a table that does not exist or has no
+one-column primary key (a page applies a change by key). Its topics are `PerElementRow`. It
+replays nothing (`Replay::Nothing`): a ring of raw rows handed to the next subscriber would skip
+the per-subscriber decision. Nothing publishes into it but a write — `accepts_publish` is false,
+and `RunningStream::publish_change(change)` is the hub's door, which delivers through the running
+subscription's sink like any element (cap, stamp, ring, broadcast, trigger bridge) but refuses a
+stream whose topics are not `PerElementRow`.
+
+**The element on the stream is the change, not what a subscriber is sent**: `{op, key, row,
+old}` — `row` as the write left it (null for a delete), `old` as it was (absent for an insert).
+`old` is deliberately **not declared** in the element type (a declared shape is a floor, and an
+undeclared key is carried): it is what the fan-out decides by, and no page is ever sent it. What a
+page receives is `{op, key, row?}`, exactly the declared type.
+
+**The element type is the table's.** `StreamProvider::element_type` sees only the configuration,
+so it can say `row` is JSON; the new `StreamProvider::element_type_in(config, catalog)` hook
+(defaulting to `element_type`) declares `row`'s keys — one per column an application's REST read
+returns, the users table's password hash not among them — using a new `ElementField::keys`, the
+declared shape of a `json` key's object. The client generator (`sc_app::app_streams`) and a
+socket's `ready` ask that hook, so `row` reaches TypeScript as the table's row type. A column added
+to the table reaches the generated types at the next client emit, which the schema observer
+already triggers for every app that includes the table — and an app exposing a `table_changes`
+stream must include its table: `save_application` refuses one on a table outside the app's
+subset, naming both, and the socket refuses it as absent.
+
+**Only a subscription makes a write observed.** The hub keeps, per table, the `table_changes`
+streams some subscription is attached to and the writes each carries; `Connection::attach`
+registers a `ChangeWatch` for a `table_changes` stream **before** joining its fan-out (so every
+write committed after `ready` is caught), and the `Attached` holds it, so unsubscribing,
+closing and a restart's re-attach all give it back. `observes(table, op)` is "a connection
+watches the table for a row topic, or a subscribed `table_changes` stream carries `op`" — one
+lock and a short scan, no await. A stream that is defined, running and exposed by an app but has
+nobody subscribed costs a write nothing; in particular an update does not read its pre-image.
+
+**`emit` does no access work.** It builds `{op, key, row, old}` and the touch keys, and hands
+both to `LiveHub::announce` — at once on the pooled path, through `SharedTx::after_commit` inside
+a shared transaction. `announce` looks the streams up again at that moment and calls
+`publish_change` on each, which is a synchronous broadcast send. Filters, read checks and socket
+writes belong to the stream's fan-out task, so a write's latency does not grow with the number
+of subscribers, and a fan-out that falls behind reports `lagged` to its subscribers rather than
+slowing the writer.
+
+**Tests.** `sc-catalog`'s `shared_tx.rs`: a callback runs after the commit and in order, never
+on a rollback or a commit the database refuses (a deferred foreign key), and rolling back to a
+savepoint drops exactly the callbacks added since. `sc-workflow`'s `step_transaction.rs`, with
+the real hub on the write seam: a step's insert has been handed to the stream zero times while
+the step runs and once after the run is done, and a step that fails after the same write hands
+over nothing. `sc-live`'s `tests/changes.rs`, through the row layer on a driver that counts its
+`SELECT`s: running streams with nobody subscribed observe nothing; attaching observes exactly
+the stream's writes, and the last detach stops it; an unobserved update reads no pre-image and
+an observed one reads one, with `old` as the row was; and with 500 subscribers on a
+current-thread runtime, the write has reached the stream when it returns while no subscriber has
+been served yet — that is the fan-out's work, afterwards.
+
+#### Per element: what each subscriber is sent (L3.5–L3.9)
+
+A subscription to a `table_changes` stream names no topic and may carry a `filter`. The socket
+lowers the filter against the table **with the REST read's own walk** (`sc_api::filter::api_where`,
+over the fields a REST read may filter on, so an unknown field, a calculated field and the password
+hash are refused exactly as there — as `invalid`, once access has passed) and attaches the
+subscription with `Connection::attach_changes(running, ChangeAccess { catalog, evaluator, filter
+})`. The connection carries its caller in a `CallerCell` the socket refreshes at every session
+re-read, so a lowered role reaches the next element. A subscription attached with plain `attach`
+is sent nothing from such a stream: a raw change is nobody's.
+
+For each element the stream's fan-out task — off the write's path — decides every subscriber's
+outcome with `sc_live::deliver_to(old, new, readable_old, readable_new, matches_old,
+matches_new)`, a pure function:
+
+| Old image | New image | Sent |
+|---|---|---|
+| — (insert) | readable and matching | `insert` + row |
+| readable and matching | — (delete) | `delete`, key only |
+| readable and matching | readable and matching | `update` + row |
+| not | readable and matching | `enter` + row |
+| readable and matching | not | `leave`, key only |
+| not | not | nothing — no frame at all |
+
+`leave` and `delete` never carry the row, so nobody learns what a row they can no longer read
+became, and nobody learns anything about a row they could never read.
+
+- **Matching** is the filter evaluated in Rust (`sc_live::RowFilter`) on the image's typed values,
+  with SQL's three-valued logic: a comparison with a null is unknown, and only *true* matches.
+  `LIKE` follows the table's database, read off its dialect (SQLite's folds ASCII case and has no
+  escape; Postgres's is case-sensitive with `\`). Text is ordered by bytes, so a range over
+  mixed-case text is the one place a verdict can differ from a database collating by locale.
+  Parity is tested against both backends' reads.
+- **Readable** is `sc_api::RowImage`, §7.3's rule applied to the image: the role floor short-
+  circuits; no formula grants nothing; `column === user.id` (either way round, `==` too, on a
+  plain column) is decided as a comparison with no isolate; any other formula is evaluated
+  **reified** with its Ⱶ/Ↄ values prefetched by `prefetch_bindings` **once per image** and shared
+  by every caller after. Anything that goes wrong denies. The related rows a formula reads are
+  read when the fan-out decides, not as of the write: a share added just after an insert may let
+  its subject be told of the insert (they may read the row by then), and a share removed may
+  withhold a change made before it — never the reverse of what the rule says now.
+- **Grouped**: a filter is matched once per distinct filter, a verdict made once per distinct
+  `(user, role)`, and readability is asked only of an image the filter matched — the filter is
+  cheap, the evaluator is not.
+- **Projected**: the row sent is `sc_api::api_row`, the REST read's projection (the table's own
+  columns that `visible_field` lets through, absent ones left absent). Hidden columns are stated
+  once, in `sc_auth::is_api_hidden_column`, which the row layer and the provider's typing both
+  read, and every `collab_doc` field beside it (L5.1).
+
+**Counters (L3.9).** Per `table_changes` stream the hub keeps what its fan-outs decided since the
+server started — `checked` (element × subscription pairs), `delivered`, `suppressed_access` (an
+image matched the filter but was not theirs to read), `suppressed_filter` and
+`evaluator_micros` — kept on the hub so a fan-out ending with its last subscriber does not take
+them along. `listStreams`, `getStream`, `saveStream` and `streamStatus` carry them as `changes`,
+and the Streams list prints them under the subscriber count.
+
+**Tests.** `sc-live` unit-tests `deliver_to` over the full truth table, what is sent for each
+outcome and payload, the suppression reason, and the filter's three-valued logic, `LIKE` rules and
+refusals; `may_subscribe`'s table gained the per-element rows. `tests/filters.rs` holds 33 filters
+× 5 rows (nulls everywhere) to the database's own read on SQLite and on Postgres.
+`tests/readers.rs`, on SQLite with the real evaluator and two users: the owner formula (decided
+with no evaluator), a publisher through `Ⱶ` and a share through `Ↄ`, each through insert, update,
+a move from one user to the other (`leave`/`enter`) and delete, every test ending with a write the
+user can read that must be the next thing they are sent; a filter's `enter`/`leave`; a `key`
+payload; a bare attachment sent nothing; a users stream typed and sent without the password hash;
+and the counters. `sc-server`'s `app_live_changes.rs` drives it through real sockets: the typed
+`ready`, every refusal (a table outside the app the same `unavailable` as a misspelt name, a topic
+or an unknown filter field `invalid`, the app save refused), a card moving between two users'
+boards, the admin's counters, and a column added reaching the generated client.
 
 #### Server-side publishing
 
@@ -9835,6 +10004,56 @@ Three publishers reach it without naming `sc-live`:
 
 Server-side publishers are trusted configuration (§3 rule 8 of the plan): no caller's role is
 consulted, as none is for an `insert_row`.
+
+#### Client publishing and presence (L4)
+
+**Who may publish** is `sc_live::may_publish(topics, PublishFacts)`, pure like the subscribe
+rules and asked for a subscription that has already passed them: the stream's provider takes
+publishes and its `client_publish` setting is on; then a `single` stream needs nothing more (its
+`min_role` was met), a `row` topic needs **update** access to the row, and a `user` topic or a
+stream of row changes never (the provider already refuses `client_publish` on a `user` stream).
+Update access is `sc_api::row_updatable_as`, the update half of `row_readable_as`: the row is read
+as the system (an admin caller context, so an RLS table's policies do not hide it), then *meets
+`min_role_write` OR the formula grants `update` on the row as it stands*, decided reified by the
+single-row check every sub-floor write takes — an RLS table's policies are specified to agree, so
+one path serves both. A missing row and a refusal are both `false`. The socket decides it when a
+subscription is attached (and again after a restart), sends it as `ready`'s `can_publish`, and
+decides it again whenever the subscription's read access is re-checked — a touched row or
+read-rule table, and the clock — so a share losing `can_edit` stops its publishes at the next
+write to `shares`. A refused publish is `unavailable`, worded like any absence.
+
+**What is published** goes through the hub's `Connection::publish`, which calls
+`RunningStream::publish_value_from` — the same checks as a server-side publish (the element type,
+counted as `malformed` on a mismatch and answered `invalid`; the topic's kind; the stream running
+here) — with the envelope's `source` set to `{user, connection}` from the connection. The frame
+has no `source` and no `received_at`; anything a page sends beside `value` is not read. The
+`connection` is a random id per socket (not the hub's sequential one), so it says nothing about
+how many connections there are. **The sender is left out**: a subscription attached without
+`echo` carries its connection's id in its sink, and the fan-out skips an element whose
+`source.connection` is that id; `subscribe {…, echo: true}` asks for them back.
+
+**Presence** (`sc-live::presence`) is per room, `(stream id, topic)`, on a stream whose
+`presence` setting is on. A subscription takes a **`Seat`** once attached; a member is the
+**connection** (two subscriptions of one page on one topic are one member, counted), shown as
+`{connection, user_id, …presence_fields, state}` — the shown `users` columns read with
+`load_user` at join time, never the password hash, the three fixed keys winning over a column of
+the same name. The joiner is sent `presence {connection, members}` (its own id, and everybody
+including itself) after `ready`; every change after that — a join, a state, a leave — is pushed to
+the **other** members' `PresenceInbox` (a list behind a lock and a bell, never a wait) and leaves
+their connections as `presence_diff {joined, left, updated}`, grouped per room in order: a client
+applies `joined`, then `updated`, then `left`, and a change that would be misapplied in that order
+(a return after a leave) starts the next diff. An inbox past `INBOX_CAP` (1 024) drops that room's
+changes and marks it for a **resync**, sent as a whole `presence` again — a list is patched in
+order or rebuilt, never silently wrong. Dropping the seat leaves: unsubscribing, a `revoked`
+subscription, a closed socket. The only way into a room is a subscription, so only callers who
+passed the topic's read check see or appear in the list.
+
+**State updates** are capped at `max_presence_state_bytes` (2 KB of JSON, `too_large`), counted
+against `presence_per_second` (20, `rate_limited`), and **coalesced** per connection: the first in
+a quiet moment is applied at once and opens a `presence_coalesce` window (50 ms); the ones inside
+it are held, the latest per subscription applied when it closes (which opens the next window if
+anything was). Publishes are counted against `publishes_per_second` (20). Both buckets are
+`limits::RateLimit`, a token bucket with the clock as a parameter.
 
 #### Origin, for every socket
 
@@ -9894,8 +10113,9 @@ user per application (`too_many_connections`, then closed; anonymous connections
 counted), 64 KB per client frame (`too_large`, not read, connection kept — the transport's own
 cap sits at four times that, at least 1 MB, so a frame over the limit is answered rather than hung
 up on), a WebSocket ping every 30 s and a close with `idle` after 90 s of silence (a browser pongs
-by itself, so only a dead connection is idle). Every clock is a parameter, which is how the tests
-run in milliseconds.
+by itself, so only a dead connection is idle), 20 publishes and 20 presence updates a second per
+connection (`rate_limited`, connection kept), presence coalesced per 50 ms and 2 KB per state
+(`too_large`). Every clock is a parameter, which is how the tests run in milliseconds.
 
 #### The client
 
@@ -9917,6 +10137,200 @@ re-subscribing, returning `{ status, error }`), `useLatest(accessor)` (the lates
 imports the client only when the app exposes a stream, so a project with none still builds
 under `noUnusedLocals`.
 
+**Joining and publishing (L4.4).** `StreamExport` carries the stream's `presence` and
+`client_publish` settings, and an accessor's type adds what they allow: `LivePresence<E>` /
+`LiveRowPresence<E>` (`join([topic,] handlers)` → a `LiveRoom` with `members`, `me`,
+`canPublish`, `setState`, `publish`, `leave`) and `LivePublish<E>` / `LiveRowPublish<E>`
+(`publish([topic,] value)`), never publish on a `user` stream. The value type is its own type
+parameter, defaulted to `LiveValue<E>`, so a hook infers it. At runtime every accessor has both
+(the types decide what is offered): `join` is a subscription that keeps the topic's members —
+`presence` replaces them, `presence_diff` patches them through the pure `applyPresence` — and
+hands them to `handlers.presence`; `setState` updates the page's own entry at once and sends at
+most one state per `presenceInterval` (60 ms, the latest wins), and sends it again after a
+reconnect when the fresh list does not carry it; a publish before `ready` waits for it; and
+`publish` without a join uses a subscription the page holds to that topic, or opens one for the
+value and closes it once sent. `LiveHandlers.echo` asks for the page's own elements back. React:
+`usePresence(accessor, topic?)` → `{ members, me, setState, publish, canPublish, status, error }`
+and `usePublish(accessor, topic?)` → a stable function, both in `live-react.ts` and named in the
+scaffold's `AGENTS.md`.
+
+**A table's changes (L3.10–L3.11).** A `table_changes` stream reaches the generator as
+`StreamTopics::Changes { table }`. When the client reads that table, its accessor is a
+`LiveChangesStream<CardsSchema, Key>` whose `subscribe({ where }, handlers)` takes the REST
+read's own `Filters<CardsRow>` (`{ board: "eq.7" }`) — **one filter type** for the read and the
+subscription — and whose envelope is `LiveEnvelope<LiveChange<CardsRow, Key>>`, the change's
+`row` typed as the read's row (`leave` and `delete` have none). The client lowers each `op.value`
+to the socket's filter object (`{ board: { eq: "7" } }`, `in.(…)` to a list, `is_null.*` to a
+boolean) as the server lowers a query string, and the filter travels in the `subscribe` frame
+and again after a reconnect. The table's object carries the same accessor as `changes`
+(`api.cards.changes === api.live.cards_live`; with several such streams on one table, the first
+the app lists). A stream on a table the client does not read is still typed, from its element
+type, but has no key column and nothing to refetch with.
+
+`LiveRows` (in the helper, so framework-neutral) is a read kept current: it subscribes with the
+read's `where`, reads with `where`, `orderBy` and `select` once the subscription is `ready` —
+first, after every reconnect, and after `lagged` — and applies changes that arrive while a read
+is in flight on top of it, in order (delivery is in commit order, so the rows end as the last
+change left them). The reducer, `applyLiveChange`, is pure: `leave`/`delete` take the key out;
+`insert`/`update`/`enter` upsert the row, cut to a plain-column `select`, and keep `orderBy`'s
+order (compared in JavaScript: numbers numerically, text by code unit, nulls last ascending as
+Postgres does; ties keep their order; no order appends). A change with no row (`payload: key`),
+or any change when the `select` embeds or aliases, instead names its key to read again, and those
+keys are read together once per tick (`in.(…)`); a key a newer change overtook is left to that
+change, and one the read no longer answers is taken out. The read's `select` gains the key and
+order columns it leaves out, because the rows are matched and ordered by them. React's
+`useLiveRows(api.cards, { where, orderBy, select })` (`live-react.ts`) is a hook over it,
+returning `{ rows, loading, error, status, refresh }` with `rows` typed `Selected<CardsSchema,
+S>` like `list`; options are compared by value, so an inline object does not resubscribe. Tests:
+the reducer and `LiveRows` against a fake table in `ui/admin/src/liveRows.test.ts` (vitest, no
+server); the generated client run under Node (`sc-api` `live_connection`: the filter frame,
+resent after a reconnect); the types under `tsc` (`typescript_typecheck`, and a component using
+`useLiveRows` against the scaffold's generated runtime).
+
+#### Collaborative documents (L5)
+
+The case this exists for is text edited by several people at once, where an edit's position moves
+under concurrent edits — so a document is a **CRDT**, Yjs's, merged on the server by `yrs` (its
+Rust port, whose binary update format is Yjs's own). The browser keeps the standard `yjs` package
+and every editor binding built on it (TipTap/ProseMirror, CodeMirror, Monaco). Shapes on a canvas,
+cards and other objects are rows (`table_changes` + presence), and an operation log is append-only
+rows; neither needs a document.
+
+**The `collab_doc` type (L5.1)** is a rich type in `sc-types` (`CollabDocType`, on `bytea`, a
+`BLOB` on SQLite), and a promise about who writes the value that the rest of the system keeps:
+
+- **Never read through an API.** `sc_api::user_rows::is_hidden_column` — the one rule a REST
+  read, a `select`, a filter, an ordering, GraphQL's derived fields, `api_row` and the generated
+  `ResourceModel` all consult — answers true for it, and a table holding one is projected column
+  by column (as `users` is), so the column is **absent** from a row, not `null`. The generated
+  row types omit it, and so does a `table_changes` element type.
+- **Never written through an API.** `rows::create_row_in` and `update_row_guarded_in` refuse a
+  body that names one, with a sentence saying why (a whole value would overwrite concurrent
+  edits) — REST, GraphQL, the admin's row editor, a code body's `db` and the actions alike;
+  `insert_row`/`update_rows` refuse one already when their configuration is saved
+  (`writable_field`), and a code body's plan refuses one before it reaches the row layer. The
+  admin UI's grid and row form treat it as read-only. The only writer is
+  `rows::write_document_in`, the persister's system write.
+- **Never named by a filter, an ordering or a formula.** `filter::queryable_field` refuses it,
+  and `schema_shape_of_tables` leaves it out of every table's shape, so a formula — a calculated
+  field, an ownership rule — naming it is an unknown field.
+
+**The CRDT (`sc-live::doc`, L5.2).** `CollabDoc` is one document: `load` (an empty document for a
+null field), `apply` (an untrusted update, decoded behind `catch_unwind`, so a malformed one is an
+error for its sender and never a panic in the room everyone shares), `state`, `diff`, `text`,
+`json`, `edit_text`, `append_paragraph`, and the free `merge_states`. The root is named and typed
+(`DocShape`): `yrs` must be told whether the shared type under `root` is a `Y.Text` or a
+`Y.XmlFragment`, because the update format does not say. Positions count UTF-16 code units, as
+JavaScript's do. Text walked out of an `xml` root is a line per block, marks left out; `json` is
+`JSON.stringify(root.toJSON())` as Yjs computes it (a string for `text`, the XML serialisation for
+`xml`). `tests/doc_format.rs` replays updates recorded from the JS `yjs` package
+(`tests/fixtures/record_yjs_updates.js`) through `yrs` for both root kinds and gets the same text
+and the same JSON — the format compatibility everything else relies on.
+
+**The `document` provider (`sc-stream::providers::document`, L5.3)**: `table`, `field` (must be
+`collab_doc`, checked on save by `validate_in`), `root` (default `default`, TipTap's), `root_kind`
+(`text` | `xml`), an optional `text_mirror` (a stored text column) and `mirror_format` (`text` |
+`json`). Its topics are `Row { table }`, so subscribing is the row topic's read check and every
+L2.6 re-check applies; it replays nothing and accepts no publish. **The stream itself carries
+nothing**: a document's edits go from the room to its members directly, as presence does, never
+through the ring and broadcast — a dropped edit would leave a member diverged until it re-synced,
+and a ring of raw edits handed to the next subscriber is not a document. The element type
+(`{update}`) is declared so a client has a type to name. An application exposing a `document`
+stream must include its table (`save_application`; the socket refuses it as absent).
+
+**Rooms (`sc-live::docroom`, L5.2–L5.4).** `LiveHub::docs()` is a `DocRooms`: one `DocRoom` per
+open `(stream id, row key)`, loaded from the row by its first member (`rows::read_field`), holding
+the `CollabDoc` behind a lock, its members' inboxes, and two counters (edits applied, edits
+persisted). A member is a `DocSeat`, held by the subscription's `Extras`; dropping it leaves, and
+the last to leave **closes** the room, persisting first — the room stays registered while it
+closes, so a page that joins meanwhile joins it rather than loading a stale copy. An edit is
+applied, then handed to every **other** member's `DocInbox` (a list behind a lock and a bell, as
+presence's; past `DOC_INBOX_CAP` a seat's queued edits are replaced by a resync, sent as a whole
+`doc_sync`), then a persist is scheduled `doc_persist_debounce` (2 s) later unless one is waiting.
+
+**Persisting** is one persist per room at a time, in **one transaction**: the stored value is
+read with `SELECT … FOR UPDATE` (`sc_query::Select::lock`, rendered by a dialect with row locks —
+`SqlDialect::row_lock`; SQLite renders nothing, its `BEGIN IMMEDIATE` holds the database), applied
+into the room — whatever another process persisted meanwhile is merged, and relayed to this
+room's members — and the merged state and the mirror are written by `rows::write_document_in`
+through the row layer as a system write, so update triggers and `table_changes` streams see an
+ordinary update (whose row never carries the document's bytes). A persist with no edit since the
+last one writes nothing, so a room closing after its last persist is free. **An update trigger on
+the table therefore fires about every 2 s while someone types** — documented, not suppressed.
+
+**The socket (`sc-server::live`, L5.3).** After `ready` (and the member list — presence is always
+on for a document, with no user fields shown), a subscription to a `document` stream joins the
+room (`Connection::join_doc`) and is sent `doc_sync {update, read_only}` — the whole document, with
+`read_only` unless `row_updatable_as` says the caller may update the row. A `doc_update` is
+refused `unavailable` (worded like any absence) from a read-only member, counted against
+`publishes_per_second` (`rate_limited`), decoded (`invalid`), size-checked and applied. The
+connection's `DocInbox` is one more `select!` arm, turned into `doc_update` frames, or `doc_sync`
+for a resync. Re-checks: `refresh_rights` decides the update right again whenever access is
+re-checked (a touched row or rule table, the clock), and a changed right sends `doc_sync` again
+with the new `read_only`; a lost read right is `revoked` and the seat goes with the subscription.
+A restart that keeps the room sends `doc_sync` again after the fresh `ready`. The admin's Observe
+screen lists a document's editors as presence.
+
+**Limits** come from one setting: `max_doc_bytes` (2 MB) is the largest document — an edit that
+would pass it is refused `too_large` with a sentence and not applied (the room keeps an upper bound
+of its size and encodes the document to measure only when that bound says it might be too big);
+the largest `doc_sync` follows (`max_doc_sync_bytes`, base64's 4/3 plus a margin). A client
+`doc_update` frame has its own cap, `max_doc_update_bytes` (1 MB), because pasting a long passage
+is ordinary editing; every other client frame keeps 64 KB, and the transport takes twice the
+`doc_update` cap so a frame past it is answered rather than hung up on.
+
+**Server-side writes (L5.5).** `sc_expr::LiveHost` gained `async fn document(stream, key,
+DocRequest) -> text`, defaulted to a refusal: `Read`, `Edit {index, delete, insert}` (a `text`
+root) and `Append {text}` (a paragraph on an `xml` root, text at the end of a `text` one).
+`LiveHub::document` opens the room — the editors' own, when it is open, so they see the edit at
+once — makes the edit through the seat, **persists before answering** and answers the text; the
+hub reaches the catalog through a weak handle the router sets (`LiveHub::set_catalog`). JavaScript
+bodies call it through the asynchronous op `op_sc_live_doc` (`live.document(stream, key)` →
+`text()`, `append()`, `insert()`, `delete()`, `edit()`, each a not-awaited-guarded promise); an
+edit counts against the run's publish budget and clears its retry, a read is free. Python bodies
+call the same host over the `Live` surface (`live.document(...)` → a `Document`, synchronous for
+the guest), reading the request with the same `sc_expr::document_request`. Trusted, like a
+publish: no caller's role is consulted.
+
+**The client (L5.6).** `StreamTopics::Document {root, root_kind}` types a document stream's
+accessor as `LiveDocumentStream<"xml" | "text">` (`connection.documentStream(name, root, kind)`),
+whose `connect(key, handlers)` is a subscription carrying base64 `sync`/`update` and the member
+list, and returns `send`, `setState` and `readOnly`. The helper imports nothing; `yjs` lives in
+`src/feldspar/live-doc.ts`, emitted (and regenerated) only for an application that exposes a
+document stream: `openDocument(stream, key)` → `{doc, awareness, field, root, readOnly, status,
+error, onChange, close}`, `docs.<stream>.open(key)`, and React's `useDocument(docs.<stream>, key)`.
+It applies `doc_sync` and answers it with what the server lacks
+(`encodeStateAsUpdate(doc, encodeStateVectorFromUpdate(sync))`), so edits made while disconnected
+arrive; sends local edits while synced and allowed; reports `reconnecting` as soon as the socket
+drops; and carries the awareness as the page's presence state — `encodeAwarenessUpdate` in
+base64, applied with `applyAwarenessUpdate`, dropped with `removeAwarenessStates` when a member
+leaves — so the server never looks inside it. **Deviation:** the plan's `live.<doc>.open(key)` is
+`docs.<doc>.open(key)`, because `live` is the generated client's own object and the client may not
+import `yjs`. `yjs` (`^13`) and `y-protocols` are always in the scaffold's write-once
+`package.json`. `live-doc.ts` is emitted for the React scaffold; a module's framework gets the
+helper's transport. The scaffold's `AGENTS.md` (L5.7) has the TipTap and CodeMirror examples,
+`React.lazy` for the editor page, and the 2-second update trigger.
+
+**Tests.** `sc-types`: the type validates bytes. `sc-api` `tests/collab_doc.rs` (SQLite): absent
+from every read and the generated row type, refused by every write path with its sentence,
+written by the persister, refused by a filter and by a formula. `sc-core-actions`: an action's
+configuration may not name one. `sc-query`/`sc-db-sqlite`: `FOR UPDATE` rendered, or not.
+`sc-live`: the CRDT units; `doc_format.rs` (the JS fixture); `documents.rs` (SQLite) — relay to
+the others and not back, close with the last member, two rooms (two processes) persisting
+interleaved edits lose neither for both roots and both mirror formats, the persist an ordinary
+update without the bytes, a close with nothing new writes nothing, `too_large`, a document over
+1 MB opens, and `live.document` read/edit/append on both roots reaching an open room.
+`sc-expr`/`sc-python`: the JS and Python surfaces against a fake host. `sc-app`: `live-doc.ts`
+emitted only with a document stream, `package.json`, `AGENTS.md`; `tests/live_doc.rs` runs it under
+Node with the real `yjs` against a fake socket (sync, a local edit out once, a remote one in and
+not echoed, awareness both ways and a leave, **an offline edit arriving after the reconnect**,
+read-only sending nothing) and type-checks `useDocument` for both kinds. `sc-server`
+`app_live_documents.rs` (SQLite, real sockets): owner, editor, reader and stranger; the reader's
+edit refused and heard by nobody; losing and regaining the edit right, then the read right; a
+1.2 MB document and a 100 KB paste; persisted and read back over REST. `tutorial_live_documents.rs`
+walks part 5 of `docs/tutorial-live.md`, ending with two headless Chromium contexts typing into one
+note through the scaffold's own generated runtime.
+
 #### Admin
 
 The Streams list shows each stream's **subscribers** — live subscriptions from applications'
@@ -9925,7 +10339,11 @@ pages on this server, from the hub — beside the counters, and `listStreams`, `
 internal provider from its declaration (`table` shown only for `row` topics, by `show_if`). The
 Observe screen has a **topic** column for a stream with topics, headed by what a topic is
 (`Topic (user)`, `Topic (boards row)`), and a box that narrows the tail to topics containing what
-is typed. The trigger form's action list offers `publish`, its stream picker filled in.
+is typed. The trigger form's action list offers `publish`, its stream picker filled in. For a
+stream with presence (L4.5) the admin's Observe socket sends `presence {topics: [{topic,
+members}]}` after `ready` and whenever it changed (looked at on its status clock), from
+`LiveHub::presence_of`, and the screen shows it as a **Present now** card: per topic, each
+member's user, shown fields and state.
 
 **Tests.** `sc-live` unit-tests the frame round trips (an unknown `type` is `invalid`), the
 subscription states, the topic index and `may_subscribe` as a table; its `tests/hub.rs` runs the
@@ -9945,6 +10363,24 @@ hour; a workflow started by one user telling only that user; ten `run_js_code` p
 order; the action list's `publish`; and a table trigger still firing while the hub observes its
 table. `tutorial_live.rs` part 2 walks `docs/tutorial-live.md`'s second part, type-checking its
 component against the generated runtime.
+
+L4: `sc-live` tests `may_publish` as a table, the presence rooms (joins, states and leaves reach
+the others and not oneself, two subscriptions are one member, a full inbox rebuilds the room) and
+the rate bucket as units; `tests/publish.rs` publishes through a real running `internal` stream
+(the stamped `source`, the sender left out unless `echo`, a malformed value counted), seats
+connections in a room through the hub, and decides `row_updatable_as` on SQLite with the real
+evaluator (owner, editing share, read-only share, stranger, missing row, write floor).
+`sc-server`'s `live` module tests the diff grouping. `app_live_presence.rs`, four users on a
+board: `can_publish` per the update rule, a read-only share's publish `unavailable` and heard by
+nobody, a forged `source` replaced, `echo`, `invalid` and `unavailable` publishes; the rate limits
+and the size cap answered with the socket kept, quick states coalesced; the member list with the
+shown field, diffs for a join, a state and a leave, a closed tab gone within a second, a revoked
+member gone, and a user refused by the read check never in a list; and the admin's Observe socket
+listing who is present. The client is run under Node (`live_connection`: members kept through
+`presence` and `presence_diff`, states throttled and resent after a reconnect, a publish held
+until `ready`, a publish without a join, `echo`) and type-checked (`typescript_typecheck`, and a
+component using `usePresence` / `usePublish` against the scaffold's runtime). `tutorial_live.rs`
+part 4 walks the fourth part.
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 

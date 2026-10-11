@@ -183,6 +183,7 @@ import {
   type BoilerEnvelope,
   type JobStatusEnvelope,
   type LiveError,
+  type LiveMember,
   type LiveRowStream,
   type LiveStatus,
   type LiveStream,
@@ -256,6 +257,33 @@ export function exercise(): void {
   api.live.syslog.subscribe({ element: (e) => void e.value.line });
   // @ts-expect-error a stream the application does not expose has no accessor
   void api.live.meter;
+
+  // L4.4: a stream with presence is joined; one pages may publish on takes a
+  // value of its element type.
+  const room = api.live.board_presence.join(7, {
+    presence(members: LiveMember[]) {
+      const first: string | null = members[0].user_id;
+      void first;
+    },
+  });
+  const members: LiveMember[] = room.members;
+  const me: string | undefined = room.me;
+  const allowed: boolean = room.canPublish;
+  room.setState({ dragging: 3 });
+  room.publish({ message: "moved", progress: null });
+  room.leave();
+  void members; void me; void allowed;
+  api.live.board_presence.publish(7, { message: "moved", progress: 0.5 });
+  // @ts-expect-error `nope` is not a declared key of the element type
+  api.live.board_presence.publish(7, { nope: 1 });
+  // @ts-expect-error a per-row stream is joined naming the row
+  api.live.board_presence.join({});
+  // @ts-expect-error a stream without presence cannot be joined
+  api.live.board_activity.join(7);
+  // @ts-expect-error a stream pages may not publish on has no `publish`
+  api.live.board_activity.publish(7, { message: "x", progress: null });
+  // @ts-expect-error a per-user stream never takes a page's publish, whatever its settings
+  api.live.job_status.publish({ message: "x", progress: null });
 }
 "#;
 
@@ -286,12 +314,16 @@ fn generated_stream_client_type_checks() -> std::io::Result<()> {
                 ),
             ]),
             topics: StreamTopics::Single,
+            presence: false,
+            client_publish: false,
         },
         StreamExport {
             name: "syslog".to_owned(),
             path: "/api/live".to_owned(),
             value: TypeSchema::text(),
             topics: StreamTopics::Single,
+            presence: false,
+            client_publish: false,
         },
         StreamExport {
             name: "frames".to_owned(),
@@ -299,24 +331,128 @@ fn generated_stream_client_type_checks() -> std::io::Result<()> {
             // Bytes travel as base64, which is a string on the wire.
             value: TypeSchema::value(ValueType::Bytes),
             topics: StreamTopics::Single,
+            presence: false,
+            client_publish: false,
         },
         StreamExport {
             name: "job_status".to_owned(),
             path: "/api/live".to_owned(),
             value: message(),
             topics: StreamTopics::User,
+            presence: false,
+            // Never offered on a user topic, whatever the settings say.
+            client_publish: true,
         },
         StreamExport {
             name: "board_activity".to_owned(),
             path: "/api/live".to_owned(),
             value: message(),
             topics: StreamTopics::Row,
+            presence: false,
+            client_publish: false,
+        },
+        StreamExport {
+            name: "board_presence".to_owned(),
+            path: "/api/live".to_owned(),
+            value: message(),
+            topics: StreamTopics::Row,
+            presence: true,
+            client_publish: true,
         },
     ];
     // An application with no API provider still exposes streams: the client is
     // sockets and nothing else, and it has to compile.
     let client_ts = sc_api::generate_client_with_streams(&sc_api::EndpointSet::new(), &streams);
     type_check("streams", &client_ts, STREAM_USAGE_TS)
+}
+
+/// A usage module for an application that reads `posts` and exposes its
+/// changes (TODO.md "Live updates" L3.10–L3.11): the subscription's filter is
+/// the read's `Filters`, a change's row is the read's row, the table's object
+/// carries the stream as `changes`, and a `useLiveRows`-shaped function infers
+/// its rows from the `select` the way `list` does.
+const CHANGES_USAGE_TS: &str = r#"
+import {
+  createClient,
+  LiveRows,
+  type LiveChangesStream,
+  type LiveRowsOptions,
+  type LiveTable,
+  type PostsLiveEnvelope,
+  type PostsRow,
+  type PostsSchema,
+  type Selected,
+  type TableSchema,
+} from "./client";
+
+// `useLiveRows`'s signature (the scaffold's `live-react.ts`), without React.
+declare function useLiveRows<Sch extends TableSchema, Key, S extends string = "">(
+  table: LiveTable<Sch, Key>,
+  options?: LiveRowsOptions<Sch["row"], S>,
+): { rows: Array<Selected<Sch, S>> };
+
+export function exercise(): void {
+  const api = createClient({ baseUrl: "https://blog.example.com" });
+
+  const stream: LiveChangesStream<PostsSchema, number> = api.live.posts_live;
+  const same: LiveChangesStream<PostsSchema, number> = api.posts.changes;
+  void same;
+  stream
+    .subscribe(
+      { where: { author: "eq.7", published: "is_null.false" } },
+      {
+        element(envelope: PostsLiveEnvelope) {
+          const change = envelope.value;
+          const key: number = change.key;
+          const row: PostsRow | undefined = change.row;
+          if (change.op === "leave" || change.op === "delete") return void key;
+          const title: string | undefined = change.row?.title;
+          void row; void title;
+        },
+      },
+    )
+    .close();
+
+  const all: PostsRow[] = useLiveRows(api.posts, { where: { author: "eq.7" }, orderBy: "published.desc" }).rows;
+  const titles = useLiveRows(api.posts, { select: "title,author(name)" }).rows;
+  const title: string = titles[0].title;
+  const name: string = titles[0].author!.name;
+  const kept = new LiveRows<PostsRow>(api.posts as unknown as LiveTable);
+  kept.close();
+
+  // @ts-expect-error `nope` is not a column of posts
+  stream.subscribe({ where: { nope: "eq.1" } }, { element() {} });
+  // @ts-expect-error a filter value names a comparison, as in a read
+  useLiveRows(api.posts, { where: { title: "hello" } });
+  // @ts-expect-error a selected row has only what was selected
+  void useLiveRows(api.posts, { select: "id" }).rows[0].title;
+  // @ts-expect-error a row stream has no topic to name
+  stream.subscribe(7, { element() {} });
+  // @ts-expect-error `authors` exposes no changes, so it is not a live table
+  useLiveRows(api.authors);
+
+  void all; void title; void name;
+}
+"#;
+
+#[test]
+fn generated_changes_client_type_checks() -> std::io::Result<()> {
+    use sc_api::{StreamExport, StreamTopics, TypeSchema};
+
+    let provider = RestProvider::project("/api", &blog_tables());
+    let streams = [StreamExport {
+        name: "posts_live".to_owned(),
+        path: "/api/live".to_owned(),
+        value: TypeSchema::json(),
+        topics: StreamTopics::Changes {
+            table: "posts".to_owned(),
+        },
+        presence: false,
+        client_publish: false,
+    }];
+    let client_ts =
+        sc_api::generate_client_with_streams(ApiProvider::endpoints(&provider), &streams);
+    type_check("changes", &client_ts, CHANGES_USAGE_TS)
 }
 
 #[test]
@@ -464,10 +600,15 @@ fn type_check(tag: &str, client_ts: &str, usage_ts: &str) -> std::io::Result<()>
         .args([
             "--noEmit",
             "--strict",
+            // A scaffolded app's own settings: TypeScript 5's default target
+            // is ES5, which cannot iterate a `Map`, and TypeScript 7 no
+            // longer has `--moduleResolution node`.
+            "--target",
+            "es2020",
             "--lib",
             "es2020,dom",
             "--moduleResolution",
-            "node",
+            "bundler",
             "--module",
             "esnext",
         ])

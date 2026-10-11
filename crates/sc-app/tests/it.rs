@@ -31,7 +31,11 @@ mod custom_query_store;
 mod declared_framework;
 #[path = "graphql_scaffold.rs"]
 mod graphql_scaffold;
+#[path = "live_doc.rs"]
+mod live_doc;
 #[path = "scaffold_app.rs"]
 mod scaffold_app;
+#[path = "stream_registry.rs"]
+mod stream_registry;
 #[path = "tutorial_app_build.rs"]
 mod tutorial_app_build;

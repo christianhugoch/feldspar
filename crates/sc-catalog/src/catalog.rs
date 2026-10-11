@@ -184,6 +184,11 @@ pub struct Catalog {
     /// `_fd_llm_providers`. Opaque at this layer, like the hosts above it: `sc-llm`
     /// sets it and is the only reader that knows its type.
     host_llm_provider: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
+    /// The stream provider registry of the server this catalog serves. Opaque
+    /// here for the same reason: `sc-app` stores it and reads it back, so an
+    /// app's streams are typed against *this* server's providers and not
+    /// whichever server in the process installed its registry last.
+    stream_registry: RwLock<Option<Arc<dyn std::any::Any + Send + Sync>>>,
     /// How many times this catalog has been (re)loaded — the **generation
     /// stamp**, bumped by [`reload`](Catalog::reload) and by nothing else.
     ///
@@ -290,6 +295,7 @@ impl Catalog {
             public_origin: RwLock::new(None),
             host_config: RwLock::new(sc_types::Attrs::new()),
             host_llm_provider: RwLock::new(None),
+            stream_registry: RwLock::new(None),
             table_events: RwLock::new(Vec::new()),
             generation: AtomicU64::new(0),
             code_schema: RwLock::new(None),
@@ -1055,6 +1061,21 @@ impl Catalog {
         self.host_llm_provider.read().ok()?.clone()
     }
 
+    /// Replace the stream provider registry this catalog's server runs.
+    ///
+    /// Not checked here: `sc_app::install_stream_registry` is the way to call
+    /// this, and what it stores is `sc-stream`'s registry.
+    pub fn set_stream_registry(&self, registry: Arc<dyn std::any::Any + Send + Sync>) {
+        if let Ok(mut guard) = self.stream_registry.write() {
+            *guard = Some(registry);
+        }
+    }
+
+    /// The stream provider registry this catalog's server runs, if one was set.
+    pub fn stream_registry(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.stream_registry.read().ok()?.clone()
+    }
+
     /// What this process believes about workflow runs that want the engine.
     ///
     /// The runs table is the authority; this is the cache that keeps an idle
@@ -1787,6 +1808,11 @@ pub(crate) fn schema_shape_of_tables<'a>(
         }
         let mut table_shape = sc_expr::TableShape::new();
         for field in &table.fields {
+            // A collaborative document is bytes no formula can read (live
+            // updates L5.1): left out, a formula naming it is an unknown field.
+            if field.is_collab_doc() {
+                continue;
+            }
             table_shape = match &field.kind {
                 crate::field::DataFieldKind::Key {
                     target_table,
@@ -1809,6 +1835,7 @@ pub(crate) fn schema_shape_of_tables<'a>(
             users
                 .fields
                 .iter()
+                .filter(|f| !f.is_collab_doc())
                 .map(|f| f.base.name.as_str())
                 .filter(|name| *name != USERS_PASSWORD_COLUMN),
         );

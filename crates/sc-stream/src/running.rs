@@ -589,6 +589,20 @@ impl RunningStream {
     /// Returns the topic as it was published (a user id normalised to its
     /// canonical spelling).
     pub fn publish_value(&self, topic: Option<String>, value: Json) -> Result<Option<String>> {
+        self.publish_value_from(topic, value, None)
+    }
+
+    /// [`publish_value`](RunningStream::publish_value) with the envelope's
+    /// `source` set to `source` — what a page's publish carries (TODO.md "Live
+    /// updates" §3 rule 7, L4.1): `{user, connection}`, stamped by the live
+    /// socket and never taken from the page. Every check `publish_value`
+    /// makes, this makes.
+    pub fn publish_value_from(
+        &self,
+        topic: Option<String>,
+        value: Json,
+        source: Option<Json>,
+    ) -> Result<Option<String>> {
         let name = self.name();
         let Some(provider) = &self.provider else {
             return Err(Error::invalid(format!(
@@ -630,10 +644,45 @@ impl RunningStream {
         };
         sink.deliver(Element {
             value,
-            source: None,
+            source,
             topic: topic.clone(),
         });
         Ok(topic)
+    }
+
+    /// Hand one committed write to a `table_changes` stream (TODO.md "Live
+    /// updates" L3.3) — what the live hub does, after the commit, for a write
+    /// on the stream's table while somebody is subscribed.
+    ///
+    /// `change` is `{op, key, row, old}`, built by the hub from the write; it
+    /// is not decoded against the element type, because it is Saltcorn's own
+    /// account of a row and not a payload from outside. Delivered through the
+    /// running subscription's sink, so it is stamped, counted, broadcast and
+    /// bridged to triggers exactly as any element. Refused for a stream whose
+    /// elements are not row changes, and for one that is not running here.
+    pub fn publish_change(&self, change: Json) -> Result<()> {
+        let name = self.name();
+        if !matches!(self.topic_spec()?, TopicSpec::PerElementRow { .. }) {
+            return Err(Error::invalid(format!(
+                "stream `{name}` does not carry row changes, so a write cannot be handed to it"
+            )));
+        }
+        let sink = match self.sink.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let Some(sink) = sink else {
+            return Err(Error::invalid(format!(
+                "stream `{name}` is not running on this server ({})",
+                self.status().as_str()
+            )));
+        };
+        sink.deliver(Element {
+            value: change,
+            source: None,
+            topic: None,
+        });
+        Ok(())
     }
 
     /// Set the status, and what the supervisor should do about it next.

@@ -7,7 +7,7 @@
     "An application framework, \"React Native (web)\": pick it when creating an application, and Saltcorn writes a React Native project for the web — Vite, react-native-web, a screen and typed hooks for every table the app exposes.",
     "Native builds of the same project: an Android APK or AAB, and on a Mac an iOS simulator app or an IPA signed from a provisioning profile in the file store."
   ],
-  "installs": [],
+  "installs": ["node-forge"],
   "permissions": {
     "net": [
       "api.appstoreconnect.apple.com"

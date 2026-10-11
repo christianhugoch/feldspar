@@ -7,7 +7,7 @@
 //! limit is enforced with an `error` frame the client can read (see
 //! [`ErrorCode`](crate::ErrorCode)), never with a silently dropped frame.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The limits and clocks of the live socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,33 @@ pub struct LiveLimits {
     /// slowest of its subscriptions starts losing them (and is told it
     /// `lagged`).
     pub queue: usize,
+    /// Publishes one connection may make per second, over all its
+    /// subscriptions (L4.2). One more is answered `rate_limited` and not
+    /// published; the connection stays up.
+    pub publishes_per_second: u32,
+    /// Presence updates one connection may send per second (L4.2), answered
+    /// like publishes.
+    pub presence_per_second: u32,
+    /// Presence updates are coalesced: the first in a quiet moment is applied
+    /// at once, and the ones that follow within this window are held and
+    /// applied as one — the latest — when it ends.
+    pub presence_coalesce: Duration,
+    /// The largest presence state one member may hold, as JSON text in bytes.
+    /// A larger one is refused with `too_large`, and the state is unchanged.
+    pub max_presence_state_bytes: usize,
+    /// The largest collaborative document a `document` stream holds, encoded,
+    /// in bytes (L5.3). An edit that would take one past it is refused with
+    /// `too_large` and not applied. The largest `doc_sync` follows from it
+    /// ([`max_doc_sync_bytes`](LiveLimits::max_doc_sync_bytes)), so the two
+    /// cannot contradict each other.
+    pub max_doc_bytes: usize,
+    /// The largest `doc_update` frame a client may send, in bytes — its own
+    /// cap, because pasting a long passage is ordinary editing; every other
+    /// client frame keeps [`max_frame_bytes`](LiveLimits::max_frame_bytes).
+    pub max_doc_update_bytes: usize,
+    /// How long a document room waits after an edit before persisting it, so
+    /// typing is one write every couple of seconds rather than one per key.
+    pub doc_persist_debounce: Duration,
 }
 
 impl Default for LiveLimits {
@@ -54,6 +81,13 @@ impl Default for LiveLimits {
             ),
             status_interval: Duration::from_secs(2),
             queue: 256,
+            publishes_per_second: 20,
+            presence_per_second: 20,
+            presence_coalesce: Duration::from_millis(50),
+            max_presence_state_bytes: 2 * 1024,
+            max_doc_bytes: 2 * 1024 * 1024,
+            max_doc_update_bytes: 1024 * 1024,
+            doc_persist_debounce: Duration::from_secs(2),
         }
     }
 }
@@ -64,8 +98,57 @@ impl LiveLimits {
     /// every frame over [`max_frame_bytes`](LiveLimits::max_frame_bytes) a
     /// client is likely to send is answered rather than hung up on, and small
     /// enough that a client cannot make the server buffer megabytes.
+    ///
+    /// A `doc_update` frame may be [`max_doc_update_bytes`](LiveLimits::max_doc_update_bytes),
+    /// so the transport takes twice that too, and a frame past it is answered
+    /// as well.
     pub fn transport_max_bytes(&self) -> usize {
-        self.max_frame_bytes.saturating_mul(4).max(1024 * 1024)
+        self.max_frame_bytes
+            .saturating_mul(4)
+            .max(self.max_doc_update_bytes.saturating_mul(2))
+            .max(1024 * 1024)
+    }
+
+    /// The largest `doc_sync` the server sends: a whole document at
+    /// [`max_doc_bytes`](LiveLimits::max_doc_bytes), in base64 (4/3), plus the
+    /// frame around it.
+    pub fn max_doc_sync_bytes(&self) -> usize {
+        self.max_doc_bytes.div_ceil(3).saturating_mul(4) + 1024
+    }
+}
+
+/// A token bucket: `rate` a second, and as many at once — what a connection's
+/// publishes and presence updates are counted with. The clock is a parameter,
+/// so a test crosses a limit without waiting a second for it.
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    rate: f64,
+    tokens: f64,
+    at: Instant,
+}
+
+impl RateLimit {
+    /// A full bucket of `per_second`, as of `now`.
+    pub fn new(per_second: u32, now: Instant) -> RateLimit {
+        let rate = f64::from(per_second.max(1));
+        RateLimit {
+            rate,
+            tokens: rate,
+            at: now,
+        }
+    }
+
+    /// Take one, if there is one: `false` means over the limit.
+    pub fn take(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.at = now;
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.rate);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -83,5 +166,36 @@ mod tests {
         assert_eq!(limits.idle_timeout, Duration::from_secs(90));
         assert_eq!(limits.recheck_interval, Duration::from_secs(60));
         assert!(limits.transport_max_bytes() > limits.max_frame_bytes);
+        assert_eq!(limits.publishes_per_second, 20);
+        assert_eq!(limits.presence_per_second, 20);
+        assert_eq!(limits.presence_coalesce, Duration::from_millis(50));
+        assert_eq!(limits.max_presence_state_bytes, 2048);
+        assert_eq!(limits.max_doc_bytes, 2 * 1024 * 1024);
+        assert_eq!(limits.max_doc_update_bytes, 1024 * 1024);
+        assert_eq!(limits.doc_persist_debounce, Duration::from_secs(2));
+        // The limits that follow from the document size agree with it: a whole
+        // document fits a `doc_sync`, and the transport reads a whole update.
+        assert!(limits.max_doc_sync_bytes() > limits.max_doc_bytes * 4 / 3);
+        assert!(limits.transport_max_bytes() > limits.max_doc_update_bytes);
+    }
+
+    #[test]
+    fn a_rate_allows_a_burst_of_itself_and_then_refills() {
+        let start = Instant::now();
+        let mut limit = RateLimit::new(20, start);
+        for n in 0..20 {
+            assert!(limit.take(start), "take {n} of a full bucket");
+        }
+        assert!(!limit.take(start), "the 21st within the same instant");
+        // A twentieth of a second is one more.
+        let later = start + Duration::from_millis(50);
+        assert!(limit.take(later));
+        assert!(!limit.take(later));
+        // A second later the bucket is full again, and no fuller.
+        let much_later = later + Duration::from_secs(5);
+        for _ in 0..20 {
+            assert!(limit.take(much_later));
+        }
+        assert!(!limit.take(much_later));
     }
 }

@@ -35,14 +35,18 @@
 //! is: `sc-server` puts its own in at boot and on every module change, and a
 //! process that has not (a test, a `feldspar` command that is not serving)
 //! falls back to the compiled-in providers, which is exactly what such a
-//! process has.
+//! process has. It is installed on the server's [`Catalog`] as well as for the
+//! process, and the catalog's is the one read: a process running several
+//! servers (a test binary) would otherwise type one server's app against
+//! whichever registry another server installed last.
 
 use std::sync::{Arc, RwLock};
 
 use sc_api::{StreamExport, StreamTopics, StructField, TypeSchema, ValueType};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
-use sc_stream::{ElementType, Stream, StreamRegistry, TopicSpec};
+use sc_stream::providers::internal;
+use sc_stream::{ElementField, ElementType, Stream, StreamRegistry, TopicSpec};
 use sc_types::BasicType;
 
 use crate::application::Application;
@@ -63,12 +67,21 @@ static REGISTRY: RwLock<Option<Arc<StreamRegistry>>> = RwLock::new(None);
 /// the supervisor's own registry is replaced then: a module can supply a stream
 /// provider, and a client generated a minute later must type its elements from
 /// the provider that is actually installed.
-pub fn install_stream_registry(registry: Arc<StreamRegistry>) {
+pub fn install_stream_registry(cat: &Catalog, registry: Arc<StreamRegistry>) {
+    cat.set_stream_registry(registry.clone());
     let mut guard = match REGISTRY.write() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     *guard = Some(registry);
+}
+
+/// The registry `cat`'s server installed, or [`stream_registry`] when no
+/// server has installed one on it.
+pub fn catalog_stream_registry(cat: &Catalog) -> Arc<StreamRegistry> {
+    cat.stream_registry()
+        .and_then(|any| any.downcast::<StreamRegistry>().ok())
+        .unwrap_or_else(stream_registry)
 }
 
 /// The installed registry, or the compiled-in providers when nothing has
@@ -137,27 +150,37 @@ pub fn is_live_path(app: &Application, path: &str) -> bool {
 ///
 /// - `Json` is a record of the declared keys. A key that is not `required` is
 ///   optional-and-nullable, because §4 says a declared key that is absent is
-///   `null`.
+///   `null`. A `json` key that declares the keys of its object (a
+///   `table_changes` stream's `row`) is a record of those, the same way.
 /// - `Text` is a string. The encoding is settled at save time (UTF-8 or
 ///   refused), so there is nothing left for a type to say about it.
 /// - `Binary` is [`ValueType::Bytes`], which is base64 in a string — the same
 ///   thing a bytes column is on the wire, spelled the same way.
 pub fn element_value_schema(element_type: &ElementType) -> TypeSchema {
     match element_type {
-        ElementType::Json { keys } => TypeSchema::struct_of(keys.iter().map(|key| {
-            let value = TypeSchema::value(value_type_of(&key.r#type));
-            StructField::new(
-                key.name.clone(),
-                if key.required {
-                    value
-                } else {
-                    TypeSchema::optional(value)
-                },
-            )
-        })),
+        ElementType::Json { keys } => keys_schema(keys),
         ElementType::Text { .. } => TypeSchema::text(),
         ElementType::Binary => TypeSchema::value(ValueType::Bytes),
     }
+}
+
+/// A record of declared keys, each optional-and-nullable unless required.
+fn keys_schema(keys: &[ElementField]) -> TypeSchema {
+    TypeSchema::struct_of(keys.iter().map(|key| {
+        let value = if key.keys.is_empty() {
+            TypeSchema::value(value_type_of(&key.r#type))
+        } else {
+            keys_schema(&key.keys)
+        };
+        StructField::new(
+            key.name.clone(),
+            if key.required {
+                value
+            } else {
+                TypeSchema::optional(value)
+            },
+        )
+    }))
 }
 
 /// A declared key's basic type as a wire type. `ValueType::from_basic` is the
@@ -180,10 +203,20 @@ fn value_type_of(basic: &BasicType) -> ValueType {
 /// is mounted, and what an observer gets is the honest "not running on this
 /// server". Enabling it must not require rebuilding the app.
 pub async fn app_streams(app: &Application, cat: &Catalog) -> Result<Vec<ExposedStream>> {
+    app_streams_with(app, cat, &catalog_stream_registry(cat)).await
+}
+
+/// [`app_streams`] against a registry the caller holds rather than the
+/// installed one — what a test that runs beside other servers in one process
+/// uses, since each of them installs its own.
+pub async fn app_streams_with(
+    app: &Application,
+    cat: &Catalog,
+    registry: &StreamRegistry,
+) -> Result<Vec<ExposedStream>> {
     if app.streams.is_empty() {
         return Ok(Vec::new());
     }
-    let registry = stream_registry();
     let mut resolved = Vec::with_capacity(app.streams.len());
     for declared in &app.streams {
         let stream = sc_stream::load_stream_by_name(cat, &declared.0)
@@ -202,16 +235,21 @@ pub async fn app_streams(app: &Application, cat: &Catalog) -> Result<Vec<Exposed
         })?;
         // Resolved rather than read: an application's client is generated
         // against the element type, and a module's provider only knows it by
-        // asking the worker (TODO "Streams" §12).
-        let element_type = provider
-            .resolve_element_type(&stream.configuration)
-            .await
-            .map_err(|e| {
-                Error::config(format!(
-                    "application `{}` exposes stream `{declared}`: {e}",
-                    app.name
-                ))
-            })?;
+        // asking the worker (TODO "Streams" §12). Then typed against the
+        // schema the configuration names — a `table_changes` stream's `row` is
+        // the table's columns, so a column added reaches the generated types
+        // the next time this runs, which a schema change triggers (L3.4).
+        let element_type = async {
+            provider.resolve_element_type(&stream.configuration).await?;
+            provider.element_type_in(&stream.configuration, cat)
+        }
+        .await
+        .map_err(|e| {
+            Error::config(format!(
+                "application `{}` exposes stream `{declared}`: {e}",
+                app.name
+            ))
+        })?;
         let topics = provider.topic_spec(&stream.configuration).map_err(|e| {
             Error::config(format!(
                 "application `{}` exposes stream `{declared}`: {e}",
@@ -235,23 +273,46 @@ pub fn stream_exports(app: &Application, streams: &[ExposedStream]) -> Vec<Strea
             name: exposed.stream.name.clone(),
             path: live_socket_path(app),
             value: element_value_schema(&exposed.element_type),
-            topics: match exposed.topics {
+            topics: match &exposed.topics {
                 TopicSpec::Single => StreamTopics::Single,
                 TopicSpec::User => StreamTopics::User,
-                // A stream of row changes is subscribed with a filter (L3), not
-                // a topic; until then it is subscribed as a plain stream.
-                TopicSpec::Row { .. } => StreamTopics::Row,
-                TopicSpec::PerElementRow { .. } => StreamTopics::Single,
+                // A document stream's topic is a row too, but a page opens its
+                // document rather than subscribing to elements (L5.6).
+                TopicSpec::Row { .. } => match sc_stream::providers::document::settings_of(
+                    &exposed.stream.provider,
+                    &exposed.stream.configuration,
+                ) {
+                    Some(doc) => StreamTopics::Document {
+                        root: doc.root,
+                        root_kind: doc.root_kind,
+                    },
+                    None => StreamTopics::Row,
+                },
+                // A stream of row changes is subscribed with the read's filter,
+                // not a topic, and typed with the table's row (L3.10).
+                TopicSpec::PerElementRow { table } => StreamTopics::Changes {
+                    table: table.clone(),
+                },
             },
+            // Joining and publishing are offered only where the settings
+            // allow them (L4.4); the socket still decides per subscriber.
+            presence: is_internal(exposed) && internal::presence(&exposed.stream.configuration),
+            client_publish: is_internal(exposed)
+                && internal::client_publish(&exposed.stream.configuration),
         })
         .collect()
+}
+
+/// Whether a stream is Saltcorn's own — the only kind with presence or a
+/// page's publishes.
+fn is_internal(exposed: &ExposedStream) -> bool {
+    exposed.stream.provider == internal::INTERNAL
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::{ApiConfig, FrameworkRef, StreamRef};
-    use sc_stream::ElementField;
 
     fn app() -> Application {
         Application::new("Blog", "blog", FrameworkRef::new("code"))
@@ -288,6 +349,33 @@ mod tests {
         let bare = Application::new("Bare", "bare", FrameworkRef::new("code"));
         assert!(is_live_path(&bare, "/live"));
         assert!(!is_live_path(&bare, "/api/live"));
+    }
+
+    #[test]
+    fn a_json_key_with_declared_keys_becomes_a_nested_record() {
+        let schema = element_value_schema(&ElementType::json([
+            ElementField::new("op", BasicType::Text).required(),
+            ElementField::new("row", BasicType::Json).with_keys([
+                ElementField::new("id", BasicType::Int).required(),
+                ElementField::new("title", BasicType::Text),
+            ]),
+        ]));
+        assert_eq!(
+            schema,
+            TypeSchema::struct_of([
+                StructField::new("op", TypeSchema::value(ValueType::Text)),
+                StructField::new(
+                    "row",
+                    TypeSchema::optional(TypeSchema::struct_of([
+                        StructField::new("id", TypeSchema::value(ValueType::Int)),
+                        StructField::new(
+                            "title",
+                            TypeSchema::optional(TypeSchema::value(ValueType::Text))
+                        ),
+                    ]))
+                ),
+            ])
+        );
     }
 
     #[test]

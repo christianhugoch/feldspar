@@ -1,17 +1,19 @@
 //! The stream providers that are compiled in (TODO §11, tasks 1.4 and 4.2;
 //! TODO.md "Live updates" §2).
 //!
-//! Two of them:
+//! Three of them:
 //!
 //! - **MQTT** ([`mqtt`]), behind a default-on `mqtt` feature so a build can
 //!   drop it — `smartcore`'s arrangement, for `smartcore`'s reason;
 //! - **internal** ([`internal`]), always: its elements are Saltcorn's own, it
 //!   carries no network client, and it is what an application's toasts and
-//!   progress bars are made of.
+//!   progress bars are made of;
+//! - **table_changes** ([`table_changes`]), always: one element per committed
+//!   write on a table, handed to it by the live hub.
 //!
 //! Everything else a stream can be observed from comes from a module (§12). A
 //! build with `--no-default-features` and no module installed therefore offers
-//! only `internal`, and the Streams screen says why MQTT is missing in a
+//! only `internal` and `table_changes`, and the Streams screen says why MQTT is missing in a
 //! sentence rather than leaving the admin to wonder — see
 //! [`BUILTINS_COMPILED_OUT`].
 
@@ -22,9 +24,11 @@ use sc_error::Result;
 use crate::provider::StreamProvider;
 use crate::registry::StreamRegistry;
 
+pub mod document;
 pub mod internal;
 #[cfg(feature = "mqtt")]
 pub mod mqtt;
+pub mod table_changes;
 
 /// Whether this build carries the MQTT provider.
 ///
@@ -44,9 +48,13 @@ pub const BUILTINS_COMPILED_OUT: &str = "this server was built with `--no-defaul
 
 /// Every compiled-in stream provider.
 ///
-/// `internal` always, and MQTT with the `mqtt` feature on.
+/// `internal`, `table_changes` and `document` always, and MQTT with the `mqtt` feature on.
 pub fn builtin_providers() -> Vec<Arc<dyn StreamProvider>> {
-    let mut providers: Vec<Arc<dyn StreamProvider>> = vec![Arc::new(internal::Internal)];
+    let mut providers: Vec<Arc<dyn StreamProvider>> = vec![
+        Arc::new(internal::Internal),
+        Arc::new(table_changes::TableChanges),
+        Arc::new(document::Document),
+    ];
     #[cfg(feature = "mqtt")]
     providers.push(Arc::new(mqtt::Mqtt));
     providers
@@ -101,7 +109,11 @@ mod tests {
     #[cfg(not(feature = "mqtt"))]
     #[test]
     fn a_build_without_the_feature_has_a_sentence_rather_than_an_empty_picker() {
-        assert_eq!(builtin_providers().len(), 1, "only `internal`");
+        assert_eq!(
+            builtin_providers().len(),
+            3,
+            "`internal`, `table_changes` and `document`"
+        );
         const { assert!(!MQTT_COMPILED_IN) };
         assert!(BUILTINS_COMPILED_OUT.contains("--no-default-features"));
     }

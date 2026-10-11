@@ -16,11 +16,11 @@ time, and every part rests on the same two ideas:
 | 1 | The live socket, observing an external stream from React | L1 (this page) |
 | 2 | Notifications and progress from a workflow | L2 (this page) |
 | 3 | A live kanban board | L3 |
-| 4 | Presence: who else has the board open | L4 |
-| 5 | A collaborative notes app | L5 |
+| 4 | Presence: who else has the board open | L4 (this page) |
+| 5 | A collaborative notes app | L5 (this page) |
 | 6 | Two processes behind one proxy | L6 |
 
-Parts 3–6 arrive with their milestones.
+Parts 3 and 6 arrive with their milestones.
 
 ## Part 1 — The live socket
 
@@ -298,3 +298,356 @@ are how a page hears about it.
 
 The definition of done for this part is `part_two_notifications_and_progress` in
 `crates/sc-server/tests/tutorial_live.rs`.
+
+## Part 4 — Presence: who else has the board open
+
+A board that moves by itself is half of working together; the other half is seeing who else is
+looking at it. This part puts the faces of everybody who has a board open above it, and
+highlights a card while somebody drags it — on every other screen, as it happens. It is
+**presence**: a topic's members, each with a little state of its own, that the server keeps and
+tells the others about.
+
+It builds on part 1's `todo` application, its Member role, `member@example.com` and part 2's
+`colleague@example.com`, and on a board of part 3's shape. What this part needs of it
+is two tables — `boards` (`id`, `title`) and `board_members` (`id`, `board` → `boards`, `member`
+a user's id) — with the read rule part 3 gives `boards`, on the **Ownership** tab:
+
+```
+board_membersↃboard.some(m => m.member === user.id)
+```
+
+Put `member@example.com` and `colleague@example.com` on board 1 in `board_members`. Add one more
+Member, `outsider@example.com`, who is on no board. And give people names to be shown by: in
+**Tables → users**, add a field `name` (String), and fill it in for the three of them.
+
+### Step 1 — A stream for who is on a board
+
+Open **Streams → New**, name it `board_presence`, pick **Internal**, and fill in:
+
+- **Declared keys of an element**:
+
+  ```json
+  [{ "name": "dragging", "type": "int" }]
+  ```
+
+- **Topics** — `row`, of the table `boards`. A page joins one board's topic, and only if it may
+  read that board — the same read the REST API makes, so `outsider@example.com` is refused.
+- **Members can see who else is here** — on. **User fields shown to other members** — `["name"]`.
+  A member is shown to the others as their user id, the fields listed here and nothing else.
+- **Pages may publish** — on. A page may publish on a board's topic only if it may **update**
+  that board; here every member may, because the read rule is the board's only rule.
+- **Minimum role to observe** — Member (40).
+
+Then tick `board_presence` in the application's **Streams** and rebuild. The client now has
+`live.board_presence`, typed with `join` and `publish` because the settings allow them.
+
+### Step 2 — Faces, and the card being dragged
+
+```tsx
+import { live, usePresence } from "../feldspar/live-react";
+import { useT } from "../feldspar/i18n";
+
+type Card = { id: number; title: string };
+
+export function BoardPresence({ board, cards }: { board: number; cards: Card[] }) {
+  const { t } = useT();
+  const { members, me, setState } = usePresence(live.board_presence, board);
+  // Somebody else's drag: the card they are holding, and who.
+  const dragged = new Map<number, string>();
+  for (const member of members) {
+    const state = member.state as { dragging?: number | null } | null;
+    if (member.connection !== me && typeof state?.dragging === "number") {
+      dragged.set(state.dragging, String(member["name"] ?? t("Somebody")));
+    }
+  }
+  return (
+    <section>
+      <ul className="faces">
+        {members.map((member) => (
+          <li key={member.connection} title={String(member["name"] ?? "")}>
+            {String(member["name"] ?? "?").slice(0, 1)}
+            {member.connection === me ? ` (${t("you")})` : ""}
+          </li>
+        ))}
+      </ul>
+      <ul>
+        {cards.map((card) => (
+          <li
+            key={card.id}
+            draggable
+            onDragStart={() => setState({ dragging: card.id })}
+            onDragEnd={() => setState({ dragging: null })}
+            className={dragged.has(card.id) ? "being-dragged" : undefined}
+          >
+            {card.title}
+            {dragged.has(card.id) && ` — ${dragged.get(card.id)}`}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+`usePresence(live.board_presence, board)` joins board `board`'s topic while the component is
+mounted and leaves when it unmounts. `members` is everybody with that board open, this page
+included; `me` is which of them is this page. A member is `{ connection, user_id, state }` and
+the fields the stream shows — here `name`. There is one member per open page, not per user: the
+same person with two tabs open is two faces, and each tab can tell which one is itself.
+
+`setState` is this page's state, shown to everybody else as its member's `state`. Call it as
+often as a drag fires: the client sends at most one state every 60 ms (the latest), and the
+server holds the ones that come quicker than every 50 ms and applies the latest. A state is at
+most 2 KB of JSON.
+
+### Step 3 — Two people on one board
+
+Sign in as `member@example.com` in one browser and `colleague@example.com` in another, and open
+board 1 in both. Each sees two faces. Start dragging a card as the member: on the colleague's
+screen it is highlighted with the member's name, and it stops being when the member lets go. In
+the developer tools the colleague's socket shows a `presence` frame after `ready` — the list —
+and then `presence_diff` frames: `joined`, `updated` with the member's `{"dragging":3}`, `left`.
+
+Now sign in as `outsider@example.com` and open board 1. The subscription is refused with the same
+`unavailable` a board that does not exist gets, and the outsider is in nobody's list: presence is
+shown only to members who passed the board's read check, and someone refused is never a member.
+
+### Step 4 — Publishing on a board
+
+A state is what a member *is* doing. An element is something that *happened*. On a stream whose
+settings let pages publish, a page can send one to everybody else on the topic:
+
+```ts
+const { publish } = usePresence(live.board_presence, board);
+publish({ dragging: cardId });
+```
+
+(or `usePublish(live.board_presence, board)` for a component that does not join). The server
+checks the value against the declared keys, and stamps the envelope's `source` with who sent it
+— `{"user": …, "connection": …}` — whatever the page put there, so nobody can publish in someone
+else's name. The sender does not get its own element back unless it subscribed with
+`echo: true`. A page that may read the board but not update it — part 3's read-only share, say —
+gets `can_publish: false` in `ready`, and a publish is answered `unavailable`. Publishing is
+limited to 20 a second per page; past that a publish is answered `rate_limited` and the socket
+stays open.
+
+### Step 5 — Closing the tab
+
+Close the colleague's tab. On the member's screen the colleague's face is gone within a second:
+the socket closed, so the member left the room, and the others were sent `left`. The same happens
+when a page unmounts the component, and when access is revoked — take the colleague off the
+board in `board_members` and their face goes from everybody's list at once.
+
+The admin sees all of it too: **Streams → board_presence → Observe** has a **Present now** card
+listing, per board, who has it open and their state.
+
+### What part 4 is
+
+- **Presence** is a stream setting. A topic's members are the pages subscribed to it — one per
+  connection — each shown as `{connection, user_id, …presence_fields, state}`, and a page is sent
+  the list after `ready` (`presence`) and every change after that (`presence_diff`).
+- **Only members see members.** Joining is subscribing, which the topic's read check decides;
+  unsubscribing, a revoke and a closed socket leave.
+- **Pages may publish** when the stream's settings say so: on a `single` stream under its minimum
+  role, on a `row` topic only with **update** access to the row, on a `user` topic never. The
+  server stamps `source`, and the sender is left out unless it asks for `echo`.
+- **Limits**: 20 publishes and 20 presence updates a second per page (`rate_limited` past them),
+  presence states coalesced every 50 ms, and at most 2 KB each (`too_large`).
+
+The definition of done for this part is `part_four_presence_on_the_board` in
+`crates/sc-server/tests/tutorial_live.rs`.
+
+## Part 5 — A collaborative notes app
+
+Presence shows who is looking. This part lets them write together: a note whose text two people
+edit at the same time, each seeing the other's words and cursor as they type, while a third
+person, who may only read the note, watches it change. It is a **document stream**: a document
+kept in a field of a row, merged on the server with [Yjs](https://yjs.dev)'s CRDT so that edits
+made at the same moment never overwrite each other.
+
+It builds on part 1's `todo` application, its Member role, `member@example.com` and part 2's
+`colleague@example.com`. Add one more Member, `reader@example.com`.
+
+### Step 1 — A note with a document in it
+
+In **Tables**, create `notes` with these fields:
+
+- `title` — String;
+- `owner` — Key to `users`;
+- `body` — **Collaborative document** (`collab_doc`);
+- `body_text` — String.
+
+A `collab_doc` field is not like the others. It holds the document's merged state as bytes, and
+nothing writes it but its document stream: the REST API leaves it out of every row it returns
+(the generated `NotesRow` has no `body` at all), and refuses a write that names it, as do the
+`insert_row` and `update_rows` actions and the admin's row editor — a whole value written over a
+document would throw away whatever somebody else was typing. It cannot be filtered or sorted on,
+and no formula can read it. `body_text` is where its text will be readable.
+
+Create `shares` too — `note` (Key to `notes`), `user` (Key to `users`), `can_edit` (Bool) — and
+give `notes` this read rule on the **Ownership** tab:
+
+```
+owner === user.id || sharesↃnote.some(s => s.user === user.id && (_read || s.can_edit))
+```
+
+The owner may do anything; a share lets its user read the note, and edit it only with
+`can_edit`. Add a note owned by `member@example.com`, and share it with `colleague@example.com`
+(`can_edit` on) and `reader@example.com` (`can_edit` off).
+
+### Step 2 — The document stream
+
+Open **Streams → New**, name it `note_body`, pick **Collaborative document**, and fill in:
+
+```json
+{
+  "table": "notes",
+  "field": "body",
+  "root": "default",
+  "root_kind": "xml",
+  "text_mirror": "body_text",
+  "mirror_format": "text"
+}
+```
+
+- **Table** and **Document field** — where each note's document is kept. A subscriber names a
+  row (the topic is a note's id) and may open it only if it may **read** that note — the same
+  read the REST API makes. It may **edit** only if it may **update** the note.
+- **Root** and **Root kind** — what the editor binds to. TipTap and ProseMirror edit an `xml`
+  root called `default`; CodeMirror and Monaco edit a `text` root. The server must know which,
+  to read the document's text.
+- **Text mirror** — a String field the server keeps equal to the document's text, as plain text
+  (one line per paragraph) or, with **Mirror format** `json`, as Yjs's `root.toJSON()`. It is an
+  ordinary column: searchable, filterable, readable over REST.
+- **Minimum role to observe** — Member (40).
+
+Tick `note_body` in the application's **Streams** (the application must include `notes`, or the
+save is refused) and rebuild. The project now has `src/feldspar/live-doc.ts` — generated only for
+an application that exposes a document stream, and the only generated file that imports `yjs` —
+with `docs.note_body` and the `useDocument` hook.
+
+### Step 3 — An editor
+
+Install TipTap and its collaboration extensions as ordinary dependencies (`yjs` and
+`y-protocols` are in the project already):
+
+```sh
+npm install @tiptap/react @tiptap/starter-kit @tiptap/extension-collaboration @tiptap/extension-collaboration-cursor
+```
+
+and add a page:
+
+```tsx
+import { EditorContent, useEditor } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Collaboration from "@tiptap/extension-collaboration";
+import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
+import type * as Y from "yjs";
+import type { Awareness } from "y-protocols/awareness";
+import { docs, useDocument } from "../feldspar/live-doc";
+import { useT } from "../feldspar/i18n";
+
+function NoteEditor(props: { doc: Y.Doc; awareness: Awareness; field: string; readOnly: boolean; name: string }) {
+  const editor = useEditor(
+    {
+      editable: !props.readOnly,
+      extensions: [
+        StarterKit.configure({ history: false }),
+        Collaboration.configure({ document: props.doc, field: props.field }),
+        CollaborationCursor.configure({
+          provider: { awareness: props.awareness },
+          user: { name: props.name, color: "#f783ac" },
+        }),
+      ],
+    },
+    [props.doc, props.readOnly],
+  );
+  return <EditorContent editor={editor} />;
+}
+
+export default function NotePage({ note, name }: { note: number; name: string }) {
+  const { t } = useT();
+  const { doc, awareness, field, readOnly, status, error } = useDocument(docs.note_body, note);
+  if (error) return <p>{error.message}</p>;
+  if (!doc || !awareness) return <p>{t("Opening the note…")}</p>;
+  return (
+    <section>
+      {readOnly && <p>{t("You can read this note but not edit it.")}</p>}
+      {status === "reconnecting" && <p>{t("Reconnecting — your edits are kept.")}</p>}
+      <NoteEditor doc={doc} awareness={awareness} field={field} readOnly={readOnly} name={name} />
+    </section>
+  );
+}
+```
+
+Load it with `React.lazy(() => import("./pages/NotePage"))` inside a `<Suspense>`, so `yjs` and
+TipTap are in that page's chunk and nowhere else.
+
+`useDocument(docs.note_body, note)` opens the note's document while the component is mounted.
+`doc` is a `Y.Doc` and `awareness` its awareness — what TipTap's `Collaboration` and
+`CollaborationCursor` take, unchanged; `field` is the stream's root, so the editor and the server
+cannot disagree about it. The server sends the whole document when the page subscribes
+(`doc_sync`), and every other member's edit after that (`doc_update`); the page sends its own.
+Cursors are presence: a page's awareness — its cursor, its selection, its name and colour — is
+its member state, which the server passes on without looking inside.
+
+### Step 4 — Two people writing, one reading
+
+Sign in as `member@example.com`, `colleague@example.com` and `reader@example.com` in three
+browsers and open the note in each. The member and the colleague type: each sees the other's
+words and a named cursor as they are typed, and edits made at the same spot both survive. The
+reader sees it all happen and cannot type — `doc_sync` said `read_only: true`, and a `doc_update`
+from the reader's socket would be answered `unavailable` and applied nowhere. `outsider@example.com`
+gets `unavailable` when opening the note, exactly as for a note that does not exist.
+
+Turn the colleague's `can_edit` off in `shares`: their editor becomes read-only at once (they are
+sent the document again with `read_only: true`). Delete the share: their subscription is
+`revoked`.
+
+Pull the network cable on the member's machine (or stop the server for a moment) and keep typing:
+the page says it is reconnecting and keeps the edits. When it is back, the server sends the
+document again and the page answers with what the server has not seen — the edits typed offline
+arrive, merged with whatever the colleague wrote meanwhile.
+
+### Step 5 — Saved
+
+Close every tab and open the note again: the text is there. The server keeps each open document
+in a room, and saves it into its row two seconds after the last edit and when the last editor
+leaves — in one transaction that locks the row and merges with what is stored, so two servers
+saving one note lose nothing. A save with nothing new writes nothing.
+
+`GET /api/notes` shows the text in `body_text`, and has no `body`:
+
+```json
+[{ "id": 1, "title": "Plans", "owner": "…", "body_text": "Agenda\nBudget" }]
+```
+
+A save is an ordinary update of the row, so an **update trigger on `notes` fires about every two
+seconds while someone types** — useful for keeping a search index current, a poor place for an
+e-mail. A trigger's own code can read a document and add to it:
+
+```js
+const doc = live.document("note_body", row.id);
+const text = await doc.text();
+await doc.append("Summary: " + text.split("\n").length + " paragraphs");
+```
+
+`append` adds a paragraph to an `xml` root (and text to the end of a `text` one); on a `text`
+root, `insert`, `delete` and `edit` change the text anywhere. Each is a CRDT edit: it merges with
+what people are typing, appears in their editors at once, and is saved before the call returns.
+Python's `live.document(...)` is the same, without `await`.
+
+### What part 5 is
+
+- **A `collab_doc` field** holds a document. No API reads or writes it; its **text mirror** is how
+  its text is read.
+- **A document stream** opens one row's document: read access to open it, update access to edit
+  it, re-checked while it stays open (a lost edit right is `read_only`, a lost read right is
+  `revoked`). Presence is always on, and a member's state is its editor's awareness.
+- **The server merges** with `yrs`, the Rust port of Yjs, so the browser keeps the standard `yjs`
+  package and its editor bindings. It saves debounced and on close, merging with what is stored.
+- **Limits**: a document is at most 2 MB, and an edit that would pass that is refused
+  `too_large`; an edit frame may be up to 1 MB (a long paste), every other frame 64 KB; edits
+  count against the 20-a-second publish rate.
+
+The definition of done for this part is `crates/sc-server/tests/tutorial_live_documents.rs`.
