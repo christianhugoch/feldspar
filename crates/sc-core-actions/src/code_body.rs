@@ -192,6 +192,8 @@ pub struct Hosts<'a> {
     /// capability: every body has a console, and this is only whether anybody
     /// is reading it.
     console: Option<ConsoleSink>,
+    /// The code libraries this run's `lib()` may import (TODO F3.2).
+    libraries: Option<Arc<sc_expr::CodeLibraries>>,
 }
 
 impl<'a> Hosts<'a> {
@@ -229,7 +231,11 @@ impl<'a> Hosts<'a> {
             // role rather than its user, because a file rule is a role floor:
             // `as_user` is checked against it, and the admin default clears
             // every one.
-            files: FileStoreHost::new(ctx.catalog).caused_by(ctx.event.role),
+            files: FileStoreHost::new(ctx.catalog)
+                .caused_by(ctx.event.role, ctx.event.user.as_ref())
+                // Where the custom query's application serves files, so
+                // `file.url()` can say (TODO F2.8); none for a trigger.
+                .with_urls(ctx.file_urls().cloned()),
             // The other triggers, when this context has a dispatcher — and
             // nothing at all when it does not, so a body that names `trigger`
             // outside a server says so by name. It carries the caller *and* the
@@ -269,6 +275,10 @@ impl<'a> Hosts<'a> {
             live: ctx.catalog.live_host(),
             // Whoever asked for the transcript, if anyone did.
             console: ctx.console().cloned(),
+            // What `lib()` may import (TODO F3.2): the application's libraries
+            // over the instance's for a custom query, the instance's alone for
+            // a trigger.
+            libraries: ctx.catalog.code_libraries_for(ctx.application()),
         }
     }
 
@@ -313,6 +323,7 @@ impl<'a> Hosts<'a> {
             schema: self.schema(),
             console: self.console.clone(),
             timeout,
+            libraries: self.libraries.clone(),
             ..CodeCall::default()
         }
     }

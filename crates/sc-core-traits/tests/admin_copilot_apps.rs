@@ -344,6 +344,76 @@ async fn deleting_a_query_needs_the_drop_grant_and_says_what_it_was() -> Result<
     Ok(())
 }
 
+/// TODO F1.6: `public: true` is `min_role: 100`, on the way in and on the way
+/// out, under the same grant.
+#[tokio::test]
+async fn public_is_a_synonym_for_role_100_both_ways() -> Result<()> {
+    let env = Env::with_schema(SCHEMA).await?;
+    app_with_api(&env).await?;
+
+    let mut public = top_authors();
+    public["public"] = json!(true);
+    let err = call(&env, &default_grants(), TOOL_SAVE_QUERY, public.clone())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("allow_access_changes"), "{err}");
+
+    let result = call(&env, &all_grants(), TOOL_SAVE_QUERY, public).await?;
+    assert_eq!(result["query"]["min_role"], json!(100));
+    assert_eq!(result["query"]["public"], json!(true));
+    assert_eq!(stored(&env).await?[0].min_role, 100);
+
+    let described = call(&env, &default_grants(), TOOL_DESCRIBE_APPS, json!({})).await?;
+    let query = &described["applications"][0]["apis"][0]["queries"][0];
+    assert_eq!(
+        (&query["min_role"], &query["public"]),
+        (&json!(100), &json!(true))
+    );
+
+    // Both together must agree.
+    let mut both = top_authors();
+    both["public"] = json!(true);
+    both["min_role"] = json!(40);
+    let err = call(&env, &all_grants(), TOOL_SAVE_QUERY, both)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disagree"), "{err}");
+    let mut agreeing = top_authors();
+    agreeing["public"] = json!(false);
+    agreeing["min_role"] = json!(40);
+    let result = call(&env, &all_grants(), TOOL_SAVE_QUERY, agreeing).await?;
+    assert_eq!(result["query"]["public"], json!(false));
+    assert_eq!(result["query"]["min_role"], json!(40));
+    Ok(())
+}
+
+/// TODO F1.1: a code query that declares no parameters is saved with a note
+/// saying its client method still takes a body, untyped.
+#[tokio::test]
+async fn a_code_query_with_no_params_is_saved_with_a_note() -> Result<()> {
+    let env = Env::with_schema(SCHEMA).await?;
+    app_with_api(&env).await?;
+    let result = call(
+        &env,
+        &default_grants(),
+        TOOL_SAVE_QUERY,
+        json!({
+            "application": "blog",
+            "name": "echo",
+            "method": "POST",
+            "path": "/echo",
+            "language": "javascript",
+            "code": "return body;",
+        }),
+    )
+    .await?;
+    let notes = result["notes"].to_string();
+    assert!(notes.contains("declares no parameters"), "{notes}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn describing_the_applications_reports_the_apis_and_their_queries() -> Result<()> {
     let env = Env::with_schema(SCHEMA).await?;
@@ -392,7 +462,7 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
     let all = offered(&default_grants());
     assert!(all.contains(&TOOL_DESCRIBE_APPS.to_owned()), "{all:?}");
     assert!(all.contains(&TOOL_DESCRIBE_TRIGGERS.to_owned()), "{all:?}");
-    assert_eq!(all.len(), 17, "{all:?}");
+    assert_eq!(all.len(), 20, "{all:?}");
 
     // Switched off, the tools are *gone* rather than present and refusing: a tool
     // the model can see is a tool it will try. The code-body reference stays, as
@@ -427,6 +497,13 @@ async fn the_areas_decide_which_tools_the_model_is_offered() -> Result<()> {
         "{names:?}"
     );
     assert!(!names.contains(&TOOL_SAVE_QUERY.to_owned()), "{names:?}");
+    // The code libraries are application work: a library is code the app's
+    // queries run, and an agent kept off applications cannot write it.
+    assert!(all.contains(&"save_code_library".to_owned()), "{all:?}");
+    assert!(
+        !names.contains(&"save_code_library".to_owned()),
+        "{names:?}"
+    );
     // The trait's own two are application work too, and go with the area.
     for own in [
         "delegate_to_coding_agent",
@@ -614,5 +691,101 @@ async fn update_application_checks_each_section_s_grant_before_changing_anything
     .unwrap_err()
     .to_string();
     assert!(nothing.contains("at least one of"), "{nothing}");
+    Ok(())
+}
+
+/// `update_application`'s `uploads` section (TODO F2.6): an edit, so it needs
+/// `allow_edit`; a slot naming a store the app was not connected to connects
+/// it; a hook that is not one of the app's code queries is refused by the
+/// form's own validation; and `describe_applications` shows each slot with the
+/// route a client uploads to.
+#[tokio::test]
+async fn upload_slots_are_an_edit_and_are_validated_like_the_form() -> Result<()> {
+    let env = Env::with_schema(SCHEMA).await?;
+    app_with_api(&env).await?;
+    env.with_file_store("media", None).await?;
+    let slot = json!({
+        "name": "drop", "store": "media", "folder": "drops",
+        "min_role": 80, "max_bytes": 1_073_741_824u64, "mime_allow": ["video/mp4"],
+    });
+
+    let no_edit = config(&[("allow_edit", json!(false))]);
+    let refused = call(
+        &env,
+        &no_edit,
+        "update_application",
+        json!({ "application": "blog", "uploads": { "add": [slot.clone()] } }),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains("allow_edit"), "{refused}");
+
+    let hooked = call(
+        &env,
+        &default_grants(),
+        "update_application",
+        json!({ "application": "blog", "uploads": { "add": [
+            { "name": "drop", "store": "media", "hook": "nothing" }
+        ] } }),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(hooked.contains("not one of"), "{hooked}");
+
+    let added = call(
+        &env,
+        &default_grants(),
+        "update_application",
+        json!({ "application": "blog", "uploads": { "add": [slot.clone()] } }),
+    )
+    .await?;
+    assert_eq!(added["connected_file_stores"], json!(["media"]), "{added}");
+    assert_eq!(
+        added["uploads"][0]["max_bytes"],
+        json!(1_073_741_824u64),
+        "{added}"
+    );
+    assert_eq!(added["was"]["uploads"], json!([]), "{added}");
+    let stored = load_application_by_subdomain(&env.catalog, "blog")
+        .await?
+        .unwrap();
+    assert_eq!(stored.uploads.len(), 1);
+    assert_eq!(stored.uploads[0].folder, "drops");
+    assert_eq!(stored.uploads[0].min_role, 80);
+    assert_eq!(stored.uploads[0].mime_allow, vec!["video/mp4".to_owned()]);
+
+    let described = call(&env, &default_grants(), TOOL_DESCRIBE_APPS, json!({})).await?;
+    let blog = described["applications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["subdomain"] == "blog")
+        .unwrap();
+    assert_eq!(
+        blog["uploads"][0]["route"],
+        json!("/api/_upload/drop"),
+        "{blog}"
+    );
+
+    let removed = call(
+        &env,
+        &default_grants(),
+        "update_application",
+        json!({ "application": "blog", "uploads": { "remove": ["drop"] } }),
+    )
+    .await?;
+    assert_eq!(removed["uploads"], json!([]), "{removed}");
+    let unknown = call(
+        &env,
+        &default_grants(),
+        "update_application",
+        json!({ "application": "blog", "uploads": { "remove": ["drop"] } }),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(unknown.contains("no upload slot"), "{unknown}");
     Ok(())
 }

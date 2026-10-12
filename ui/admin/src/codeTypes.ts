@@ -70,8 +70,20 @@ export type ModuleFunctionInfo = {
  * nothing at all.
  *
  * `request` says the body is an application's **custom query** (§13.4): it has
- * no event, so no `payload`, and is bound the request as `body` and `query`. */
-export type CodeScope = { table?: string; event?: string; run?: boolean; request?: boolean };
+ * no event, so no `payload`, and is bound the request as `body`, `query` and
+ * `request`. `bytes` says its body is the raw request body (TODO F2.9).
+ *
+ * `library` says the code is a **code library** (TODO F3): it is bound
+ * `exports` and `module` to export through, and the importing run's handles and
+ * `user` — but no event and no request, which are the importer's. */
+export type CodeScope = {
+  table?: string;
+  event?: string;
+  run?: boolean;
+  request?: boolean;
+  bytes?: boolean;
+  library?: boolean;
+};
 
 /** The join separator between a key field and a column of the table it points
  * at (`customerⱵemail`) — `sc_expr::JOIN`. */
@@ -411,7 +423,25 @@ interface ScFileMeta {
   /** The rule that actually applies, given the store's floor and every
    * directory above this entry — read-only, and the one to believe. */
   effectiveMinRole: number | null;
+  /** Who owns it, as a user id: the owner may read it whatever its rule, and
+   * only the owner (or admin authority) may change it. */
+  owner: string | null;
   attributes: Record<string, string>;
+}
+
+/** What a write records beside the bytes. */
+interface ScWriteOptions {
+  /** The owner to record (a user id, or null for none). Admin authority only:
+   * under \`asUser()\` the file is the caller's, and naming anyone else is
+   * refused. */
+  owner?: string | null;
+  /** The access rule to set on the file. Under \`asUser()\` it may only tighten. */
+  minRole?: number;
+  /** The same as \`minRole\`. */
+  min_role?: number;
+  /** The name to serve it under (\`attributes.filename\`), when that is not
+   * the path's own. */
+  filename?: string;
 }
 
 /** What a file can be written from.
@@ -432,6 +462,12 @@ declare class ScFile {
   /** The last component of the path. */
   readonly name: string;
   readonly isDirectory: false;
+  /** Bytes, as of the listing this file came from; \`undefined\` on a file that
+   * was opened rather than listed — \`await stat()\` for that. */
+  readonly size: number | null | undefined;
+  /** RFC 3339, as of the listing (null where the store does not record it);
+   * \`undefined\` on a file that was opened rather than listed. */
+  readonly modified: string | null | undefined;
   readonly store: ScFileStore;
   readonly parent: ScDir;
   /** Whether a **file** is there. A directory of the same name is not one, and
@@ -445,9 +481,9 @@ declare class ScFile {
   arrayBuffer(): Promise<ArrayBuffer>;
   /** Create or replace, making the parent directories on the way. Answers the
    * number of bytes written. */
-  write(data: ScWritable): Promise<number>;
+  write(data: ScWritable, options?: ScWriteOptions): Promise<number>;
   /** The same, but refuses to replace a file that is already there. */
-  create(data: ScWritable): Promise<number>;
+  create(data: ScWritable, options?: ScWriteOptions): Promise<number>;
   /** Whether there was anything to delete. */
   delete(): Promise<boolean>;
   /** Move it, within this store or to a file in another, and answer where it
@@ -455,10 +491,28 @@ declare class ScFile {
   moveTo(dest: ScFile | string): Promise<ScFile>;
   /** Copy it, on the same terms. The bytes never enter the sandbox. */
   copyTo(dest: ScFile | string): Promise<ScFile>;
+  /** A piece of the file: at most \`length\` bytes from \`offset\` (both
+   * default to the whole file). How a file larger than one read may carry
+   * (the server's --code-max-file-bytes, 8 MB by default) is read. */
+  read(options?: { offset?: number; length?: number }): Promise<Uint8Array>;
+  /** Add to the end, creating the file if it is not there. Answers the number
+   * of bytes appended. */
+  append(data: string | Uint8Array | ArrayBuffer, options?: ScWriteOptions): Promise<number>;
+  /** Join files of this store, in order, into this one (replacing it),
+   * host-side — up to --code-max-copy-bytes, 256 MB by default. Answers the
+   * size. */
+  concat(parts: (ScFile | string)[], options?: ScWriteOptions): Promise<number>;
+  /** The SHA-256 of the file, as lower-case hex, taken host-side. */
+  sha256(): Promise<string>;
+  /** The URL the application serves this file at (a static directory, or a
+   * Saltcorn UI app's \`/files/serve\`), or null when no route does. Who may
+   * fetch it is decided then. */
+  url(options?: { download?: boolean }): Promise<string | null>;
   meta(): Promise<ScFileMeta>;
   /** Replace this entry's metadata — read it first if what you want is a change
-   * to one attribute. A delegated body may tighten a rule, never loosen one. */
-  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string> }): Promise<ScFile>;
+   * to one attribute. A delegated body may tighten a rule, never loosen one.
+   * The owner is kept unless given, and only admin authority may change it. */
+  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string>; owner?: string | null }): Promise<ScFile>;
 }
 
 /** One directory in a store — a reference, like a file. */
@@ -466,6 +520,10 @@ declare class ScDir {
   readonly path: string;
   readonly name: string;
   readonly isDirectory: true;
+  /** Null for a listed directory; \`undefined\` on one that was not listed. */
+  readonly size: number | null | undefined;
+  /** As {@link ScFile.modified}. */
+  readonly modified: string | null | undefined;
   readonly store: ScFileStore;
   /** Null at the store's root. */
   readonly parent: ScDir | null;
@@ -482,7 +540,7 @@ declare class ScDir {
   /** It and everything in it. */
   delete(): Promise<boolean>;
   meta(): Promise<ScFileMeta>;
-  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string> }): Promise<ScFile>;
+  setMeta(meta: { minRole?: number | null; attributes?: Record<string, string>; owner?: string | null }): Promise<ScFile>;
 }
 
 /** One file store, as a code body reaches it. */
@@ -887,11 +945,32 @@ export function scopeDeclarations(
     `/** Whoever caused the event, or null for the server's own events. */\n` +
       `declare const user: ScUser | null;`,
   );
-  if (scope.request) {
+  if (scope.request && scope.bytes) {
+    parts.push(
+      `/** The raw request body (this query's body type is \`bytes\`). Its\n` +
+        ` * declared parameters arrive in \`query\`. */\ndeclare const body: Uint8Array;`,
+    );
+  } else if (scope.request) {
     parts.push(
       `/** The request's JSON body — \`{}\` when there was none. A declared\n` +
         ` * parameter arrives here, converted to its type, for a method with a\n` +
         ` * body. */\ndeclare const body: any;`,
+    );
+  }
+  if (scope.library) {
+    parts.push(
+      `/** What this library exports: \`exports.f = …\` makes \`lib("name").f\`. */\n` +
+        `declare const exports: Record<string, any>;`,
+    );
+    parts.push(
+      `/** CommonJS's module: \`module.exports = { … }\` replaces the exports. */\n` +
+        `declare const module: { exports: any };`,
+    );
+  } else if (scope.request) {
+    parts.push(
+      `/** The HTTP request: its method, content type and headers (lower-cased;\n` +
+        ` * cookies and credentials removed). */\n` +
+        `declare const request: { method: string; contentType: string | null; headers: Record<string, string> };`,
     );
     parts.push(
       `/** The request's query string, one value per key. A declared parameter\n` +
@@ -1016,24 +1095,174 @@ export function scopeDeclarations(
   return `${parts.join("\n\n")}\n`;
 }
 
+/** The web globals a code body has (TODO F1.2, F1.3): base64, the UTF-8
+ * codecs and \`crypto\`. The editor's lib is \`es2022\` with no DOM, so they are
+ * declared here — a transcription of \`sc-expr\`'s \`SETUP\` and fetch
+ * prelude, on the same terms as {@link chainDeclarations}. */
+export function webDeclarations(): string {
+  return `
+/** Base64 of a binary string (one character per byte, up to U+00FF). For
+ * text, encode it first: \`btoa(String.fromCharCode(...new TextEncoder().encode(text)))\`. */
+declare function btoa(data: string): string;
+/** The binary string a base64 string encodes. Throws on anything not base64. */
+declare function atob(data: string): string;
+
+/** UTF-8, the only encoding there is here. */
+declare class TextEncoder {
+  readonly encoding: "utf-8";
+  encode(input?: string): Uint8Array;
+  encodeInto(source: string, destination: Uint8Array): { read: number; written: number };
+}
+
+/** UTF-8 only. \`fatal: true\` throws on bytes that are not UTF-8 instead of
+ * decoding them as U+FFFD. There is no streaming: decode the whole buffer. */
+declare class TextDecoder {
+  constructor(label?: "utf-8" | "utf8", options?: { fatal?: boolean; ignoreBOM?: boolean });
+  readonly encoding: "utf-8";
+  readonly fatal: boolean;
+  readonly ignoreBOM: boolean;
+  decode(input?: ArrayBuffer | ArrayBufferView): string;
+}
+
+type ScHash = "SHA-256" | "SHA-384" | "SHA-512";
+type ScBytes = ArrayBuffer | ArrayBufferView;
+
+/** An HMAC key from \`crypto.subtle.importKey\`. Its bytes are not readable
+ * from the object. */
+declare class CryptoKey {
+  readonly type: "secret";
+  readonly extractable: boolean;
+  readonly algorithm: { name: "HMAC"; hash: { name: ScHash }; length: number };
+  readonly usages: ReadonlyArray<"sign" | "verify">;
+}
+
+/** The Web Crypto subset this sandbox has: SHA-2 digests and HMAC. */
+interface ScSubtle {
+  digest(algorithm: ScHash | { name: ScHash }, data: ScBytes): Promise<ArrayBuffer>;
+  importKey(
+    format: "raw",
+    keyData: ScBytes,
+    algorithm: { name: "HMAC"; hash: ScHash | { name: ScHash } },
+    extractable: boolean,
+    keyUsages: Array<"sign" | "verify">,
+  ): Promise<CryptoKey>;
+  exportKey(format: "raw", key: CryptoKey): Promise<ArrayBuffer>;
+  sign(algorithm: "HMAC" | { name: "HMAC" }, key: CryptoKey, data: ScBytes): Promise<ArrayBuffer>;
+  /** Compared in constant time. */
+  verify(
+    algorithm: "HMAC" | { name: "HMAC" },
+    key: CryptoKey,
+    signature: ScBytes,
+    data: ScBytes,
+  ): Promise<boolean>;
+}
+
+/** Passwords, hashed the way this server hashes its own accounts' (argon2id).
+ * The work happens off the JavaScript thread, so it does not count against
+ * the body's time slice.
+ *
+ * \`\`\`js
+ * const hash = await crypto.password.hash(body.password); // store this
+ * if (!(await crypto.password.verify(body.password, row.hash))) throw httpError(403, "wrong password");
+ * \`\`\` */
+interface ScPassword {
+  hash(password: string): Promise<string>;
+  /** False for a wrong password; throws when \`hash\` is not a password hash. */
+  verify(password: string, hash: string): Promise<boolean>;
+}
+
+/** Answer the HTTP caller with \`status\` (400–599) and \`{ error: message }\`,
+ * or \`body\` when given. It throws, so write \`throw httpError(…)\` to say so.
+ * Only a body serving a request (a custom query, a trigger called as an
+ * endpoint) has a caller to answer; anywhere else it is a failure. */
+declare function httpError(status: number, message?: string, body?: unknown): never;
+
+/** What \`response(…)\` answers: return it from the body. */
+interface ScHttpAnswer {
+  readonly status: number;
+  readonly headers: ReadonlyArray<[string, string]>;
+  readonly body: unknown;
+}
+
+/** A success with a status (200–599) and headers of the body's choosing:
+ * \`return response({ status: 201, headers: { "x-id": id }, body: { id } })\`.
+ * The server's own headers (\`set-cookie\`, the CSP, framing) are refused, and
+ * so is \`content-type\` on a JSON body.
+ *
+ * A \`Uint8Array\` body is served as raw bytes under the \`content-type\` the
+ * headers name. A **file** (\`file: fs(store).open(path)\`) is streamed by the
+ * server with Range support and no size limit, named \`filename\` (default: the
+ * file's own) and saved rather than shown when \`download\` is true — this is
+ * how a query decides who may download a file (a password, an expiry, a
+ * revoked share). Set the query's response type to \`bytes\` so its client
+ * method returns a \`Blob\`. */
+declare function response(init: {
+  status?: number;
+  headers?: Record<string, string> | [string, string][];
+  body?: unknown;
+} | {
+  file: ScFile;
+  filename?: string;
+  download?: boolean;
+  headers?: Record<string, string> | [string, string][];
+}): ScHttpAnswer;
+
+/** Randomness, digests, HMAC and password hashes. Never hand-write SHA or
+ * base64 in a body. */
+declare const crypto: {
+  /** Fill an integer typed array with random values (at most 65 536 bytes)
+   * and return it. */
+  getRandomValues<T extends Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | BigInt64Array | BigUint64Array>(array: T): T;
+  /** A random version-4 UUID. */
+  randomUUID(): string;
+  readonly subtle: ScSubtle;
+  readonly password: ScPassword;
+};
+`;
+}
+
 /** The whole ambient library handed to the editor. */
 export function codeLibrary(
   tables: TableInfo[],
   scope: CodeScope,
   functions: ModuleFunctionInfo[] = [],
+  libraries: string[] = [],
 ): string {
   return [
     "// The Saltcorn code sandbox, as types. Generated by the admin UI from this",
     "// server's tables; not a file in any project.",
     "",
     chainDeclarations(),
+    webDeclarations(),
     fileDeclarations(),
     triggerDeclarations(),
     modelDeclarations(),
     moduleFunctionDeclarations(functions),
     tableDeclarations(tables),
     scopeDeclarations(scope, tables, functions),
+    libDeclarations(libraries),
   ].join("\n");
+}
+
+/** `lib(name)`, the code libraries' import (TODO F3), typed with the names
+ * there are. What a library exports is not typed: it is whatever its code
+ * assigns, so `any` — a wrong-but-quiet type is worse than an honest one. */
+export function libDeclarations(names: string[]): string {
+  const unique = [...new Set(names)].sort();
+  const param = unique.length > 0 ? unique.map((n) => JSON.stringify(n)).join(" | ") : "string";
+  return (
+    `/** Import a code library: shared code an admin keeps under Settings →\n` +
+    ` * Development → Code library. An application's own library of the name wins\n` +
+    ` * over the instance-wide one; a trigger imports instance-wide ones only.\n` +
+    ` *\n` +
+    ` * \`\`\`js\n` +
+    ` * const { requireUser } = lib("auth");\n` +
+    ` * \`\`\`\n` +
+    ` *\n` +
+    ` * The library runs with this run's own \`db\`, \`fs\`, \`fetch\` and \`user\`, once\n` +
+    ` * per run however often it is imported. */\n` +
+    `declare function lib(name: ${param}): any;\n`
+  );
 }
 
 /** The catalog the declarations are built from, read once per page.
@@ -1117,4 +1346,22 @@ export async function loadModuleFunctions(): Promise<ModuleFunctionInfo[]> {
 export function moduleFunctions(): Promise<ModuleFunctionInfo[]> {
   moduleFunctionCache ??= loadModuleFunctions();
   return moduleFunctionCache;
+}
+
+/** The code libraries' names, cached like the catalog — but forgotten when the
+ * Code library screen saves or deletes one, since that screen is in this page. */
+let libraryNameCache: Promise<string[]> | null = null;
+
+/** The names `lib()` can import, or none if they cannot be read. */
+export function libraryNames(): Promise<string[]> {
+  libraryNameCache ??= api
+    .listCodeLibraries()
+    .then((listed) => listed.map((l) => l.name))
+    .catch(() => []);
+  return libraryNameCache;
+}
+
+/** Read the names again next time — after a library is saved or deleted. */
+export function forgetLibraryNames(): void {
+  libraryNameCache = null;
 }

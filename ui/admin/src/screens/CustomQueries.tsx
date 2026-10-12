@@ -36,17 +36,22 @@ import {
   QUERY_METHODS,
   blankParamRow,
   blankQueryRow,
+  bodyTypeApplies,
   describeBody,
   isCode,
   languageLabel,
   languageOptions,
+  needsParamsNote,
   pythonAvailable,
+  responseTypeApplies,
   statusSummary,
   type CheckStatus,
+  type PayloadType,
   type QueryLanguage,
   type QueryRow,
 } from "../customQueries";
-import { roleOptions, useRoles } from "../roles";
+import { PublicBadge } from "../layout";
+import { isPublic, roleOptions, useRoles } from "../roles";
 import { T, useT } from "../i18n";
 
 /** The queries of one API row, edited in place.
@@ -225,6 +230,7 @@ export function CustomQueries({
               <Col md={2}>
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-role`}>
                   <T text="Minimum role" />
+                  {isPublic(query.minRole) && <PublicBadge className="ms-2" />}
                 </Form.Label>
                 <Form.Select
                   id={`${idPrefix}-q${index}-role`}
@@ -254,6 +260,43 @@ export function CustomQueries({
               />
             </Form.Group>
 
+            {responseTypeApplies(query) && (
+              <Row className="g-2 mb-2">
+                {bodyTypeApplies(query) && (
+                  <Col md={4}>
+                    <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-body-type`}>
+                      <T text="Body" />
+                    </Form.Label>
+                    <Form.Select
+                      id={`${idPrefix}-q${index}-body-type`}
+                      value={query.bodyType}
+                      onChange={(e) =>
+                        setQuery(index, { ...query, bodyType: e.target.value as PayloadType })
+                      }
+                    >
+                      <option value="json">{t("JSON object")}</option>
+                      <option value="bytes">{t("Raw bytes (Uint8Array)")}</option>
+                    </Form.Select>
+                  </Col>
+                )}
+                <Col md={4}>
+                  <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-response-type`}>
+                    <T text="Response" />
+                  </Form.Label>
+                  <Form.Select
+                    id={`${idPrefix}-q${index}-response-type`}
+                    value={query.responseType}
+                    onChange={(e) =>
+                      setQuery(index, { ...query, responseType: e.target.value as PayloadType })
+                    }
+                  >
+                    <option value="json">{t("JSON")}</option>
+                    <option value="bytes">{t("Bytes or a file (Blob)")}</option>
+                  </Form.Select>
+                </Col>
+              </Row>
+            )}
+
             {isCode(query.language) ? (
               <Form.Group className="mb-2">
                 <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-code`}>
@@ -265,7 +308,10 @@ export function CustomQueries({
                   key={query.language}
                   id={`${idPrefix}-q${index}-code`}
                   language={query.language}
-                  scope={{ request: true }}
+                  scope={{
+                    request: true,
+                    bytes: query.bodyType === "bytes" && bodyTypeApplies(query),
+                  }}
                   value={query.code}
                   onChange={(code) => setQuery(index, { ...query, code })}
                 />
@@ -313,8 +359,13 @@ export function CustomQueries({
                   <T text="Add parameter" />
                 </Button>
               </div>
-              {query.params.length === 0 && (
+              {query.params.length === 0 && !needsParamsNote(query) && (
                 <div className="text-muted small">None.</div>
+              )}
+              {needsParamsNote(query) && (
+                <div className="text-muted small" data-testid="undeclared-params-note">
+                  <T text="None declared. The client method still sends its arguments, typed as an open object, and the code reads all of them — but nothing is typed or checked. Declare the parameters the code reads to type the client method and have each converted before the body runs." />
+                </div>
               )}
               {query.params.map((param, pi) => (
                 <Row key={pi} className="mb-2 align-items-end">

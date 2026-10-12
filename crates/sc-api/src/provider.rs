@@ -49,10 +49,14 @@ pub struct ApiRequest {
     pub query: Vec<(String, String)>,
     /// The parsed JSON request body ([`Json::Null`] when there was none).
     pub body: Json,
-    /// The raw, unparsed request body, set by the transport when the caller sent
-    /// something other than JSON — a file upload's bytes (§4). `None` for every
-    /// JSON request, so a provider that never asks for bytes never sees them.
+    /// The raw, unparsed request body as it arrived — a file upload's bytes
+    /// (§4), a `bytes` code query's body (TODO F2.9). Set by the transport for
+    /// every request with a body; a JSON body is in [`body`](Self::body) too.
     pub raw: Option<Bytes>,
+    /// The request's headers, lower-cased, without the ones that carry
+    /// credentials (`cookie`, `authorization`, the CSRF token): what a code
+    /// query's `request.headers` shows. Empty where there was no HTTP request.
+    pub headers: Vec<(String, String)>,
     /// Where this request arrived and which applications are served beside it —
     /// what an emailed link is built from. Set by the transport for a request
     /// that reached an application; `None` in a test or a tool call, where a
@@ -109,6 +113,7 @@ impl ApiRequest {
             query: Vec::new(),
             body: Json::Null,
             raw: None,
+            headers: Vec::new(),
             links: None,
         }
     }
@@ -221,8 +226,17 @@ pub struct ApiResponse {
     /// these bytes with their content type and `body` is ignored. Boxed so the
     /// download case does not widen every response that is not one.
     pub raw: Option<Box<RawBody>>,
+    /// A store file to serve (a `File` field's download, TODO F2 §2.2). When
+    /// set, the transport serves it through its one file response builder —
+    /// streamed, with Range and its name — and `body` is ignored. The access
+    /// check has been made by whoever set it.
+    pub file: Option<Box<sc_files::ServeFile>>,
     /// The session change for the transport to apply, if any.
     pub session: SessionAction,
+    /// Extra response headers a code query chose with `response({ headers })`
+    /// (TODO F1.4): lower-case names, none of them one the server owns
+    /// ([`sc_expr::SERVER_OWNED_HEADERS`]). Empty for everything else.
+    pub headers: Vec<(String, String)>,
 }
 
 impl ApiResponse {
@@ -232,7 +246,9 @@ impl ApiResponse {
             status: 200,
             body,
             raw: None,
+            file: None,
             session: SessionAction::Keep,
+            headers: Vec::new(),
         }
     }
 
@@ -242,7 +258,9 @@ impl ApiResponse {
             status,
             body,
             raw: None,
+            file: None,
             session: SessionAction::Keep,
+            headers: Vec::new(),
         }
     }
 
@@ -255,7 +273,17 @@ impl ApiResponse {
                 bytes: bytes.into(),
                 content_type: content_type.into(),
             })),
+            file: None,
             session: SessionAction::Keep,
+            headers: Vec::new(),
+        }
+    }
+
+    /// A `200 OK` serving a store file through the transport's file builder.
+    pub fn serve_file(file: sc_files::ServeFile) -> ApiResponse {
+        ApiResponse {
+            file: Some(Box::new(file)),
+            ..ApiResponse::ok(Json::Null)
         }
     }
 
@@ -265,7 +293,9 @@ impl ApiResponse {
             status,
             body: serde_json::json!({ "error": message.into() }),
             raw: None,
+            file: None,
             session: SessionAction::Keep,
+            headers: Vec::new(),
         }
     }
 
@@ -275,7 +305,9 @@ impl ApiResponse {
             status: 200,
             body,
             raw: None,
+            file: None,
             session: SessionAction::Start(user),
+            headers: Vec::new(),
         }
     }
 
@@ -285,7 +317,9 @@ impl ApiResponse {
             status: 200,
             body,
             raw: None,
+            file: None,
             session: SessionAction::End,
+            headers: Vec::new(),
         }
     }
 }
@@ -343,4 +377,22 @@ pub trait ApiProvider: Send + Sync {
         cat: &Arc<Catalog>,
         user: Option<&User>,
     ) -> Result<ApiResponse>;
+
+    /// Run this provider's JavaScript or Python custom query `name` **for the
+    /// server** rather than for a request to its route — an upload slot's hook
+    /// (TODO F2, §2.3) — with `body` as the body it sees and `user` as the
+    /// caller. The query's own `min_role` is not checked: the slot's is, and
+    /// the hook decides the rest.
+    ///
+    /// `None` when this provider has no code query of that name, which is the
+    /// default for a provider that serves none.
+    async fn run_hook(
+        &self,
+        _name: &str,
+        _body: Json,
+        _cat: &Arc<Catalog>,
+        _user: Option<&User>,
+    ) -> Option<Result<ApiResponse>> {
+        None
+    }
 }

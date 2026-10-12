@@ -48,6 +48,7 @@ mod applications;
 mod build;
 mod build_cache;
 mod builder_agent;
+mod code_libraries;
 // The frameworks a module declares (§13.3, §15.1): the same registry answers,
 // written down as data instead of compiled.
 mod declared;
@@ -70,6 +71,7 @@ mod skill;
 mod store;
 mod streams;
 mod target_ops;
+mod uploads;
 
 pub use api::{
     ApiProviderInfo, AppGraphql, api_provider_config_spec, app_client, app_client_with,
@@ -78,13 +80,13 @@ pub use api::{
     serves_custom_queries, validate_api_config, validate_api_mounts, validate_static_dirs,
 };
 pub use application::{
-    ApiConfig, AppId, Application, CspPolicy, FRAME_ANCESTORS, FrameworkRef, StaticDir, StreamRef,
-    TriggerRef, allow_admin_framing, follow_admin_host,
+    ApiConfig, AppFileUrls, AppId, Application, CspPolicy, FRAME_ANCESTORS, FrameworkRef,
+    StaticDir, StreamRef, TriggerRef, allow_admin_framing, follow_admin_host,
 };
 pub use applications::{
     APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
     COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_STREAMS, COL_SUBDOMAIN,
-    COL_TABLES, COL_TRIGGERS, bootstrap,
+    COL_TABLES, COL_TRIGGERS, COL_UPLOADS, bootstrap,
 };
 pub use build::{
     AppSource, BuildReport, TargetInfo, TargetReadiness, TargetReport, app_output_dir,
@@ -101,6 +103,10 @@ pub use builder_agent::{
     TRAIT_CFG_PREVIEW_RELOAD, TRAIT_CFG_PREVIEW_URL, TRAIT_CFG_ROOT, TRAIT_CFG_STORE,
     TRAIT_CFG_WORKFLOW, TRAIT_CODING, TRAIT_HTTP, TRAIT_PREVIEW_PANE, WORKFLOW_PLANNED,
     builder_agent_in, builder_agent_name, framework_builder_agent, preview_pane_url,
+};
+pub use code_libraries::{
+    LibraryUse, code_library_from_json, code_library_json, code_library_uses,
+    describe_code_libraries, save_code_library_checked,
 };
 pub use declared::{
     BuildTemplate, DeclaredFile, FilePhase, FrameworkDecl, FrameworkHost, FrameworkSet,
@@ -125,7 +131,9 @@ pub use i18n::{
     ATTR_DEFAULT_LOCALE, ATTR_LOCALES, CatalogStore, FileCatalogStore, I18N_SEGMENT, LOCALES_DIR,
     RowCatalogStore, TRANSLATIONS_TABLE, app_catalog_store, app_default_locale, app_is_translated,
     app_locales, bootstrap_translations, delete_application_translations, i18n_catalog_path,
-    i18n_catalog_path_template, i18n_locale_in_path, set_app_locales,
+    i18n_catalog_path_template, i18n_locale_in_path, instance_catalog_store,
+    load_instance_catalogue, merge_catalogues, merged_app_catalogue, message_is_blank,
+    set_app_locales,
 };
 pub use location::{app_project_dir, app_source_location, store_dir};
 pub use none::{NONE_FRAMEWORK, NoneFramework, none_config_spec, none_source_dir};
@@ -150,3 +158,9 @@ pub use streams::{
     install_stream_registry, is_live_path, live_socket_path, stream_exports, stream_registry,
 };
 pub use target_ops::{OperationOutcome, run_target_operation};
+pub use uploads::{
+    DEFAULT_SLOT_MIN_ROLE, UPLOAD_SEGMENT, UPLOADS_TABLE, UploadRecord, UploadRoute, UploadSlot,
+    bootstrap_uploads, delete_upload, insert_upload, load_upload, set_upload_progress,
+    upload_exports, upload_path, upload_route, upload_slots_from_json, upload_slots_json,
+    uploads_begun_before, validate_upload_slots,
+};

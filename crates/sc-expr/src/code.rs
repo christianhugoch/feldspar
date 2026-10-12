@@ -107,6 +107,10 @@ use async_trait::async_trait;
 use sc_error::{Error, Result};
 use serde_json::Value as Json;
 
+use crate::code_library::CodeLibraries;
+#[cfg(feature = "eval")]
+use crate::code_library::{LIB, compile_error, library_definition, library_key};
+
 #[cfg(feature = "eval")]
 use std::cell::RefCell;
 #[cfg(feature = "eval")]
@@ -120,6 +124,11 @@ use std::sync::{Condvar, Mutex};
 #[cfg(feature = "eval")]
 use std::time::Instant;
 
+#[cfg(feature = "eval")]
+use crate::code_crypto::{
+    op_sc_digest, op_sc_hmac, op_sc_hmac_verify, op_sc_password_hash, op_sc_password_verify,
+    op_sc_random,
+};
 #[cfg(feature = "eval")]
 use deno_core::OpState;
 #[cfg(feature = "eval")]
@@ -955,6 +964,10 @@ pub struct CodeCall<'a> {
     /// How many module functions this run may call
     /// ([`DEFAULT_MAX_MODULE_CALLS`]).
     pub max_module_calls: u32,
+    /// The code libraries this run's `lib(name)` may import (TODO F3.2),
+    /// already resolved for the body's application. `None` imports nothing:
+    /// `lib` is still in scope, and says there is no such library.
+    pub libraries: Option<Arc<CodeLibraries>>,
 }
 
 impl Default for CodeCall<'_> {
@@ -976,6 +989,7 @@ impl Default for CodeCall<'_> {
             max_file_ops: DEFAULT_MAX_FILE_OPS,
             max_trigger_runs: DEFAULT_MAX_TRIGGER_RUNS,
             max_module_calls: DEFAULT_MAX_MODULE_CALLS,
+            libraries: None,
         }
     }
 }
@@ -1055,6 +1069,13 @@ impl std::fmt::Debug for CodeCall<'_> {
             .field("max_file_ops", &self.max_file_ops)
             .field("max_trigger_runs", &self.max_trigger_runs)
             .field("max_module_calls", &self.max_module_calls)
+            .field(
+                "libraries",
+                &self
+                    .libraries
+                    .as_ref()
+                    .map(|set| set.names().map(str::to_owned).collect::<Vec<_>>()),
+            )
             .finish()
     }
 }
@@ -1173,7 +1194,7 @@ pub(crate) const CONSOLE_METHODS: [&str; 6] = ["log", "info", "warn", "error", "
 /// rather than something that works on one isolate and not another. Lexical, no
 /// deletion, no effect on module code, and escapable through `globalThis` — but
 /// not by accident, which is the whole of what is wanted.
-#[cfg(feature = "eval")]
+#[cfg_attr(not(feature = "eval"), allow(dead_code))]
 pub(crate) const SHADOWED_NODE_GLOBALS: [&str; 7] = [
     "process",
     "Deno",
@@ -1816,8 +1837,8 @@ pub(crate) const FETCH_PRELUDE: &str = r#"
 
   // --- bytes --------------------------------------------------------------
   // The seam is JSON, so a body that is not text travels base64. Both codecs are
-  // written out here because the sandbox has no `TextEncoder` and no `atob` —
-  // and because a response nobody asks for the bytes of pays for neither.
+  // written out here because the sandbox has no `deno_web`; `TextEncoder`,
+  // `TextDecoder`, `btoa` and `atob` below are thin wrappers over them.
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   const encodeUtf8 = (text) => {
     const out = [];
@@ -1931,6 +1952,113 @@ pub(crate) const FETCH_PRELUDE: &str = r#"
     fromBase64: fromBase64,
     asBytes: asBytes,
   }));
+
+  // --- the web's own codecs (TODO F1.2; design §10.1 "Globals") ----------
+  // Thin wrappers over the codecs above, so a body never hand-writes base64 or
+  // UTF-8 again. UTF-8 only, as the encoding standard has `TextEncoder` be and
+  // as every caller here wants `TextDecoder` to be.
+  const invalidCharacter = (message) => {
+    const e = new Error(message);
+    e.name = "InvalidCharacterError";
+    return e;
+  };
+  // A "binary string" (one char per byte, U+0000–U+00FF) to base64.
+  fixed("btoa", (data) => {
+    const text = String(data);
+    const bytes = new Uint8Array(text.length);
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code > 0xff) {
+        throw invalidCharacter(
+          "btoa takes a binary string (characters up to U+00FF); for text, encode " +
+          "it first: btoa(String.fromCharCode(...new TextEncoder().encode(text)))"
+        );
+      }
+      bytes[i] = code;
+    }
+    return toBase64(bytes);
+  });
+  // Base64 to a binary string, refusing what `atob` refuses rather than
+  // silently decoding around it.
+  fixed("atob", (data) => {
+    let text = String(data).replace(/[\t\n\f\r ]/g, "");
+    if (text.length % 4 === 0) text = text.replace(/==?$/, "");
+    if (text.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(text)) {
+      throw invalidCharacter("atob was given a string that is not base64");
+    }
+    const bytes = fromBase64(text);
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 4096) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, i + 4096));
+    }
+    return out;
+  });
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(input) {
+      const text = input === undefined ? "" : String(input);
+      // A lone surrogate is U+FFFD, as the encoding standard has it.
+      return encodeUtf8(typeof text.toWellFormed === "function" ? text.toWellFormed() : text);
+    }
+    encodeInto(source, destination) {
+      if (!(destination instanceof Uint8Array)) {
+        throw new TypeError("encodeInto writes into a Uint8Array");
+      }
+      const text = String(source);
+      let read = 0;
+      let written = 0;
+      for (const ch of text) {
+        const bytes = this.encode(ch);
+        if (written + bytes.length > destination.length) break;
+        destination.set(bytes, written);
+        written += bytes.length;
+        read += ch.length;
+      }
+      return { read: read, written: written };
+    }
+  }
+  const UTF8_LABELS = ["utf-8", "utf8", "unicode-1-1-utf-8"];
+  class TextDecoder {
+    #fatal; #ignoreBOM;
+    constructor(label, options) {
+      const name = label === undefined ? "utf-8" : String(label).trim().toLowerCase();
+      if (!UTF8_LABELS.includes(name)) {
+        throw new RangeError(
+          "TextDecoder here decodes UTF-8 only, not " + JSON.stringify(String(label))
+        );
+      }
+      const opts = options === undefined || options === null ? {} : options;
+      this.#fatal = opts.fatal === true;
+      this.#ignoreBOM = opts.ignoreBOM === true;
+    }
+    get encoding() { return "utf-8"; }
+    get fatal() { return this.#fatal; }
+    get ignoreBOM() { return this.#ignoreBOM; }
+    decode(input, options) {
+      if (options && options.stream) {
+        throw new TypeError("TextDecoder here does not stream; decode the whole buffer at once");
+      }
+      let bytes = input === undefined ? new Uint8Array(0) : asBytes(input);
+      if (bytes === null) {
+        throw new TypeError("decode takes an ArrayBuffer, a typed array or a DataView");
+      }
+      if (!this.#ignoreBOM && bytes.length >= 3 &&
+          bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        bytes = bytes.subarray(3);
+      }
+      const text = decodeUtf8(bytes);
+      if (this.#fatal) {
+        // Valid UTF-8 survives the round trip byte for byte; anything the
+        // decoder had to replace or normalise does not.
+        const again = encodeUtf8(text);
+        const same = again.length === bytes.length && again.every((b, i) => b === bytes[i]);
+        if (!same) throw new TypeError("the data is not valid UTF-8");
+      }
+      return text;
+    }
+  }
+  fixed("TextEncoder", TextEncoder);
+  fixed("TextDecoder", TextDecoder);
 
   // --- the response -------------------------------------------------------
   // Built by `fetch` from what the host answered, and constructible by a body
@@ -2237,20 +2365,64 @@ pub(crate) const FILES_PRELUDE: &str = r##"
       Object.assign({ store: handle.store, authority: handle.authority }, plan)
     );
 
+  // The options a write records beside the bytes (§2.1): who owns the file,
+  // its access rule, and the name it is served under. Refused by name when
+  // misspelt, as `setMeta`'s keys are — an option silently dropped is a private
+  // file published.
+  const writeOptions = (options) => {
+    if (options === undefined || options === null) return {};
+    if (typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("write()'s options are an object: { owner, minRole, filename }");
+    }
+    const out = {};
+    for (const key of Object.keys(options)) {
+      const value = options[key];
+      if (value === undefined) continue;
+      if (key === "owner") {
+        out.owner = value;
+      } else if (key === "minRole" || key === "min_role") {
+        if (out.minRole !== undefined && out.minRole !== value) {
+          throw new TypeError("`minRole` and `min_role` disagree; give one");
+        }
+        out.minRole = value;
+      } else if (key === "filename") {
+        if (typeof value !== "string" || value === "") {
+          throw new TypeError("`filename` is the name to serve the file under, a string");
+        }
+        out.filename = value;
+      } else {
+        throw new TypeError(
+          "`" + key + "` is not a write option; they are: owner, minRole, filename"
+        );
+      }
+    }
+    return out;
+  };
+
   // --- a file -------------------------------------------------------------
+  // What a listing said about an entry (TODO F1.5): its size and when it was
+  // modified, as of the listing. `undefined` on a handle that was opened rather
+  // than listed — nothing has looked at the store for it, so `await stat()`.
+  const listedJSON = (listed) => listed === undefined ? {} : {
+    size: listed.size === undefined ? null : listed.size,
+    modified: listed.modified === undefined ? null : listed.modified,
+  };
   class SaltcornFile {
-    #handle; #path;
-    constructor(handle, path, internal) {
+    #handle; #path; #listed;
+    constructor(handle, path, internal, listed) {
       if (internal !== INTERNAL) {
         throw new TypeError("a file is opened with fs(store).open(path), not constructed");
       }
       this.#handle = handle;
       this.#path = path;
+      this.#listed = listed;
     }
     // Identity: synchronous, and none of it has touched the store.
     get path() { return this.#path; }
     get name() { return basename(this.#path); }
     get isDirectory() { return false; }
+    get size() { return this.#listed === undefined ? undefined : this.#listed.size; }
+    get modified() { return this.#listed === undefined ? undefined : this.#listed.modified; }
     get store() { return makeStore(this.#handle); }
     get parent() { return new SaltcornDir(this.#handle, dirname(this.#path), INTERNAL); }
     // For the operations that name two files (a copy, a move): the other file's
@@ -2259,7 +2431,12 @@ pub(crate) const FILES_PRELUDE: &str = r##"
       return internal === INTERNAL ? { handle: this.#handle, path: this.#path } : undefined;
     }
     toString() { return this.#handle.store + ":" + this.#path; }
-    toJSON() { return { store: this.#handle.store, path: this.#path }; }
+    toJSON() {
+      return Object.assign(
+        { store: this.#handle.store, path: this.#path, name: this.name, isDirectory: false },
+        listedJSON(this.#listed)
+      );
+    }
 
     // Reading. `exists` is a question rather than a `catch`: a missing file is
     // `false` here, and an error everywhere that was told to read one.
@@ -2300,28 +2477,117 @@ pub(crate) const FILES_PRELUDE: &str = r##"
         (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
       );
     }
+    // A piece of the file (TODO F2.8): at most `length` bytes from `offset`,
+    // as a Uint8Array — how a file larger than one read may carry is read at
+    // all. Past the end is a short or empty piece, as a stream read is.
+    read(options) {
+      const opts = options === undefined || options === null ? {} : options;
+      if (typeof opts !== "object" || Array.isArray(opts)) {
+        throw new TypeError("read()'s options are an object: { offset, length }");
+      }
+      const plan = { op: "read", path: this.#path, encoding: "base64" };
+      for (const key of Object.keys(opts)) {
+        const value = opts[key];
+        if (key !== "offset" && key !== "length") {
+          throw new TypeError("`" + key + "` is not a read option; they are: offset, length");
+        }
+        if (value === undefined) continue;
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new RangeError("read()'s `" + key + "` is a whole number of bytes, not " + String(value));
+        }
+        plan[key] = value;
+      }
+      if (plan.offset === undefined) plan.offset = 0;
+      return send(this.#handle, plan).then((answer) => codec.fromBase64(answer.base64));
+    }
+    // Add to the end of the file, creating it when it is not there. Answers
+    // the number of bytes appended.
+    append(data, options) {
+      const meta = writeOptions(options);
+      const plan = Object.assign({ op: "append", path: this.#path }, meta);
+      const bytes = codec.asBytes(data);
+      if (typeof data === "string") {
+        plan.text = data;
+      } else if (bytes !== null) {
+        plan.base64 = codec.toBase64(bytes);
+      } else {
+        throw new TypeError("append() takes a string or bytes (a Uint8Array or an ArrayBuffer)");
+      }
+      return send(this.#handle, plan).then((answer) => answer.bytes);
+    }
+    // Join other files of this store into this one, in order, replacing it —
+    // host-side, so the result is bounded by what a copy may move rather than
+    // by what a read may carry. Answers this file's size.
+    concat(parts, options) {
+      if (!Array.isArray(parts) || parts.length === 0) {
+        throw new TypeError("concat() takes a list of the files to join, e.g. [part0, part1]");
+      }
+      const handle = this.#handle;
+      let authority = handle.authority;
+      const paths = parts.map((part, i) => {
+        if (part instanceof SaltcornFile) {
+          const ref = part.__scRef(INTERNAL);
+          if (ref.handle.store !== handle.store) {
+            throw new TypeError(
+              "concat() joins files of one store: part " + i + " is in `" + ref.handle.store +
+              "`, this file in `" + handle.store + "` — copy it across first"
+            );
+          }
+          // The narrower authority of the two wins: a part opened `asUser`
+          // is read as the user even when the target was opened as the admin.
+          if (ref.handle.authority === "user") authority = "user";
+          return ref.path;
+        }
+        if (typeof part === "string") return named(part, "concat()");
+        throw new TypeError("concat()'s parts are files (or paths in this store), not " + typeof part);
+      });
+      const plan = Object.assign(
+        { op: "concat", path: this.#path, parts: paths }, writeOptions(options)
+      );
+      return send({ token: handle.token, store: handle.store, authority: authority }, plan)
+        .then((answer) => answer.bytes);
+    }
+    // The SHA-256 of the file's bytes, as lower-case hex, taken host-side.
+    sha256() {
+      return send(this.#handle, { op: "sha256", path: this.#path }).then((answer) => answer.hex);
+    }
+    // The URL the application serves this file at — a static directory that
+    // covers it, or `/files/serve` — or null when no route does. `{ download:
+    // true }` asks for an attachment. Whether the caller may read it is decided
+    // when the URL is fetched.
+    url(options) {
+      const opts = options === undefined || options === null ? {} : options;
+      for (const key of Object.keys(opts)) {
+        if (key !== "download") {
+          throw new TypeError("`" + key + "` is not a url() option; it has: download");
+        }
+      }
+      return send(this.#handle, { op: "url", path: this.#path, download: !!opts.download });
+    }
 
     // Writing. Both answer the number of bytes written, and both make the
     // parent directories on the way — a body that named a path has said where
-    // it wants the file.
-    write(data) { return this.#put(data, true); }
-    create(data) { return this.#put(data, false); }
-    #put(data, overwrite) {
+    // it wants the file. The options are the metadata to record with it:
+    // `{ owner, minRole, filename }` (`min_role` is accepted too).
+    write(data, options) { return this.#put(data, true, options); }
+    create(data, options) { return this.#put(data, false, options); }
+    #put(data, overwrite, options) {
+      const meta = writeOptions(options);
       // Another file is **copied host-side**: the bytes never enter the sandbox,
       // so `await backup.write(original)` is not bounded by what one read may
       // carry.
       if (data instanceof SaltcornFile) {
         const from = data.__scRef(INTERNAL);
-        return send(from.handle, {
+        return send(from.handle, Object.assign({
           op: "copy", path: from.path,
           toStore: this.#handle.store, toPath: this.#path, overwrite: overwrite,
-        }).then((answer) => answer.bytes);
+        }, meta)).then((answer) => answer.bytes);
       }
       if (data instanceof SaltcornDir) {
         throw new TypeError("a directory cannot be written to a file");
       }
       const handle = this.#handle;
-      const plan = { op: "write", path: this.#path, overwrite: overwrite };
+      const plan = Object.assign({ op: "write", path: this.#path, overwrite: overwrite }, meta);
       const bytes = codec.asBytes(data);
       if (typeof data === "string") {
         plan.text = data;
@@ -2390,38 +2656,44 @@ pub(crate) const FILES_PRELUDE: &str = r##"
     meta() { return send(this.#handle, { op: "meta", path: this.#path }); }
     setMeta(meta) {
       if (meta === null || typeof meta !== "object" || Array.isArray(meta)) {
-        throw new TypeError("setMeta() takes an object: { minRole, attributes }");
+        throw new TypeError("setMeta() takes an object: { minRole, attributes, owner }");
       }
       for (const key of Object.keys(meta)) {
-        if (key !== "minRole" && key !== "attributes") {
+        if (key !== "minRole" && key !== "attributes" && key !== "owner") {
           throw new TypeError(
-            "`" + key + "` is not part of a file's metadata; it holds: minRole, attributes"
+            "`" + key + "` is not part of a file's metadata; it holds: minRole, attributes, owner"
           );
         }
       }
       // Replaces rather than merges, as the store's own metadata does — read it
-      // first when what you want is a change to one attribute.
-      return send(this.#handle, {
+      // first when what you want is a change to one attribute. The owner is
+      // the exception: left out, it is kept (only admin authority may change it).
+      const plan = {
         op: "setMeta", path: this.#path,
         minRole: meta.minRole === undefined ? null : meta.minRole,
         attributes: meta.attributes === undefined ? {} : meta.attributes,
-      }).then(() => this);
+      };
+      if (meta.owner !== undefined) plan.owner = meta.owner;
+      return send(this.#handle, plan).then(() => this);
     }
   }
 
   // --- a directory --------------------------------------------------------
   class SaltcornDir {
-    #handle; #path;
-    constructor(handle, path, internal) {
+    #handle; #path; #listed;
+    constructor(handle, path, internal, listed) {
       if (internal !== INTERNAL) {
         throw new TypeError("a directory is reached with fs(store).dir(path), not constructed");
       }
       this.#handle = handle;
       this.#path = path;
+      this.#listed = listed;
     }
     get path() { return this.#path; }
     get name() { return basename(this.#path); }
     get isDirectory() { return true; }
+    get size() { return this.#listed === undefined ? undefined : this.#listed.size; }
+    get modified() { return this.#listed === undefined ? undefined : this.#listed.modified; }
     get store() { return makeStore(this.#handle); }
     // The root's parent is null rather than the root itself: a loop walking
     // upwards has to end somewhere, and pretending a store contains itself is
@@ -2435,7 +2707,12 @@ pub(crate) const FILES_PRELUDE: &str = r##"
       return internal === INTERNAL ? { handle: this.#handle, path: this.#path } : undefined;
     }
     toString() { return this.#handle.store + ":" + this.#path + "/"; }
-    toJSON() { return { store: this.#handle.store, path: this.#path, isDirectory: true }; }
+    toJSON() {
+      return Object.assign(
+        { store: this.#handle.store, path: this.#path, name: this.name, isDirectory: true },
+        listedJSON(this.#listed)
+      );
+    }
 
     file(name) {
       return new SaltcornFile(this.#handle, join(this.#path, named(name, "file()")), INTERNAL);
@@ -2448,11 +2725,12 @@ pub(crate) const FILES_PRELUDE: &str = r##"
     list() {
       const handle = this.#handle;
       return send(handle, { op: "list", path: this.#path }).then((entries) =>
-        entries.map((entry) =>
-          entry.isDirectory
-            ? new SaltcornDir(handle, entry.path, INTERNAL)
-            : new SaltcornFile(handle, entry.path, INTERNAL)
-        )
+        entries.map((entry) => {
+          const listed = { size: entry.size, modified: entry.modified };
+          return entry.isDirectory
+            ? new SaltcornDir(handle, entry.path, INTERNAL, listed)
+            : new SaltcornFile(handle, entry.path, INTERNAL, listed);
+        })
       );
     }
     stat() { return send(this.#handle, { op: "stat", path: this.#path }); }
@@ -2493,6 +2771,15 @@ pub(crate) const FILES_PRELUDE: &str = r##"
     asUser: () => makeStore({ token: handle.token, store: handle.store, authority: "user" }),
     asAdmin: () => makeStore({ token: handle.token, store: handle.store, authority: "admin" }),
   });
+
+  // What `response({ file })` serves (TODO F2.10): the store, path and
+  // authority of a handle this prelude made, or undefined for anything else.
+  fixed("__scFileRef", (value) => {
+    if (!(value instanceof SaltcornFile)) return undefined;
+    const ref = value.__scRef(INTERNAL);
+    return { store: ref.handle.store, path: ref.path, authority: ref.handle.authority };
+  });
+  fixed("__scIsFsEntry", (value) => value instanceof SaltcornFile || value instanceof SaltcornDir);
 
   // One run's `fs`, over one run's token — the same shape `__scMakeDb` has, and
   // for the same reason.
@@ -3000,12 +3287,33 @@ const SETUP: &str = r#"
   const logline = Deno.core.ops.op_sc_log;
   const done = Deno.core.ops.op_sc_done;
   const fail = Deno.core.ops.op_sc_fail;
-  const mark = Deno.core.ops.op_sc_mark;
+  const markOp = Deno.core.ops.op_sc_mark;
+  const httpErrorOp = Deno.core.ops.op_sc_http_error;
+  const respondOp = Deno.core.ops.op_sc_respond;
+  // The key a binding of raw bytes is wrapped under on its way in (TODO F2.9):
+  // random per process, so a JSON body cannot pose as bytes.
+  const bytesKey = Deno.core.ops.op_sc_bytes_key();
+  const unwrapBytes = (bindings) => {
+    if (bindings === null || typeof bindings !== "object") return;
+    for (const name of Object.keys(bindings)) {
+      const value = bindings[name];
+      if (value !== null && typeof value === "object" && !Array.isArray(value) &&
+          typeof value[bytesKey] === "string" && Object.keys(value).length === 1) {
+        bindings[name] = globalThis.__scCodec.fromBase64(value[bytesKey]);
+      }
+    }
+  };
   Deno.core.setUnhandledPromiseRejectionHandler(() => true);
   const fixed = (name, value) =>
     Object.defineProperty(globalThis, name, {
       value: value, writable: false, configurable: false, enumerable: false,
     });
+  // The run whose JavaScript is on the isolate, as far as this side knows: set
+  // when a run is invoked and at every resumption mark. A global with no token
+  // of its own — `crypto.password` — reads it when called, and marks that run
+  // again when its host work comes back (see `settle` below).
+  let current = null;
+  const mark = (token) => { current = token; markOp(token); };
   const notAwaited = () =>
     new Error(
       "this database call was not awaited — write `await db.invoices.rows()`"
@@ -3193,6 +3501,317 @@ const SETUP: &str = r#"
       else resolve(reply.ok);
     }, reject);
   }));
+  // --- crypto (TODO F1.2, F1.3; design §10.1 "Globals") ---------------------
+  // The Web Crypto shapes a body written for a browser or Node reaches for,
+  // over a handful of host ops (`code_crypto.rs`) rather than `deno_crypto`,
+  // whose JavaScript would be read from build-machine paths without a snapshot.
+  // The ops are pure functions of their arguments, so none takes a run token.
+  const randomOp = Deno.core.ops.op_sc_random;
+  const digestOp = Deno.core.ops.op_sc_digest;
+  const hmacOp = Deno.core.ops.op_sc_hmac;
+  const hmacVerifyOp = Deno.core.ops.op_sc_hmac_verify;
+  const passwordHashOp = Deno.core.ops.op_sc_password_hash;
+  const passwordVerifyOp = Deno.core.ops.op_sc_password_verify;
+  // The web throws a `DOMException` by name; there is none here, so an Error
+  // carrying the same `name` is what a `catch` that checks it will see.
+  const domError = (name, message) => {
+    const e = new Error(message);
+    e.name = name;
+    return e;
+  };
+  const INTEGER_ARRAYS = [
+    Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+    Int32Array, Uint32Array, BigInt64Array, BigUint64Array,
+  ];
+  const bufferSource = (data, what) => {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) {
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    throw new TypeError(
+      what + " must be an ArrayBuffer, a typed array or a DataView — encode a " +
+      "string first with new TextEncoder().encode(text)"
+    );
+  };
+  const arrayBufferOf = (bytes) =>
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const HASHES = ["SHA-256", "SHA-384", "SHA-512"];
+  const hashName = (algorithm) => {
+    const raw = typeof algorithm === "string" ? algorithm : algorithm && algorithm.name;
+    const name = String(raw).toUpperCase();
+    if (!HASHES.includes(name)) {
+      throw domError(
+        "NotSupportedError",
+        "unsupported hash " + JSON.stringify(raw) + "; use " + HASHES.join(", ")
+      );
+    }
+    return name;
+  };
+  const algorithmName = (algorithm) =>
+    String(typeof algorithm === "string" ? algorithm : algorithm && algorithm.name).toUpperCase();
+  const fill = (bytes) => {
+    if (!randomOp(bytes)) throw new Error("the operating system's random source failed");
+  };
+  const getRandomValues = (array) => {
+    if (!INTEGER_ARRAYS.some((T) => array instanceof T)) {
+      throw domError(
+        "TypeMismatchError",
+        "crypto.getRandomValues takes an integer typed array, such as a Uint8Array"
+      );
+    }
+    if (array.byteLength > 65536) {
+      throw domError(
+        "QuotaExceededError",
+        "crypto.getRandomValues fills at most 65536 bytes per call; this array has " +
+        array.byteLength
+      );
+    }
+    fill(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+    return array;
+  };
+  const randomUUID = () => {
+    const b = new Uint8Array(16);
+    fill(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" +
+      h.slice(16, 20) + "-" + h.slice(20);
+  };
+  // A key's bytes are held here, not on the object: `key.algorithm` is public
+  // and the secret is not, as in the browser.
+  const secrets = new WeakMap();
+  class CryptoKey {
+    constructor() { throw new TypeError("use crypto.subtle.importKey to make a key"); }
+  }
+  const makeKey = (bytes, hash, extractable, usages) => {
+    const key = Object.create(CryptoKey.prototype);
+    Object.defineProperties(key, {
+      type: { value: "secret", enumerable: true },
+      extractable: { value: extractable === true, enumerable: true },
+      algorithm: {
+        value: Object.freeze({
+          name: "HMAC", hash: Object.freeze({ name: hash }), length: bytes.length * 8,
+        }),
+        enumerable: true,
+      },
+      usages: { value: Object.freeze([...usages]), enumerable: true },
+    });
+    secrets.set(key, bytes);
+    return Object.freeze(key);
+  };
+  const keyFor = (key, usage) => {
+    const bytes = secrets.get(key);
+    if (bytes === undefined) throw new TypeError("expected a CryptoKey from crypto.subtle.importKey");
+    if (!key.usages.includes(usage)) {
+      throw domError("InvalidAccessError", "this key's usages do not include " + JSON.stringify(usage));
+    }
+    return bytes;
+  };
+  const hmacOnly = (algorithm) => {
+    if (algorithmName(algorithm) !== "HMAC") {
+      throw domError("NotSupportedError", "crypto.subtle here supports HMAC keys only");
+    }
+  };
+  const subtle = Object.freeze({
+    async digest(algorithm, data) {
+      const name = hashName(algorithm);
+      return arrayBufferOf(digestOp(name, bufferSource(data, "the data to digest")));
+    },
+    async importKey(format, keyData, algorithm, extractable, keyUsages) {
+      if (format !== "raw") {
+        throw domError("NotSupportedError", "crypto.subtle.importKey supports the \"raw\" format only");
+      }
+      hmacOnly(algorithm);
+      const hash = hashName(algorithm && algorithm.hash);
+      const usages = Array.isArray(keyUsages) ? keyUsages : [];
+      for (const usage of usages) {
+        if (usage !== "sign" && usage !== "verify") {
+          throw new SyntaxError("an HMAC key's usages are \"sign\" and \"verify\", not " + JSON.stringify(usage));
+        }
+      }
+      const bytes = bufferSource(keyData, "the key").slice();
+      if (bytes.length === 0) throw new TypeError("an HMAC key may not be empty");
+      return makeKey(bytes, hash, extractable, usages);
+    },
+    async exportKey(format, key) {
+      if (format !== "raw") {
+        throw domError("NotSupportedError", "crypto.subtle.exportKey supports the \"raw\" format only");
+      }
+      const bytes = secrets.get(key);
+      if (bytes === undefined) throw new TypeError("expected a CryptoKey");
+      if (!key.extractable) throw domError("InvalidAccessError", "this key is not extractable");
+      return arrayBufferOf(bytes);
+    },
+    async sign(algorithm, key, data) {
+      hmacOnly(algorithm);
+      const bytes = keyFor(key, "sign");
+      return arrayBufferOf(hmacOp(key.algorithm.hash.name, bytes, bufferSource(data, "the data to sign")));
+    },
+    async verify(algorithm, key, signature, data) {
+      hmacOnly(algorithm);
+      const bytes = keyFor(key, "verify");
+      return hmacVerifyOp(
+        key.algorithm.hash.name, bytes,
+        bufferSource(signature, "the signature"), bufferSource(data, "the signed data")
+      );
+    },
+  });
+  // Host work that leaves the isolate with no run token: when it comes back,
+  // the run that started it is marked again, so its continuation runs under its
+  // own slice and an overrun names it — what every token-carrying call does in
+  // its own `then`.
+  const settle = (promise) => {
+    const token = current;
+    const resumed = () => { if (token !== null) mark(token); };
+    return promise.then(
+      (answer) => {
+        resumed();
+        const reply = JSON.parse(answer);
+        if (reply.error !== undefined) throw new Error(reply.error);
+        return reply.ok;
+      },
+      (e) => { resumed(); throw e; }
+    );
+  };
+  const password = Object.freeze({
+    async hash(pw) {
+      if (typeof pw !== "string") throw new TypeError("crypto.password.hash takes a string");
+      return settle(passwordHashOp(pw));
+    },
+    async verify(pw, hash) {
+      if (typeof pw !== "string" || typeof hash !== "string") {
+        throw new TypeError("crypto.password.verify takes the password and the stored hash, both strings");
+      }
+      return settle(passwordVerifyOp(pw, hash));
+    },
+  });
+  fixed("CryptoKey", CryptoKey);
+  fixed("crypto", Object.freeze({
+    getRandomValues: getRandomValues,
+    randomUUID: randomUUID,
+    subtle: subtle,
+    password: password,
+  }));
+  // --- HTTP answers (TODO F1.4; design §10.1 "Status codes and error bodies")
+  // `throw httpError(401, "sign in")` is a deliberate status rather than a
+  // failure, and `return response({ status, headers, body })` is a success
+  // with a status and headers. Both are tagged with a symbol a body cannot
+  // reach, and recognised by the run wrapper below.
+  const HTTP_ERROR = Symbol("sc.httpError");
+  const RESPONSE = Symbol("sc.response");
+  class HttpError extends Error {
+    constructor(status, message, body) {
+      super(message);
+      Object.defineProperty(this, "name", { value: "HttpError" });
+      Object.defineProperty(this, "status", { value: status, enumerable: true });
+      Object.defineProperty(this, "body", { value: body, enumerable: true });
+      Object.defineProperty(this, HTTP_ERROR, { value: true });
+      Object.freeze(this);
+    }
+  }
+  fixed("httpError", (status, message, body) => {
+    const code = Number(status);
+    const text = message === undefined || message === null
+      ? "HTTP " + String(status)
+      : String(message);
+    throw new HttpError(code, text, body);
+  });
+  // What the server sets itself, kept in step with `SERVER_OWNED_HEADERS`.
+  const SERVER_OWNED = new Set([
+    "set-cookie", "content-security-policy", "content-security-policy-report-only",
+    "x-frame-options", "x-content-type-options", "strict-transport-security",
+    "cross-origin-opener-policy", "content-type", "content-length", "content-encoding",
+    "transfer-encoding", "connection", "keep-alive", "upgrade", "trailer", "te",
+  ]);
+  const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/;
+  // The parts of a `response(...)` that are not JSON — raw bytes, a file to
+  // serve — kept off the frozen object's own properties so it still reads as
+  // `{ status, headers, body }`, and joined in when the run answers.
+  const RESPONSE_EXTRA = Symbol("sc.response.extra");
+  const RESPONSE_KEYS = ["status", "headers", "body", "file", "filename", "download"];
+  fixed("response", (init) => {
+    const options = init === undefined || init === null ? {} : init;
+    if (typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("response() takes an object: { status, headers, body } or { file, filename, download }");
+    }
+    for (const key of Object.keys(options)) {
+      if (RESPONSE_KEYS.indexOf(key) < 0) {
+        throw new TypeError(
+          "`" + key + "` is not a response option; they are: " + RESPONSE_KEYS.join(", ")
+        );
+      }
+    }
+    const status = options.status === undefined ? 200 : Number(options.status);
+    if (!Number.isInteger(status) || status < 200 || status > 599) {
+      throw new RangeError("a response status must be a whole number from 200 to 599");
+    }
+    // A file handle — as `file`, or as the body — is served by the host
+    // (TODO F2.10): streamed, with Range, never through this isolate.
+    const fileRef = typeof globalThis.__scFileRef === "function"
+      ? (globalThis.__scFileRef(options.file) || globalThis.__scFileRef(options.body))
+      : undefined;
+    if (options.file !== undefined && fileRef === undefined) {
+      throw new TypeError("response()'s `file` is a file handle, as in fs(store).open(path)");
+    }
+    if (options.file !== undefined && options.body !== undefined) {
+      throw new TypeError("a response has a `file` or a `body`, not both");
+    }
+    if (typeof globalThis.__scIsFsEntry === "function" && fileRef === undefined &&
+        globalThis.__scIsFsEntry(options.body)) {
+      throw new TypeError("a directory cannot be a response body");
+    }
+    // Raw bytes are served as they are, under the content type the headers
+    // name (TODO F2.9).
+    const codec = globalThis.__scCodec;
+    const raw = fileRef === undefined && options.body !== undefined && options.body !== null &&
+      typeof options.body === "object" ? codec.asBytes(options.body) : null;
+    if (fileRef === undefined && (options.filename !== undefined || options.download !== undefined)) {
+      throw new TypeError("`filename` and `download` are for a response that serves a file");
+    }
+    if (options.filename !== undefined && (typeof options.filename !== "string" || options.filename === "")) {
+      throw new TypeError("a response's `filename` is the name to save the file under, a string");
+    }
+    const given = options.headers === undefined || options.headers === null ? {} : options.headers;
+    const pairs = Array.isArray(given)
+      ? given
+      : typeof given.__scPairs === "function" ? given.__scPairs() : Object.entries(given);
+    let contentType;
+    const headers = [];
+    for (const pair of pairs) {
+      const name = String(pair[0]).toLowerCase();
+      const value = String(pair[1]);
+      if (!HEADER_NAME.test(name)) throw new TypeError("not a header name: " + JSON.stringify(pair[0]));
+      if (/[\r\n\0]/.test(value)) throw new TypeError("the " + name + " header's value has a line break in it");
+      if (name === "content-type" && (raw !== null || fileRef !== undefined)) {
+        contentType = value;
+        continue;
+      }
+      if (SERVER_OWNED.has(name)) {
+        throw new TypeError(
+          "a response may not set " + name + ": the server sets it itself" +
+          (name === "content-type" ? " (except on a response whose body is bytes or a file)" : "")
+        );
+      }
+      headers.push([name, value]);
+    }
+    const extra = {};
+    if (raw !== null) {
+      extra.bodyBase64 = codec.toBase64(raw);
+      extra.contentType = contentType === undefined ? "application/octet-stream" : contentType;
+    }
+    if (fileRef !== undefined) {
+      extra.file = fileRef;
+      if (contentType !== undefined) extra.contentType = contentType;
+      if (options.filename !== undefined) extra.filename = options.filename;
+      extra.download = !!options.download;
+    }
+    const body = fileRef !== undefined ? null : (options.body === undefined ? null : options.body);
+    const out = { status: status, headers: headers, body: body };
+    Object.defineProperty(out, RESPONSE, { value: true });
+    Object.defineProperty(out, RESPONSE_EXTRA, { value: Object.freeze(extra) });
+    return Object.freeze(out);
+  });
   // What an admin should be shown: the stack when there is one, because a body
   // of any size wants the line, and the value itself when there is not.
   const describe = (e) => {
@@ -3232,13 +3851,74 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsLive, wantsV1, wantsConsole, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsLive, wantsV1, wantsConsole, wantsLib, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
       wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsLive: wantsLive,
-      wantsV1: wantsV1, wantsConsole: wantsConsole,
+      wantsV1: wantsV1, wantsConsole: wantsConsole, wantsLib: wantsLib,
     });
   });
+  // The code libraries compiled on this isolate (TODO F3.2), by content key:
+  // a function to evaluate, or the reason it does not compile. Compiled once
+  // per isolate; *evaluated* once per run, on that run's handles, because a
+  // handle is bound to its run's token and dies with it.
+  const libraries = new Map();
+  fixed("__scDefineLib", (key, fn) => { libraries.set(key, { fn: fn, broken: null }); });
+  fixed("__scBrokenLib", (key, message) => { libraries.set(key, { fn: null, broken: message }); });
+  fixed("__scForgetLib", (key) => { libraries.delete(key); });
+  // What a save's compile check asks: null, or why the library does not compile.
+  fixed("__scLibraryError", (key) => {
+    const held = libraries.get(key);
+    return held === undefined ? "the library was not compiled" : held.broken;
+  });
+  const own = (object, name) => Object.prototype.hasOwnProperty.call(object, name);
+  // One run's `lib`: what it may import (name → key), the handles it passes on,
+  // and the exports it has already evaluated, so a library two others import
+  // runs once per run. `loading` is the chain being evaluated, which is what a
+  // cycle is reported as.
+  const makeLib = (visible, handles, user) => {
+    const loaded = new Map();
+    const loading = [];
+    const lib = (name) => {
+      if (typeof name !== "string") {
+        throw new TypeError("lib(name) takes the name of a code library, as a string");
+      }
+      if (loaded.has(name)) return loaded.get(name);
+      const at = loading.indexOf(name);
+      if (at >= 0) {
+        throw new Error(
+          "code libraries import each other in a cycle: " +
+          loading.slice(at).concat([name]).join(" → ")
+        );
+      }
+      if (!own(visible, name)) {
+        const names = Object.keys(visible);
+        throw new Error(
+          "there is no code library named `" + name + "`" +
+          (names.length > 0
+            ? " (this code can import: " + names.join(", ") + ")"
+            : " — this code can import none")
+        );
+      }
+      const held = libraries.get(visible[name]);
+      if (held === undefined) {
+        throw new Error("code library `" + name + "` is not compiled on this isolate");
+      }
+      if (held.broken !== null) {
+        throw new SyntaxError("code library `" + name + "` does not compile: " + held.broken);
+      }
+      const module = { exports: {} };
+      loading.push(name);
+      try {
+        held.fn(module.exports, module, lib, user, ...handles);
+      } finally {
+        loading.pop();
+      }
+      loaded.set(name, module.exports);
+      return module.exports;
+    };
+    return Object.freeze(lib);
+  };
   // The schema snapshot this isolate holds, keyed by the catalog generation it
   // was built at (TODO "the v1 `Table` API" §2). One entry: a generation is
   // bumped by a catalog reload, so the previous one is of no use to any run that
@@ -3282,7 +3962,8 @@ const SETUP: &str = r#"
     const what = typeof specifier === "string" ? "`" + specifier + "`" : "a module";
     throw new Error(
       "require(" + what + ") is not available in a code body: a code body is " +
-      "not a module, and this server loads no packages into one" +
+      "not a module, and this server loads no packages into one; code shared " +
+      "between bodies goes in a code library, imported with `lib(\"name\")`" +
       (hasV1
         ? ". Saltcorn 1's `Table` and `Field` are already in scope here — " +
           "delete the line that requires them"
@@ -3304,7 +3985,26 @@ const SETUP: &str = r#"
   // this run's alone. A body with no host is defined to take one argument, so
   // there is no `db` in its scope to name — a ReferenceError, as it has always
   // been, rather than a handle that fails on use.
-  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions, schemaGeneration, consoleMethods) => {
+  // How a run that threw ends: a deliberate `httpError` as the answer it
+  // chose, anything else as a failure with its stack.
+  const failed = (token, e) => {
+    if (e !== null && typeof e === "object" && e[HTTP_ERROR] === true) {
+      let body = "";
+      if (e.body !== undefined && e.body !== null) {
+        try {
+          body = JSON.stringify(e.body);
+        } catch (err) {
+          fail(token, "the body given to httpError is not JSON: " + describe(err));
+          return;
+        }
+      }
+      const status = Number.isInteger(e.status) && e.status >= 0 && e.status < 65536 ? e.status : 0;
+      httpErrorOp(token, status, e.message, body === undefined ? "" : body);
+      return;
+    }
+    fail(token, describe(e));
+  };
+  fixed("__scInvoke", (token, key, bindings, stores, triggers, functions, schemaGeneration, consoleMethods, libs) => {
     const entry = bodies.get(key);
     if (entry === undefined) {
       // Unreachable while the Rust side and this map agree, which they do
@@ -3323,6 +4023,8 @@ const SETUP: &str = r#"
       // until then, resolving it is what turns a generation this isolate does
       // not hold into a named failure on the run that asked for it.
       const snapshot = schemaFor(schemaGeneration);
+      unwrapBytes(bindings);
+      current = token;
       // The handles this body was compiled to take, in the order its parameter
       // list has them. A body with neither is the pure one `run_js_code` began
       // as: nothing in its scope to reach anything with.
@@ -3370,14 +4072,36 @@ const SETUP: &str = r#"
       // Last in the list, because it is the one handle every body may have:
       // appending it keeps every other parameter where it was.
       if (entry.wantsConsole) handles.push(__scMakeConsole(token, consoleMethods));
+      // `lib` after the console, and built over every handle before it: a
+      // library runs with exactly what the importing run has (TODO F3.2).
+      if (entry.wantsLib) {
+        const user = bindings !== null && typeof bindings === "object" && own(bindings, "user")
+          ? bindings.user : null;
+        handles.push(makeLib(libs || {}, handles.slice(1), user));
+      }
       running = entry.body(...handles);
     } catch (e) {
-      fail(token, describe(e));
+      failed(token, e);
       return;
     }
     Promise.resolve(running).then(
       (result) => {
         let text;
+        if (result !== null && typeof result === "object" && result[RESPONSE] === true) {
+          try {
+            const extra = result[RESPONSE_EXTRA] || {};
+            text = JSON.stringify(Object.assign(
+              { status: result.status, headers: result.headers,
+                body: extra.bodyBase64 === undefined ? result.body : null },
+              extra
+            ));
+          } catch (e) {
+            fail(token, describe(e));
+            return;
+          }
+          respondOp(token, text === undefined ? "null" : text);
+          return;
+        }
         try {
           text = JSON.stringify(result);
         } catch (e) {
@@ -3388,7 +4112,7 @@ const SETUP: &str = r#"
         // nothing answers null, as it always has.
         done(token, text === undefined ? "null" : text);
       },
-      (e) => fail(token, describe(e))
+      (e) => failed(token, e)
     );
   });
 })();
@@ -4303,6 +5027,49 @@ fn op_sc_fail(state: &mut OpState, #[string] token: &str, #[string] message: &st
     );
 }
 
+/// A run threw `httpError(status, message, body?)` (TODO F1.4): a deliberate
+/// answer, not a failure. `body` is the JSON text of the body the guest gave,
+/// or empty for none. The status is carried as given; the transport checks its
+/// range, because it is the one that knows what it will serve.
+#[cfg(feature = "eval")]
+#[deno_core::op2(fast)]
+fn op_sc_http_error(
+    state: &mut OpState,
+    #[string] token: &str,
+    status: u32,
+    #[string] message: &str,
+    #[string] body: &str,
+) {
+    let body = (!body.is_empty()).then(|| body.to_owned());
+    finish(
+        state,
+        token,
+        Err(Error::http(
+            u16::try_from(status).unwrap_or(0),
+            message.to_owned(),
+            body,
+        )),
+    );
+}
+
+/// A run answered `response({ status, headers, body })` (TODO F1.4): its JSON
+/// text, wrapped where only the host can wrap it (`code_reply`).
+#[cfg(feature = "eval")]
+#[deno_core::op2(fast)]
+fn op_sc_respond(state: &mut OpState, #[string] token: &str, #[string] spec: &str) {
+    let spec = serde_json::from_str(spec).unwrap_or(Json::Null);
+    finish(state, token, Ok(crate::code_reply::wrap_response(spec)));
+}
+
+/// The key a binding of raw bytes is wrapped under (`code_reply::bytes_key`),
+/// read once by the prelude.
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+fn op_sc_bytes_key() -> String {
+    crate::code_reply::bytes_key().to_owned()
+}
+
 /// End a run: answer its caller and take it out of the table. A token that names
 /// nothing is not an error — a run abandoned at its deadline was taken out
 /// already, and its continuation reporting afterwards is exactly that.
@@ -4330,7 +5097,16 @@ deno_core::extension!(
         op_sc_done,
         op_sc_fail,
         op_sc_mark,
-        op_sc_log
+        op_sc_log,
+        op_sc_random,
+        op_sc_digest,
+        op_sc_hmac,
+        op_sc_hmac_verify,
+        op_sc_password_hash,
+        op_sc_password_verify,
+        op_sc_http_error,
+        op_sc_respond,
+        op_sc_bytes_key
     ]
 );
 
@@ -4529,6 +5305,8 @@ struct CodeRun {
     max_file_ops: u32,
     max_trigger_runs: u32,
     max_module_calls: u32,
+    /// The libraries `lib(name)` may import ([`CodeCall::libraries`]).
+    libraries: Option<Arc<CodeLibraries>>,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -4930,6 +5708,7 @@ impl CodeRuntime {
                     max_file_ops: call.max_file_ops,
                     max_trigger_runs: call.max_trigger_runs,
                     max_module_calls: call.max_module_calls,
+                    libraries: call.libraries.clone(),
                     started: None,
                 }),
                 reply,
@@ -5611,6 +6390,9 @@ fn start_run(
     // The module functions, on the same terms again: installing or configuring
     // a module reloads the set, and one compiled body serves every run.
     let functions = module_functions_json(&run.module_functions);
+    // The libraries this run may import, compiled here — before the run's own
+    // script, because `lib` is synchronous — and named to the guest by key.
+    let libraries = define_libraries(runtime, &scripts, run.libraries.as_deref(), cache);
     let script = build_script(
         &scripts,
         &token,
@@ -5619,6 +6401,7 @@ fn start_run(
         &stores,
         &triggers,
         &functions,
+        &libraries,
         define_schema,
         generation,
     );
@@ -5712,6 +6495,60 @@ fn start_run(
     }
 }
 
+/// Make sure every library `set` holds is compiled on this isolate for this
+/// run's handle set, and answer the guest's view of the set: a JSON object from
+/// each name to the key its compiled function is held under.
+///
+/// One script per library that is not held yet, and named after the library
+/// (`lib:<name>.js`), so the engine's report of a syntax error names the
+/// library and its line. A library that does not compile is recorded as its
+/// error ([`compile_error`]) rather than failing the run: a body that never
+/// imports it must not be broken by it, and one that does is told why by
+/// `lib()`.
+///
+/// Compiling runs none of the library's code — the definition is a function
+/// expression — so this is outside every run's watchdog slice and needs none.
+#[cfg(feature = "eval")]
+fn define_libraries(
+    runtime: &mut deno_core::JsRuntime,
+    scripts: &RunScripts,
+    set: Option<&CodeLibraries>,
+    cache: &mut IsolateCache,
+) -> String {
+    let mut visible = serde_json::Map::new();
+    let Some(set) = set else {
+        return "{}".to_owned();
+    };
+    for (name, code) in set.iter() {
+        let definition = library_definition(code, &scripts.library_params, scripts.wants_db);
+        let key = library_key(&definition);
+        if !cache.libraries.holds(key, &definition) {
+            let defined = runtime.execute_script(
+                format!("lib:{name}.js"),
+                format!("__scDefineLib(\"{key:016x}\", {definition});"),
+            );
+            if let Err(e) = defined {
+                let message = Json::String(compile_error(name, &e.to_string()));
+                let recorded = runtime.execute_script(
+                    "sc_lib_broken.js",
+                    format!("__scBrokenLib(\"{key:016x}\", {message});"),
+                );
+                if recorded.is_err() {
+                    // Not held: the next run carries it again, and tries again.
+                    visible.insert(name.to_owned(), Json::String(format!("{key:016x}")));
+                    continue;
+                }
+            }
+            for gone in cache.libraries.store(key, definition) {
+                let _ = runtime
+                    .execute_script("sc_forget.js", format!("__scForgetLib(\"{gone:016x}\");"));
+            }
+        }
+        visible.insert(name.to_owned(), Json::String(format!("{key:016x}")));
+    }
+    Json::Object(visible).to_string()
+}
+
 /// Give a job's place in the occupancy count back, for a job that never made it
 /// into the table.
 #[cfg(feature = "eval")]
@@ -5783,6 +6620,13 @@ struct RunScripts {
     /// `console` of its own — the console is not a capability, it is the way a
     /// body says what it is doing.
     wants_console: bool,
+    /// Whether it takes `lib` (TODO F3.2): every body that has not bound a
+    /// `lib` of its own, last of all the handles.
+    wants_lib: bool,
+    /// The handles a library imported by this run is compiled to take, in the
+    /// order the guest passes them (`db` … `console`), followed by the shadowed
+    /// node globals a library may not reach either.
+    library_params: Vec<&'static str>,
 }
 
 /// Build one code body's definition and one run's arguments: the bindings as
@@ -5925,6 +6769,17 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     if wants_console {
         names.push(CONSOLE);
     }
+    // A library imported by this run takes the handles above — the very ones
+    // the guest passes the body after its bindings — and nothing else of the
+    // body's: not its bindings (but `user`, which the guest passes on its own),
+    // not `lib` (a library is handed its own), and the node globals shadowed
+    // just as they are here.
+    let library_params = crate::code_library::library_params(names[1..].to_vec());
+    // After the console, for the console's reason: appending it moved nothing.
+    let wants_lib = !call.bindings.contains_key(LIB);
+    if wants_lib {
+        names.push(LIB);
+    }
     // §1a: the node globals, shadowed as parameters nobody passes. A binding of
     // the same name wins — it is already a `const` in this function's body, and
     // a parameter beside it would be a redeclaration and so a body that will not
@@ -5956,6 +6811,8 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_live,
         wants_v1,
         wants_console,
+        wants_lib,
+        library_params,
     })
 }
 
@@ -6118,6 +6975,11 @@ struct CachedBody {
 #[cfg(feature = "eval")]
 struct IsolateCache {
     bodies: BodyCache,
+    /// The code libraries compiled on this isolate (TODO F3.2), keyed exactly
+    /// as bodies are and bounded the same way. A library that did not compile
+    /// is held too — as its error — so a broken library costs one failed
+    /// compile per isolate and not one per run.
+    libraries: BodyCache,
     /// The generation of the snapshot defined on this isolate, or `None` before
     /// any run has carried one.
     ///
@@ -6132,6 +6994,7 @@ impl IsolateCache {
     fn new() -> IsolateCache {
         IsolateCache {
             bodies: BodyCache::new(),
+            libraries: BodyCache::new(),
             schema: None,
         }
     }
@@ -6214,6 +7077,7 @@ fn build_script(
     stores: &str,
     triggers: &str,
     functions: &str,
+    libraries: &str,
     define_schema: Option<&SchemaSnapshot>,
     generation: Option<u64>,
 ) -> String {
@@ -6228,6 +7092,8 @@ fn build_script(
         wants_live,
         wants_v1,
         wants_console,
+        wants_lib,
+        library_params: _,
     } = scripts;
     let mut script = String::new();
     // Before the definition, because a body's very first run is also the run
@@ -6249,7 +7115,7 @@ fn build_script(
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
              {wants_triggers}, {wants_module_fns}, {wants_live}, {wants_v1}, {wants_console}, \
-             {definition});\n"
+             {wants_lib}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
@@ -6264,7 +7130,7 @@ fn build_script(
         serde_json::to_string(&CONSOLE_METHODS).unwrap_or_else(|_| "[]".to_owned());
     script.push_str(&format!(
         "__scInvoke(\"{token}\", \"{key:016x}\", {args}, {stores}, {triggers}, {functions}, \
-         {generation}, {console_methods});"
+         {generation}, {console_methods}, {libraries});"
     ));
     script
 }
@@ -8141,6 +9007,7 @@ mod tests {
             max_file_ops: 10,
             max_trigger_runs: 10,
             max_module_calls: 10,
+            libraries: None,
             schema: None,
             console: None,
             started: None,
@@ -8232,6 +9099,7 @@ mod tests {
             "[]",
             "[]",
             "[]",
+            "{}",
             Some(&fifth),
             Some(5),
         );
@@ -8246,14 +9114,27 @@ mod tests {
 
         // A hit carries one integer and no JSON at all — the whole reason a
         // generation exists rather than a hash of the schema.
-        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]", None, Some(5));
+        let hit = build_script(
+            &scripts,
+            "bb",
+            key,
+            true,
+            "[]",
+            "[]",
+            "[]",
+            "{}",
+            None,
+            Some(5),
+        );
         assert!(!hit.contains("__scDefineSchema"), "{hit}");
         assert!(!hit.contains("books"), "the schema travelled: {hit}");
         assert!(hit.contains(", 5, [\"log\""), "{hit}");
 
         // And a run with no snapshot at all names none, so the guest resolves
         // nothing rather than the last schema some other run left behind.
-        let none = build_script(&scripts, "cc", key, true, "[]", "[]", "[]", None, None);
+        let none = build_script(
+            &scripts, "cc", key, true, "[]", "[]", "[]", "{}", None, None,
+        );
         assert!(none.contains(", null, [\"log\""), "{none}");
     }
 
@@ -8270,7 +9151,9 @@ mod tests {
             "nothing is warm yet"
         );
 
-        let miss = build_script(&scripts, "aa", key, false, "[]", "[]", "[]", None, None);
+        let miss = build_script(
+            &scripts, "aa", key, false, "[]", "[]", "[]", "{}", None, None,
+        );
         assert!(miss.contains("__scDefine"), "{miss}");
         assert!(miss.contains("return secret + 1;"), "{miss}");
         assert!(miss.contains("__scInvoke"), "{miss}");
@@ -8280,7 +9163,9 @@ mod tests {
             cache.holds(key, &scripts.definition),
             "the isolate has it now"
         );
-        let hit = build_script(&scripts, "bb", key, true, "[]", "[]", "[]", None, None);
+        let hit = build_script(
+            &scripts, "bb", key, true, "[]", "[]", "[]", "{}", None, None,
+        );
         assert!(!hit.contains("__scDefine"), "{hit}");
         assert!(
             !hit.contains("return secret + 1;"),
@@ -9031,12 +9916,12 @@ mod tests {
                                 seen.push(dir.to_owned());
                                 out.push(json!({
                                     "name": dir, "path": format!("{prefix}{dir}"),
-                                    "isDirectory": true, "size": null,
+                                    "isDirectory": true, "size": null, "modified": null,
                                 }));
                             }
                             None => out.push(json!({
                                 "name": rest, "path": p, "isDirectory": false,
-                                "size": bytes.len(),
+                                "size": bytes.len(), "modified": "2026-08-21T09:00:00.000Z",
                             })),
                         }
                     }
@@ -9263,6 +10148,63 @@ mod tests {
         assert_eq!(out["total"], json!(3));
         assert_eq!(out["root"], json!(""));
         assert_eq!(out["up"], Json::Null, "the store root has no parent");
+    }
+
+    #[tokio::test]
+    async fn a_listed_entry_keeps_what_the_listing_said() {
+        // TODO F1.5: name, isDirectory, size and modified, as properties and in
+        // what `JSON.stringify` makes of a listing — and `stat()` still works
+        // on either kind of entry.
+        let files = FakeFiles::new(&["s"])
+            .put("s", "a.txt", "abc")
+            .put("s", "sub/c.txt", "c");
+        let rt = CodeRuntime::new();
+        let out = rt
+            .run(with_files(
+                r#"const listed = await fs("s").dir("").list();
+                   const [file, dir] = listed;
+                   const opened = fs("s").open("a.txt");
+                   return {
+                     json: JSON.parse(JSON.stringify(listed)),
+                     props: [file.name, file.isDirectory, file.size, file.modified,
+                             dir.name, dir.isDirectory, dir.size, dir.modified],
+                     fileStat: await file.stat(),
+                     dirStat: await dir.stat(),
+                     opened: [opened.size === undefined, JSON.parse(JSON.stringify(opened))],
+                   };"#,
+                &*files,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            out["json"],
+            json!([
+                { "store": "s", "path": "a.txt", "name": "a.txt", "isDirectory": false,
+                  "size": 3, "modified": "2026-08-21T09:00:00.000Z" },
+                { "store": "s", "path": "sub", "name": "sub", "isDirectory": true,
+                  "size": null, "modified": null },
+            ])
+        );
+        assert_eq!(
+            out["props"],
+            json!([
+                "a.txt",
+                false,
+                3,
+                "2026-08-21T09:00:00.000Z",
+                "sub",
+                true,
+                null,
+                null
+            ])
+        );
+        assert_eq!(out["fileStat"]["size"], json!(3));
+        assert_eq!(out["dirStat"]["isDirectory"], json!(true));
+        // A handle that was opened rather than listed has looked at nothing.
+        assert_eq!(
+            out["opened"],
+            json!([true, { "store": "s", "path": "a.txt", "name": "a.txt", "isDirectory": false }])
+        );
     }
 
     #[tokio::test]
@@ -11865,5 +12807,152 @@ mod tests {
         c.bindings.insert("Table".into(), json!(1));
         c.bindings.insert("Field".into(), json!(2));
         assert_eq!(rt.run(c).await.unwrap(), json!(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Code libraries (TODO F3.2)
+    // -----------------------------------------------------------------------
+
+    fn libraries(set: &[(&str, &str)]) -> Option<Arc<CodeLibraries>> {
+        Some(Arc::new(CodeLibraries::new(set.iter().copied())))
+    }
+
+    #[tokio::test]
+    async fn two_bodies_share_a_library_and_an_edit_reaches_both() {
+        let rt = CodeRuntime::with_workers(1);
+        let v1 = libraries(&[("greet", "exports.hello = (who) => `hello ${who}`;")]);
+        let mut first = call(r#"return lib("greet").hello("a");"#);
+        first.libraries = v1.clone();
+        let mut second = call(r#"const { hello } = lib("greet"); return hello("b") + "!";"#);
+        second.libraries = v1;
+        assert_eq!(rt.run(first.clone()).await.unwrap(), json!("hello a"));
+        assert_eq!(rt.run(second.clone()).await.unwrap(), json!("hello b!"));
+
+        // An edit is new text and so a new key: the same isolate compiles it
+        // and both bodies answer from it on their next run.
+        let v2 = libraries(&[("greet", "module.exports = { hello: (who) => `hi ${who}` };")]);
+        first.libraries = v2.clone();
+        second.libraries = v2;
+        assert_eq!(rt.run(first).await.unwrap(), json!("hi a"));
+        assert_eq!(rt.run(second).await.unwrap(), json!("hi b!"));
+    }
+
+    #[tokio::test]
+    async fn a_library_is_evaluated_once_per_run_with_the_runs_own_handles() {
+        let host = FakeHost::rows(json!([{ "id": 1 }, { "id": 2 }]));
+        let rt = CodeRuntime::with_workers(1);
+        let set = libraries(&[
+            (
+                "counter",
+                "let n = 0; exports.next = () => ++n; exports.who = () => user && user.email;",
+            ),
+            (
+                "books",
+                "exports.count = async () => (await db.books.rows()).length;",
+            ),
+        ]);
+        let mut c = with_host(
+            r#"
+            const a = lib("counter"), b = lib("counter");
+            a.next(); b.next();
+            return [a === b, a.next(), a.who(), await lib("books").count()];
+            "#,
+            &*host,
+        );
+        c.bindings
+            .insert("user".into(), json!({ "email": "a@b.c" }));
+        c.libraries = set.clone();
+        assert_eq!(
+            rt.run(c.clone()).await.unwrap(),
+            json!([true, 3, "a@b.c", 2])
+        );
+        // The library's `db` call went over this run's host.
+        assert_eq!(host.plans().len(), 1);
+        // A second run starts from a fresh evaluation: module state never
+        // carries from one caller to the next.
+        assert_eq!(rt.run(c).await.unwrap(), json!([true, 3, "a@b.c", 2]));
+    }
+
+    #[tokio::test]
+    async fn a_library_has_no_handle_the_importing_body_lacks() {
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call(r#"return lib("net").get();"#);
+        c.libraries = libraries(&[(
+            "net",
+            "exports.get = () => typeof db + ' ' + typeof process;",
+        )]);
+        // No host: `db` is no parameter of the library either, and the node
+        // globals are shadowed there as they are in a body.
+        assert_eq!(rt.run(c).await.unwrap(), json!("undefined undefined"));
+    }
+
+    #[tokio::test]
+    async fn a_cycle_names_the_chain() {
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call(r#"return lib("a");"#);
+        c.libraries = libraries(&[
+            ("a", r#"exports.b = lib("b");"#),
+            ("b", r#"exports.c = lib("c");"#),
+            ("c", r#"exports.a = lib("a");"#),
+        ]);
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("cycle: a → b → c → a"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_library_is_named_with_what_could_be_imported() {
+        let rt = CodeRuntime::with_workers(1);
+        let mut c = call(r#"return lib("nope");"#);
+        c.libraries = libraries(&[("auth", ""), ("util", "")]);
+        let err = rt.run(c).await.unwrap_err().to_string();
+        assert!(err.contains("no code library named `nope`"), "{err}");
+        assert!(err.contains("auth, util"), "{err}");
+        // With no set at all, `lib` is still in scope and says so.
+        let err = rt
+            .run(call(r#"return lib("auth");"#))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can import none"), "{err}");
+        // And `require` now points at it.
+        let err = rt
+            .run(call(r#"return require("./auth");"#))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("lib(\"name\")"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_library_that_does_not_compile_breaks_only_its_importers() {
+        let rt = CodeRuntime::with_workers(1);
+        let set = libraries(&[
+            ("broken", "exports.a = 1;\nexports.b = = 2;"),
+            ("ok", "exports.v = 7;"),
+        ]);
+        let mut fine = call(r#"return lib("ok").v;"#);
+        fine.libraries = set.clone();
+        assert_eq!(rt.run(fine).await.unwrap(), json!(7));
+        let mut importer = call(r#"return lib("broken").a;"#);
+        importer.libraries = set;
+        let err = rt.run(importer).await.unwrap_err().to_string();
+        assert!(err.contains("`broken` does not compile"), "{err}");
+        assert!(err.contains("SyntaxError"), "{err}");
+        assert!(err.contains("(line 2)"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_save_check_names_the_line_and_runs_nothing() {
+        let engine = crate::DenoEvaluator::new();
+        let ran = crate::check_code_library(&engine, "exports.a = 1;\nthrow new Error('ran');")
+            .await
+            .unwrap();
+        assert_eq!(ran, None, "compiling is not running");
+        let err = crate::check_code_library(&engine, "exports.a = 1;\n\nexports.b = (;")
+            .await
+            .unwrap()
+            .expect("a syntax error");
+        assert!(err.starts_with("SyntaxError"), "{err}");
+        assert!(err.contains("(line 3)"), "{err}");
     }
 }

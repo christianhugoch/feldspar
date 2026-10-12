@@ -1371,7 +1371,8 @@ a sparse value goes into `attributes`.**
 | `_fd_views` | a Saltcorn UI application's views | **not an overlay**, and **per application** (§13.3): `(application, name)` is unique, so two applications may each have a `List Books` over one table. The pattern name, the table (which must be in the application's subset), `min_role`, `slug`, and a `configuration` that is **v1's shape, stored untouched** — it is what v1's own `list.ts` reads. `application` is by value, so deleting an application deletes its views itself |
 | `_fd_pages` | a Saltcorn UI application's pages | the same rules as `_fd_views`: per application, unique by name, a v1-shaped `layout` stored untouched, `min_role`, and `root_page_for_roles`, `no_menu` and `request_fluid_layout` in `attributes` |
 | `_fd_library` | a Saltcorn UI application's library ("shared components" in current v1) | the same rules again: per application, unique by name, deleted with the application. `icon` and a v1-shaped `layout` stored untouched. A layout places an item as `{ type: "library", library_id, slots }`, with `library_id` this table's UUID. Only a `saltcorn-ui` application may write one, and only the admin API writes it; the worker reads it from the view snapshot (§13.3, "The library") |
-| `_fd_translations` | an application's catalogue, for an application with no project tree (§16.1) | the same rules as `_fd_library`: per application, unique by `name` — which is the **locale tag** — and deleted with the application. `messages` is the flat catalogue of §16.1, keyed by the **English source text**. It is the home of a *Saltcorn UI* application's translations, because a Saltcorn UI application's definition is rows; a code application's are files in its repository (`<project>/locales/{locale}.json`), because that is where *its* definition is. Both are behind one `CatalogStore`, so the admin API, the Translations screen and the LLM fill are written once |
+| `_fd_translations` | an application's catalogue, for an application with no project tree (§16.1) | the same rules as `_fd_library`: per application, unique by `name` — which is the **locale tag** — and deleted with the application. `messages` is the flat catalogue of §16.1, keyed by the **English source text**. It is the home of a *Saltcorn UI* application's translations, because a Saltcorn UI application's definition is rows; a code application's are files in its repository (`<project>/locales/{locale}.json`), because that is where *its* definition is. Both are behind one `CatalogStore`, so the admin API, the Translations screen and the LLM fill are written once. A row with a NULL `application` is the **shared catalogue** every application serves under its own (§16.1); `application` is nullable for it, and since a unique key treats NULLs as distinct, the store updates a shared row in place rather than inserting a second |
+| `_fd_code_libraries` | code libraries (§10.1, "`lib`") | **not an overlay**: named JavaScript that code bodies import with `lib(name)`. `application_id` NULL is instance-wide, otherwise one application's (by value, deleted with the application). `name` is unique per scope, which is checked on save (NULLs are distinct in SQL). Loaded into the catalog at boot and after every change |
 | `_fd_models` | model definitions | **not an overlay** — the row is the model's only definition (§14.2): the provider, the `dataset` (which rows and which derived values, as a list of `sc-expr` formulas), the provider's configuration, the hyperparameter *space* (per key a value or a list to search over) and the split's fractions and seed. `table_name` is derived from the dataset on the way out and checked against it on the way in, so the list can be filtered by table without reading every dataset |
 | `_fd_model_instances` | one fit each | the provider's serialised `state`, its `parameters` (structured for display), the **host's** `metrics` per split, and the `encoding` the fit was made with — which is the load-bearing one: a prediction is encoded the way its fit was, or it fails. `status` is a column because every row has one and it is what the list filters on; the failure **sentence** is in `attributes`, because it is present only on the rows that failed. `active` is a column and at most one row per model carries it |
 | `_fd_streams` | streams: dataflows as an entity | **not an overlay** — there is nothing to introspect a stream from, so the row is its only definition (§14.3): the provider, the `configuration` its `config_spec` declares (secrets stored as given, redacted on the way to a form), `min_role` (the floor for **observing** it through an application; `None` is admin-only, the trigger rule for the trigger reason), and in `attributes` the sparse `enabled` flag. The **element type is not a column**: it is a pure function of `provider` + `configuration`, computed on read, because a stored copy would be a second answer that drifts the day a provider's declaration changes. Nor are the elements — a flow is made durable by a trigger that writes a row, and there is no `_fd_stream_elements` |
@@ -1754,11 +1755,36 @@ erDiagram
   }
   TRANSLATIONS["_fd_translations"] {
     uuid id PK
-    uuid application "the app, by value; UNIQUE (application, name)"
+    uuid application "the app, by value; NULL = the shared catalogue; UNIQUE (application, name)"
     text name "the locale tag -- fr, pt-BR"
     text description
     json messages "the flat catalogue: English source text -> translation"
     json attributes
+  }
+  UPLOADS["_fd_uploads"] {
+    uuid id PK "the upload's id, in its tus URL"
+    text name "the original filename"
+    text description
+    uuid application "by value"
+    text slot "the application's upload slot"
+    text store
+    text uploader "user id or session"
+    text mime
+    int length
+    int offset "bytes received so far"
+    text temp_path
+    text final_path
+    json meta "what the hook added"
+    bool completed
+    int created "swept after 24 h if not completed"
+    json attributes
+  }
+  CODELIBS["_fd_code_libraries"] {
+    uuid id PK
+    text name "what lib() imports; unique per scope, checked on save"
+    text description
+    text code "assigns to exports"
+    uuid application_id "NULL = instance-wide; by value, deleted with the app"
   }
   STREAMS["_fd_streams"] {
     uuid id PK
@@ -1811,6 +1837,8 @@ erDiagram
   APPS ||--o{ PAGES : "application -- by value, deleted with the app"
   APPS ||--o{ LIBRARY : "application -- by value, deleted with the app"
   APPS ||--o{ TRANSLATIONS : "application -- by value, deleted with the app"
+  APPS |o--o{ CODELIBS : "application_id -- by value, deleted with the app"
+  APPS ||--o{ UPLOADS : "application -- by value, the slot's"
   VIEWS }o--o{ LIBRARY : "library_id -- inside configuration JSON"
   PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"
@@ -2331,12 +2359,17 @@ error only to something that was told to read it — `exists` is a question, not
 | `write(data)`, `create(data)` | create-or-replace, and create-or-refuse |
 | `delete()` | whether there was anything to delete |
 | `moveTo(dest)`, `copyTo(dest)` | `dest` may be a file in **another** store; answers the destination |
+| `read({ offset, length })` | a piece of the file as a `Uint8Array`, streamed from the store (TODO F2.8) |
+| `append(data, options?)` | add to the end, creating the file (and recording its owner) when missing |
+| `concat([part, …], options?)` | join files of this store into this one, host-side; answers its size |
+| `sha256()` | the hex digest, taken host-side over the streamed file |
+| `url({ download })` | where the custom query's application serves the file (a static directory, or `/files/serve`), or `null` |
 | `meta()`, `setMeta({ minRole, attributes })` | the store's own per-file metadata |
 
 | on a directory | |
 | --- | --- |
 | `file(name)`, `dir(name)`, `parent`, `path`, `name` | references, synchronous |
-| `list()` | the direct children — as the same file and directory objects, so a listing is walked and acted on rather than re-opened by name |
+| `list()` | the direct children — as the same file and directory objects, so a listing is walked and acted on rather than re-opened by name. A listed entry also carries what the listing said: `size` and `modified` beside `name` and `isDirectory`, as properties and in `toJSON` (`{store, path, name, isDirectory, size, modified}`), so `JSON.stringify(await dir.list())` is a usable listing. A file that was *opened* rather than listed has `size`/`modified` `undefined` — nothing has looked at the store for it — and `stat()` works on either kind of entry |
 | `exists()`, `stat()`, `create()`, `delete()` | `create()` is `mkdir -p` and idempotent; `delete()` takes everything in it |
 
 **Authority** is `db`'s: the admin's by default, because a trigger is server-side configuration,
@@ -2351,9 +2384,12 @@ access rule.
 **Bounded**, in three ways of its own: **100 operations per run** (a budget apart from the 200
 database calls and the 50 fetches, because a walk over a directory is a third kind of accident);
 **8 MB across the seam** per read and per write, refused rather than truncated for the reason a
-1000-row read is; and **256 MB per copy**, which is larger precisely because those bytes never
-enter the isolate. Two things a body must not assume: nothing **streams**, and a file write is
-**not rolled back** by a trigger that throws afterwards.
+1000-row read is; and **256 MB per copy or `concat`**, which is larger precisely because those
+bytes never enter the isolate. Both are server settings (`--code-max-file-bytes`,
+`--code-max-copy-bytes`; `sc_api::code_host::set_file_limits`, process-wide like the code
+workers). A file larger than one read is never read whole: `read({ offset, length })`, `append`,
+`concat` and `sha256` keep it on the host (TODO F2.8). A file write is **not rolled back** by a
+trigger that throws afterwards.
 
 The seam is JSON here too — one operation in, one value out (`sc_expr::FileHost`, implemented by
 `sc_api::code_host::FileStoreHost` over the catalog's connected stores) — so §15's other guest
@@ -2364,11 +2400,115 @@ languages inherit `fs` the way they inherit `db`:
   "authority": "admin", "encoding": "text" }
 ```
 
-`op` is `read` | `write` | `stat` | `list` | `mkdir` | `delete` | `copy` | `rename` | `meta` |
+`op` is `read` (with `offset`/`length` for a piece) | `write` | `append` | `concat` (`parts`) |
+`sha256` | `url` (`download`) | `stat` | `list` | `mkdir` | `delete` | `copy` | `rename` | `meta` |
 `setMeta`; bytes travel base64 (`base64`) or as text (`text`); `copy` and `rename` carry
 `toStore`/`toPath`, so a cross-store move is one operation. Nothing in a request is trusted: the
 store is resolved through the catalog, the path is re-checked for the traversal the guest already
 refused, and an unknown field is a refusal naming it.
+
+#### Globals, and the answer a body gives an HTTP caller
+
+Beside the host surfaces a body has the web's own small globals (TODO F1.2–F1.4), defined in
+`SETUP` and the fetch prelude with `fixed(...)` like everything else on the isolate. They are
+not a surface — none of them reaches anything — and they exist so that a body never hand-writes
+base64, UTF-8 or SHA again:
+
+- `btoa`, `atob`, `TextEncoder`, `TextDecoder` — thin wrappers over the prelude's own codecs
+  (`__scCodec`). UTF-8 only; `TextDecoder` does not stream, and `fatal: true` throws on bytes
+  that are not UTF-8.
+- `crypto.getRandomValues(typedArray)` (at most 65 536 bytes, as the Web API) and
+  `crypto.randomUUID()`, over one sync op on `getrandom`.
+- `crypto.subtle.digest("SHA-256"|"SHA-384"|"SHA-512", data)` and HMAC through
+  `importKey("raw", …, { name: "HMAC", hash })`, `sign` and `verify` (constant-time), over
+  `sha2`/`hmac` (`sc-expr::code_crypto`). These answer promises, as the Web Crypto API does, but
+  the ops are **synchronous**: hashing runs at hundreds of MB/s over bytes already in the
+  isolate's heap, so it is bounded by the heap, and a sync op needs no resumption mark. Only
+  HMAC keys and the raw format exist; anything else is `NotSupportedError`.
+- `crypto.password.hash(pw)` / `crypto.password.verify(pw, hash)` — argon2id at `sc-auth`'s
+  parameters (`Argon2::default()`), **asynchronous on tokio's blocking pool**, so a deliberately
+  slow hash is not charged to the 1 s JavaScript slice and does not stall co-resident bodies.
+  A global has no run token, so `SETUP` tracks the run whose JavaScript is on the isolate
+  (`current`, set at invoke and at every resumption mark) and marks that run again when the
+  hash comes back — otherwise its continuation would run with the watchdog disarmed.
+  `verify` against something that is not a PHC hash throws rather than answering `false`.
+
+We do not pull in `deno_web` or `deno_crypto`: without a snapshot their JavaScript is read from
+build-machine paths.
+
+**Status codes.** A body that serves a request — a custom query (§13.4) or a trigger called as an
+endpoint — chooses its answer:
+
+- `throw httpError(status, message, body?)` throws a frozen `HttpError` (an `Error`, catchable
+  and inspectable) tagged with a symbol no body can reach. The run wrapper recognises the tag and
+  calls `op_sc_http_error`, which ends the run with `sc_error::Repr::Http` — a variant that is
+  *not a fault* and passes through `run_js_code` unflattened. The REST provider answers
+  `ApiResponse::with_status(status, body ?? { error: message })`; a status outside 400–599 is a
+  500 with the reason logged. Anywhere else (a trigger fired by an event) it is an ordinary
+  failure.
+- `return response({ status, headers, body })` (status 200–599) is the success side. The run
+  wrapper hands it to `op_sc_respond`, which wraps it under a key that is random per process
+  (`sc_expr::response_key`) — only the host writes it, so a body that echoes its caller's JSON
+  cannot forge a status or a header. Headers the server owns (`set-cookie`, the CSP headers,
+  `x-frame-options`, `content-type`, the hop-by-hop ones; `sc_expr::SERVER_OWNED_HEADERS`) are
+  refused in the guest, so the author is told, and dropped again where the router writes them.
+  **Bytes out (TODO F2.9):** a `Uint8Array` (or `ArrayBuffer`) `body` crosses as `bodyBase64`
+  beside the `content-type` the headers name — the one server-owned header a raw body may set —
+  and is served through `ApiResponse::raw`. **A file out (TODO F2.10):** `file: handle` (or a
+  handle as the `body`), with `filename` and `download`, crosses as `{ store, path, authority }`
+  (`sc_expr::FileReply`) — never the bytes — and the REST provider serves it through the shared
+  file response builder (§13.2: streamed, `Range`, ETag, `Content-Disposition`), with a
+  `cache-control` header handed to the builder. A handle opened `asUser` is checked against the
+  caller by the owner rule first, and one they may not read is the 404 a missing file is; an
+  admin-authority handle is not checked, because the query's code was the check. Each request —
+  each `Range` request of a video — reruns the query, so a revoked share is refused at once.
+- **Any other throw or rejection** is a **500** `{ "error": "internal error", "id" }` to a
+  caller who is not an admin; the full text (query name, stack) goes to the log under that id,
+  and to an admin caller, without the doubled `invalid:` prefix. A watchdog, wall-clock or heap
+  trip is a **503** `{ "error": "timeout" }`. The classification (`sc_expr::code_failure`) reads
+  the phrases the runtime writes, kept beside the code that writes them. A refusal *before* the
+  body runs (a missing required parameter, a role below the floor) keeps its own status.
+
+#### `lib`: code libraries (TODO F3)
+
+A **code library** is named, shared JavaScript that code queries and triggers import:
+`const { requireUser } = lib("auth")`. It is a row of `_fd_code_libraries` (`id`, `name`,
+`description`, `code`, `application_id` — NULL for instance-wide), held in `sc-catalog`
+(`code_libraries.rs`) because every code body runs over a `Catalog`, and loaded into it at boot
+and after every save or delete under a new generation. The admin API (`listCodeLibraries`,
+`createCodeLibrary`, `updateCodeLibrary`, `deleteCodeLibrary`), the screen at Settings →
+Development → Code library, the MCP tools (`describe_code_libraries`, `save_code_library` with
+`allow_edit`, `delete_code_library` with `allow_drop`) and backups (`code-libraries.json`, restored
+after the applications; one already defined here under the same name and scope is kept) all
+go through `sc_app::save_code_library_checked`, which checks the name (identifier-like, unique
+per scope), that the application exists, and that the code **compiles** — compiled on the code
+runtime exactly as a run would compile it, and not run. A syntax error is refused naming its
+line in the library. Deleting an application deletes its libraries.
+
+**Resolution.** A custom query's run carries its application (`ActionContext::with_application`,
+from the REST provider), and imports that application's library of a name over the
+instance's. A trigger belongs to no application and imports instance-wide libraries only —
+however it is fired, so that a trigger body means one thing. `sc_catalog::Catalog::code_libraries_for`
+answers the resolved set (`sc_expr::CodeLibraries`), cached per application and generation.
+
+**Compiled per isolate, evaluated per run.** `lib` is synchronous, so the libraries a run may
+import are compiled onto its isolate *before* its script, each as a function of
+`(exports, module, lib, user, …the run's handles)` under a content key (as bodies are, and in a
+bounded cache of its own): an edit is new text and so a new key, which is what makes an edit
+reach every importer on its next run with nothing to invalidate. A library that does not compile
+is held as its error, so it fails only the runs that import it. A library's top level runs the
+first time a run imports it, **with that run's own handles and `user`** — its `db`, `fs`,
+`fetch` carry the run's authority, so a library can never do more than the body that imported
+it — and the exports are kept for the rest of that run only. The design first said "evaluated
+once per isolate per (library, generation, authority)"; that cannot work, because a handle is
+bound to its run's token and dies with the run, and it would also share module state between
+callers. Compiling is the cost worth caching; evaluating a library is a few function
+definitions. A library imported by a body without a handle does not have that handle either
+(it is no parameter), and the node globals are shadowed in it as in a body.
+
+**Cycles** throw naming the chain (`code libraries import each other in a cycle: a → b → a`).
+An unknown name throws listing what this code can import. `require` still throws, and now
+points at `lib()`. Libraries are JavaScript only: a Python body has no `lib`.
 
 #### `trigger`: another trigger in a code body
 
@@ -5026,6 +5166,49 @@ already on the screen, and a typo in a text field is silent until a 404. A store
 no longer offers is still shown and still selected, the pattern the framework picker on the same
 form uses, because a form must never silently discard what it was given to edit.
 
+**Request bodies and upload slots** (TODO F2.5–F2.7). Every body the server reads into memory
+is bounded by `--max-request-body` (default 2 MiB, an explicit `DefaultBodyLimit` plus the
+dispatcher's own bounded read), and a body over it is a JSON `413 {error}` — axum's plain-text
+one is rewritten. The admin file manager's `/upload` and the backup upload are bounded by
+`--max-upload-bytes` (default 256 MiB). A large file from an application's client does not go
+through either: it goes to an **upload slot**, `Application::uploads` (`sc_app::UploadSlot`:
+`name`, `store`, `folder`, `min_role` (default admin), `max_bytes` (0 = the server's limit, which
+also caps a larger value), `mime_allow` (matched on the name's type, as a `File` field's is) and
+an optional `hook`). `save_application` validates slots beside the static directories
+(`validate_upload_slots`: an identifier name, unique; a store in the subset; a folder inside the
+store; a hook that is one of the app's JavaScript or Python queries). They are stored in the
+nullable `_fd_applications.uploads` column, travel with the application in the admin API and in
+backups, and are edited on the application form and by `update_application`'s `uploads` section.
+
+A slot is served at `{mount}/_upload/{name}` (the app's first API mount, like `/live`), matched
+by the dispatcher **before the body is read** (`sc_server::uploads`). It speaks core tus 1.0
+with `creation` and `termination`: `POST` (with `Upload-Length`, `Upload-Metadata` filename and
+filetype) checks the role, size and type, then runs the hook with
+`body = { filename, size, mime, slot }` — a non-2xx answer (`httpError(403, …)`) is the refusal,
+and `{ path?, meta?, min_role? }` chooses the path inside the folder, extra string attributes and
+a tighter floor — and answers `201` with `Location`. `PATCH` streams the body into
+`FileStore::open_append` on a temporary file in the store's admin-only `.feldspar-uploads/`
+folder, stopping at the declared length (a body that runs past it is a `413`, nothing past the
+bound written), and keeps what arrived when the connection drops; `HEAD` answers the offset,
+which is the temporary file's size rather than the row's. When the offset reaches the length the
+file is renamed into place (a destination that exists is a `409`, also checked at creation) and
+given its owner (the uploader), `attributes.filename` and the hook's attributes; the response
+carries `Feldspar-File-Path` and, when a static directory or `/files/serve` covers it,
+`Feldspar-File-Url`. `DELETE` abandons it. The upload's state is a row of `_fd_uploads`, so a
+resume survives a restart; only its uploader (`user:<id>`, or a hash of an anonymous browser's
+cookie) may continue, inspect or abandon it, and anybody else gets the 404 an unknown id gets.
+A sweep every ten minutes removes uploads begun over 24 hours ago, with their bytes.
+
+**The client side (TODO F2.11).** The generated client has `api.uploads.<slot>(file, { onProgress,
+signal, retries, chunkSize, filename })` for each slot (`sc_api::generate_app_client` with the
+app's `sc_app::upload_exports`), resolving to `{ path, url }` from those two headers. It is the
+helper's `upload()`, a tus client: chunks of 5 MiB by default, `onProgress(sent, total)` after
+each, and after a failed chunk (the network, a 5xx, a 409 offset disagreement) a growing pause, a
+`HEAD`, and on from the offset the server reports — up to `retries` failures in a row. The upload
+URL is remembered in `localStorage` (wrapped in try/catch) under a fingerprint of the slot URL and
+the file's name, size and modification time, so the same file uploaded again after a reload
+resumes too. `signal` stops it without abandoning it; a 4xx refusal is not retried.
+
 **The URL is app-root-relative.** The public URL is `//<subdomain>.<host><mount>/<path within the
 directory>`, but what anything *describing* a URL hands out — `list_assets_*`, the coding agent's
 session header — is the `/img/hero.png` half, built by `StaticDir::url_for`, which is
@@ -5362,7 +5545,9 @@ frameworks: {
       runtime: "{{ project }}/src/feldspar",
       client: "client.ts",
     },
-    csp: { "img-src": ["'self'", "data:"] },  // widenings on the strict baseline
+    // widenings on the strict baseline; React's own default also has `blob:` in
+    // `img-src` and `media-src 'self' blob:`, for object URLs (TODO F1.7)
+    csp: { "img-src": ["'self'", "data:", "blob:"], "media-src": ["'self'", "blob:"] },
     builder_prompt: "You maintain {{ app }} in {{ root }} …",
     scaffold: async (ctx) => [{ path, contents }, …],  // the project, written once
     runtime:  async (ctx) => [{ path, contents }, …],  // rewritten on every build
@@ -6429,8 +6614,33 @@ with `db.asUser()` delegating to the caller. The request is in scope as `body` (
 `user`, and there is no `payload`, because there is no event. A declared parameter is checked
 and coerced where it arrives (the query string for `GET`/`DELETE`, the body otherwise) before
 the body runs, so the client method's argument types hold inside the body too; what was not
-declared is passed as sent. What the body returns is the response, and a body that throws is an
-error answer naming the query.
+declared is passed as sent. What the body returns is the response. A body chooses its own status
+with `throw httpError(…)` or `return response({ status, headers, body })`, and any other throw is
+a 500 with no stack for a caller who is not an admin (§10.1, "Globals, and the answer a body gives
+an HTTP caller").
+
+**Bytes in and out (TODO F2.9/F2.10).** A JavaScript query has a `body_type` (`json` | `bytes`)
+and a `response_type` (`json` | `bytes`), both stored only when not `json`. With `body_type:
+bytes` (POST/PUT/PATCH only) `body` is a `Uint8Array` of the request's raw bytes — whatever they
+were labelled, up to `--max-request-body` — and the declared parameters come from the query
+string; the router now hands every request's bytes over as `ApiRequest::raw`. The bytes reach
+the isolate wrapped under a per-process random key (`sc_expr::bytes_binding`) that the prelude
+turns into a `Uint8Array`, so a JSON body cannot pose as bytes. Every code query also has
+`request = { method, contentType, headers }`, the headers lower-cased with `cookie`,
+`authorization`, `proxy-authorization` and the CSRF token removed. `response_type: bytes` types
+the generated method as returning a `Blob`; a `GET` also gets `<name>Url(params)`, which builds
+the URL for `<img src>`, `<video>` and links. The generated method of a `bytes` body takes a
+`BodyInit` (`Blob`, `ArrayBuffer`, `Uint8Array`, …).
+
+**The arguments are open (TODO F1.1).** Because a body reads `body` and `query` whole, its
+projected endpoint carries `Endpoint::open_args`: the generated method **always** takes the
+argument — `body` for a method with one, `query` for `GET`/`DELETE` — typed as the declared
+parameters `& Record<string, unknown>`, or `Record<string, unknown>` when nothing is declared,
+and optional when no declared parameter is required. An omitted body is sent as `{}`; an open
+query object sends every key the caller set (null and undefined left out). Before this, an empty
+input struct counted as "no body" and the method dropped what it was given. `save_api_query`
+and the admin editor say so when a code query declares no parameters
+(`sc_api::undeclared_params_note`): the client still sends, but nothing is typed or checked.
 
 Neither `body` nor `query` is `payload` spelled differently: an exposed trigger's body gets the
 request body as `payload` because a trigger is an event handler first, and a trigger has no
@@ -6946,10 +7156,21 @@ of those endpoints are the SPA's own plumbing.
 - **Tier 2 — generated from tagged endpoints.** An `Endpoint` gains an opt-in MCP tag carrying
   the prose a model reads. Everything else is already in the value: the name, the typed path and
   query parameters, and both `TypeSchema`s. `TypeSchema` → JSON Schema is the one new function,
-  and it is the sibling of the TypeScript generator's type mapping (§13.1).
+  and it is the sibling of the TypeScript generator's type mapping (§13.1). A tag declares the
+  grant a change needs (`.needs(Grant::…)`), and may declare a second (`.and_needs(…)`), checked
+  in order so a refusal names the first flag missing. **Roles and accounts** are tier 2 since
+  TODO F1.9: `listRoles` and `listUsers` read; `createRole` and `setUserDisabled` need
+  `allow_access_changes`; `deleteRole` and `deleteUser` need it *and* `allow_drop`. The last
+  enabled admin cannot be disabled or deleted by anyone (`sc_auth::refuse_last_admin`, inside
+  `delete_user` and `set_user_disabled`, so the CLI's `delete-user` and `modify-user
+  --disabled` are held to it too), and a token cannot disable or delete the admin it runs as.
+  A tool result for a query lists `public: true` beside `min_role: 100`, and `save_api_query`
+  takes `public: true` as a synonym (both together must agree); the role stays the one stored
+  fact.
 - **Tier 3 — deliberately absent.** Row CRUD, the file-store IDE routes (§12.1) — creating a
   store is a tier-1 tool, browsing or writing one is not — backup and
-  restore, user management, and anything that reads a provider's key. Each is a real capability
+  restore, creating a user, becoming one or setting a password, and anything that reads a
+  provider's key. Each is a real capability
   and none of them is *administering the application*, which is what this server is for. An
   agent that can add a column and an agent that can read customer rows are different
   propositions, and only the first is what building an application requires.
@@ -11330,6 +11551,7 @@ the string with `%s` in it, and nothing else in the system sees that form.
 | `admin` | `ui/admin/src/locales/{locale}.json`, `import()`-ed per locale | ships with the bundle, code-split so one locale is downloaded |
 | `builder` | `ui/builder/src/locales/{locale}.json` | same, separate bundle |
 | per application | **files** for an application with a project tree — `<project>/locales/{locale}.json`; **rows** in `_fd_translations` (§9) for one without | *an application's translations live wherever that application's definition lives* |
+| shared by every application | **rows** in `_fd_translations` with a NULL `application`, one per locale | an installation-wide string ("Sign in") is translated once, not once per application |
 
 The last row is the one worth arguing. A code application's definition is its git repository;
 putting its translations anywhere else means a clone that does not carry them, a coding agent
@@ -11339,6 +11561,18 @@ remember them separately. A Saltcorn UI application's definition is `_fd_views` 
 `_fd_library` is. Both are behind one `CatalogStore` (§2.1), chosen by asking whether the
 framework builds from a source tree — the same question the build already asks — so the admin
 API, the Translations screen and the LLM fill are written once.
+
+**The shared catalogue** (TODO F6). Lookup is **app → instance → key**, merged on the server
+by `sc_app::merged_app_catalogue` in `GET {mount}/i18n/{locale}.json` and in the Saltcorn UI
+renderer, so the generated client and `useT` are unchanged. A key the app translates wins; an
+empty string in the app's catalogue counts as missing. The shared catalogue's locales are the
+installation's `enabled_locales` less the source language, and its keys are the union of what its
+locales hold (there is no source to extract). It has its own screen (Settings → Translations
+(shared): `getInstanceTranslations`, `saveInstanceTranslations`, `translateInstanceMissing`);
+an application's screen shows a key it inherits greyed with **override**, counts it as covered,
+and its **Translate missing** skips it. A shared save drops every mount's cached catalogues. MCP's
+`describe_translations`/`save_translations` take `scope: "instance"`, and `feldspar i18n
+translate --instance` fills it from a terminal.
 
 Which locales an application serves, and which one it falls back to, are **sparse values in
 `Application.attributes`** (§9's column-vs-attributes rule): most applications have neither, and

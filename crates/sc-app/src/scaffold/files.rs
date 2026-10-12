@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 
 use sc_api::{
     CLIENT_HELPER_FILE, EndpointSet, GRAPHQL_CLIENT_FILE, GRAPHQL_SCHEMA_FILE, StreamExport,
-    client_helper, client_property, generate_client_with_streams, generate_graphql_client, op_name,
+    client_helper, client_property, generate_app_client, generate_graphql_client, op_name,
 };
 use sc_auth::{ROLE_ADMIN, Role};
 use sc_catalog::{PublicOrigin, Table};
@@ -377,7 +377,7 @@ pub fn common_runtime_files(
     let mut files = vec![
         GeneratedFile::new(
             at(client_file),
-            generate_client_with_streams(ctx.endpoints, ctx.streams),
+            generate_app_client(ctx.endpoints, ctx.streams, &crate::upload_exports(ctx.app)),
         ),
         GeneratedFile::new(at(CLIENT_HELPER_FILE), client_helper()),
         GeneratedFile::new(
@@ -1059,6 +1059,13 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          saved translation is live without a build; a string you newly wrap in \
          `t()` needs one before the running app renders it translated.\n\
          \n\
+         Strings many applications say (\"Sign in\", \"Password\", \"Cancel\") \
+         belong in the server's **shared catalogue**, which every application \
+         serves under its own: `describe_translations` and `save_translations` \
+         with `scope: \"instance\"`. A string this application translates itself \
+         wins; one `describe_translations` lists as `inherited` is already \
+         translated and is not missing.\n\
+         \n\
          ## The half of this application that is not in this project\n\
          \n\
          The tables, the access rules, the triggers and the actions they run are \
@@ -1076,6 +1083,10 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
          there is no database connection in this project, and there is no way to \
          add one. Every call is authorized by the server against the signed-in \
          user's role and the tables' ownership rules.\n\
+         \n\
+         {logic}\
+         \n\
+         {csp}\
          \n\
          ## Live updates\n\
          \n\
@@ -1262,8 +1273,90 @@ fn agents_md(ctx: &ProjectContext<'_>) -> String {
         subdomain = ctx.app.subdomain,
         command = add_query_command(ctx),
         testing = testing_summary(ctx),
+        logic = LOGIC_SECTION,
+        csp = CSP_SECTION,
     )
 }
+
+/// `AGENTS.md`'s "where logic goes" and "code queries" (TODO F1.1–F1.4, F1.10).
+///
+/// The field report behind F1 (PADDI//GRID) is an agent that made every table
+/// admin-only and wrote all its server logic as JavaScript queries, so the
+/// access model never helped it and it hand-wrote base64, SHA and status codes.
+/// This is the order to reach for things in, and what a code query has when it
+/// is the right answer. The same text, at greater length, is in
+/// `describe_code_api`.
+const LOGIC_SECTION: &str = "## Choosing where logic goes\n\
+\n\
+Reach for these in order, and stop at the first that can express it:\n\
+\n\
+1. **A table with access rules.** A minimum role to read and to write, and an \
+**ownership formula** (`user_id == user.id`) so each user sees and changes only \
+their own rows. The generated client then reads and writes it with no server \
+code at all, and every rule is enforced by the server for every caller.\n\
+2. **A File field** on that table for uploads: the file is stored, served and \
+access-checked with its row. For a large file, or one with no row, use an \
+**upload slot**: `api.uploads.<slot>(file, { onProgress, signal })` sends it in \
+resumable chunks (it survives a dropped connection) and resolves to \
+`{ path, url }`; the file is its uploader's.\n\
+3. **A custom SQL query** for a read that is one statement (a report, a join, \
+an aggregate).\n\
+4. **A code query** (`language: javascript`) only for what the above cannot \
+express: several steps, a call out with `fetch`, a password check.\n\
+\n\
+In a code query:\n\
+\n\
+- The arguments arrive as `body` (POST/PUT/PATCH) or `query` (GET/DELETE). \
+The generated method always takes them — `api.myQuery({ anything: 1 })` — \
+typed from the declared params (`params`) plus any other key, so declare the \
+ones it reads.\n\
+- **Never hand-write base64, UTF-8 or SHA.** `btoa`, `atob`, `TextEncoder`, \
+`TextDecoder`, `crypto.randomUUID()`, `crypto.getRandomValues()`, \
+`crypto.subtle.digest(\"SHA-256\", bytes)`, HMAC through \
+`crypto.subtle.importKey`/`sign`/`verify`, and `crypto.password.hash(pw)` / \
+`crypto.password.verify(pw, hash)` (argon2id, as the server's own accounts) \
+are there.\n\
+- **Answer with a status:** `throw httpError(401, \"sign in\")` is a 401 \
+`{ \"error\": \"sign in\" }` (a third argument replaces the body); \
+`return response({ status: 201, headers: { \"x-id\": id }, body })` is a \
+success with a status and headers (not cookies, CSP or the content type, which \
+the server owns). Any other throw is a 500 `{ \"error\": \"internal \
+error\", \"id\" }` to users — the stack goes to the server log under that \
+id, and only an admin caller sees it.\n\
+- **Bytes and files.** A query saved with `body_type: bytes` gets the raw \
+request body as a `Uint8Array` (its client method takes a `Blob`). One saved \
+with `response_type: bytes` may `return response({ body: uint8array, headers: \
+{ \"content-type\": \"image/png\" } })` or `return response({ file: \
+fs(\"files\").open(path), filename, download: true })`; its client method \
+returns a `Blob`, and a GET also gets `api.<name>Url(params)` for `<img src>`, \
+`<video>` and links. A file is streamed with Range support and no size limit, \
+so this is how to write a **custom download rule** — a password-protected or \
+expiring share: look the share up, `crypto.password.verify` the password, \
+`throw httpError(403)` or return the file. The check runs on every request.\n\
+- **Large files in code:** `file.read({ offset, length })`, `append`, \
+`dir.file(\"out\").concat([part0, part1])`, `sha256()` and `url()` work \
+host-side; never read a big file whole.\n\
+- **Shared code goes in a code library**, never copied into a second query: \
+save it with the MCP tool `save_code_library` (a body assigning to \
+`exports`) and import it with `const { requireUser } = lib(\"auth\")`. It runs \
+with the importing query's own `db`, `fs` and `user`; this app's own library \
+of a name wins over an instance-wide one; `describe_code_libraries` says what \
+exists and who imports it.\n";
+
+/// `AGENTS.md`'s CSP paragraph (TODO F1.7): where the policy is and how to
+/// widen it, because an agent that cannot find it edits `index.html`.
+const CSP_SECTION: &str = "## The Content-Security-Policy\n\
+\n\
+The server sends this app's Content-Security-Policy as a header; it is part of \
+the application's definition, **not** a `<meta>` tag in `index.html`, and a tag \
+there cannot loosen it. The default allows this origin, `data:` images and \
+fonts, and `blob:` images and media (object URLs from \
+`URL.createObjectURL`), and nothing else: no other origin's scripts, images or \
+API. To widen one directive, use the administration MCP tool \
+`update_application` with a `csp` section (`{ \"img-src\": [\"'self'\", \
+\"data:\", \"blob:\", \"https://tiles.example.com\"] }`, the whole new \
+list) — it needs the `allow_access_changes` grant, because a CSP is a security \
+boundary. `describe_applications` shows the current policy.\n";
 
 /// `` `a`, `b` and `c` `` — the app's table names, for a sentence.
 fn names_list(tables: &[Table]) -> String {
@@ -4860,6 +4953,65 @@ export function Board({ id }: { id: number }) {
         assert!(agents.contains("never overwrites it"), "{agents}");
     }
 
+    /// TODO F1.7 and F1.10: `AGENTS.md` says where logic goes (tables with
+    /// ownership first), what a code query has, and where the CSP is.
+    #[test]
+    fn agents_md_steers_logic_to_tables_and_says_where_the_csp_is() {
+        let tables = [tasks()];
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+        let agents = file(&files, "AGENTS.md");
+        let tables_first = agents.find("ownership formula").expect(agents);
+        let code_last = agents.find("**A code query**").expect(agents);
+        assert!(tables_first < code_last, "{agents}");
+        for needle in [
+            "crypto.password.hash",
+            "httpError(401",
+            "response({ status: 201",
+            "Never hand-write base64",
+            "## The Content-Security-Policy",
+            "`update_application` with a `csp` section",
+            "allow_access_changes",
+            "blob:",
+            // TODO F2.9–F2.11: uploads, bytes, files and the share pattern.
+            "api.uploads.<slot>(file",
+            "body_type: bytes",
+            "response_type: bytes",
+            "api.<name>Url(params)",
+            "crypto.password.verify",
+            "file.read({ offset, length })",
+        ] {
+            assert!(
+                agents.contains(needle),
+                "AGENTS.md should say `{needle}`: {agents}"
+            );
+        }
+    }
+
+    /// TODO F2.11: an application's upload slots are methods of its generated
+    /// client, beside its endpoints.
+    #[test]
+    fn the_generated_client_has_a_method_per_upload_slot() {
+        let tables = [tasks()];
+        let app = todo().with_upload(crate::UploadSlot::new("drop", "files", "drops"));
+        let files = project_files(&ctx(&app, &tables, &endpoints(&tables), None));
+        let client = files
+            .iter()
+            .find(|f| f.path.ends_with("client.ts"))
+            .map(|f| f.contents.clone())
+            .expect("a client");
+        assert!(
+            client.contains("drop: (file: Blob, opts?: UploadOptions) => upload(doFetch, `${baseUrl}/api/_upload/drop`"),
+            "{client}"
+        );
+        let helper = files
+            .iter()
+            .find(|f| f.path.ends_with("helper.ts"))
+            .map(|f| f.contents.clone())
+            .expect("a helper");
+        assert!(helper.contains("export async function upload("), "{helper}");
+    }
+
     /// Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so the scaffold writes one
     /// that imports the other — and what it imports says how to translate.
     #[test]
@@ -4880,6 +5032,8 @@ export function Board({ id }: { id: number }) {
             );
         }
         assert!(agents.contains("<T text="), "{agents}");
+        // The shared catalogue (TODO F6.4).
+        assert!(agents.contains("scope: \"instance\""), "{agents}");
     }
 
     /// Both documents carry the loop between an edit and a screenshot of it:
@@ -5117,7 +5271,7 @@ export function Board({ id }: { id: number }) {
     fn hooks_are_typed_per_table_over_the_tables_own_client_object() {
         let tables = [tasks()];
         let eps = endpoints(&tables);
-        let client = generate_client_with_streams(&eps, &[]);
+        let client = sc_api::generate_client_with_streams(&eps, &[]);
         let hooks = hooks_ts(&tables, &eps);
 
         // The row type is this app's columns, with nullability from the schema —

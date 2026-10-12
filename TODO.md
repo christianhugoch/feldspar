@@ -355,42 +355,42 @@ it shows "used by" (queries and triggers whose code mentions `lib("name")`). MCP
 
 None of these needs a design beyond Part I. Each one deletes a workaround from the report.
 
-- [ ] **F1.1** (3.1) The generated client always gives a POST/PUT/PATCH `javascript`/`python`
+- [x] **F1.1** (3.1) The generated client always gives a POST/PUT/PATCH `javascript`/`python`
   custom query a `body` argument, typed as the declared params `& Record<string, unknown>`
   (all optional when nothing is declared). GET/DELETE get an optional `query` argument the same
   way. `save_api_query` and the admin editor return a note when a code query declares no params.
   Tests: a no-params code query's generated method sends its body, and the query sees it.
   `typescript_typecheck.rs` covers both shapes.
-- [ ] **F1.2** (2.1) `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto.getRandomValues` and
+- [x] **F1.2** (2.1) `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto.getRandomValues` and
   `crypto.randomUUID` (§3.1). Tests: round-trips against known vectors, including non-ASCII
   and binary; `getRandomValues` refuses more than 65 536 bytes as the Web API does.
-- [ ] **F1.3** (2.1) `crypto.subtle.digest`, HMAC (`importKey`/`sign`/`verify`) and
+- [x] **F1.3** (2.1) `crypto.subtle.digest`, HMAC (`importKey`/`sign`/`verify`) and
   `crypto.password.hash/verify` (§3.1). Tests: NIST and RFC 4231 vectors; a password hash
   verifies, a wrong password does not, and hashing does not trip the 1 s slice.
-- [ ] **F1.4** (2.3) `httpError` and `response` (§3.2), plus the 500/503 bodies without stack traces
+- [x] **F1.4** (2.3) `httpError` and `response` (§3.2), plus the 500/503 bodies without stack traces
   for callers who are not admins. Tests: `httpError(401, …)` is a 401 with `{error}`; a plain throw is a
   500 with no stack and no query name for an anonymous caller, but the full text for an admin;
   `response({status: 201, headers, body})` is honoured, and a `set-cookie` header is refused.
   Triggers called as endpoints behave the same way.
-- [ ] **F1.5** (2.5) Listing entries keep `name`, `isDirectory`, `size` and `modified`, both as
+- [x] **F1.5** (2.5) Listing entries keep `name`, `isDirectory`, `size` and `modified`, both as
   properties and in `toJSON`. `stat()` on a listed entry works for files and directories. Test:
   `JSON.stringify(fs(s).dir("").list())` contains all four fields.
-- [ ] **F1.6** (3.5) "Public" is shown wherever min_role 100 is: a badge in `CustomQueries.tsx`
+- [x] **F1.6** (3.5) "Public" is shown wherever min_role 100 is: a badge in `CustomQueries.tsx`
   and the app's endpoint list, and `public: true` in `describe_applications`. `save_api_query`
   accepts `public: true` as a synonym for `min_role: 100` (both together must agree). Test: the
   MCP round-trip.
-- [ ] **F1.7** (5.4) The React CSP default becomes `img-src 'self' data: blob:` and
+- [x] **F1.7** (5.4) The React CSP default becomes `img-src 'self' data: blob:` and
   `media-src 'self' blob:`. `AGENTS.md` gains a CSP paragraph (where the policy is, how to widen it
   through `update_application`, and that it needs `allow_access_changes`). Test: the default policy
   string.
-- [ ] **F1.8** (4.2) CLI: `feldspar role list|add NAME --level N [--description]|delete NAME`,
+- [x] **F1.8** (4.2) CLI: `feldspar role list|add NAME --level N [--description]|delete NAME`,
   `feldspar delete-user EMAIL`, and `modify-user EMAIL --disabled|--enabled`, all over the
   existing `sc-auth` functions. Tests in the CLI suite.
-- [ ] **F1.9** (4.2) MCP: project `listRoles`, `createRole`, `deleteRole`, `listUsers`,
+- [x] **F1.9** (4.2) MCP: project `listRoles`, `createRole`, `deleteRole`, `listUsers`,
   `setUserDisabled` and `deleteUser` with `.mcp(...)`. Creating or changing needs
   `allow_access_changes`; deleting also needs `allow_drop`. Tests: each refusal names its grant,
   and an admin cannot disable or delete the last admin.
-- [ ] **F1.10** `describe_code_api` and `AGENTS.md` gain a short "choosing where logic goes"
+- [x] **F1.10** `describe_code_api` and `AGENTS.md` gain a short "choosing where logic goes"
   section (Part I §1, the cross-cutting lesson): tables with ownership formulas and File fields
   first, code queries for the rest, and never hand-written base64 or SHA again.
 
@@ -400,7 +400,7 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 2. `throw httpError(401, "sign in")` returns a 401 that the client's error carries, with no stack.
 3. `feldspar role add Editor --level 40` from a terminal, then pick it in the query's role select.
 
-- [ ] **F1.11** Tutorial: extend `docs/tutorial-rest-queries.md` with a "code queries from React"
+- [x] **F1.11** Tutorial: extend `docs/tutorial-rest-queries.md` with a "code queries from React"
   part (body, status codes, crypto), and add a definition-of-done test.
 
 ---
@@ -408,16 +408,16 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 ## F2 — Files: owners, streaming and resumable uploads
 
 ### Phase 1: owners and responses
-- [ ] **F2.1** (1.3) `check_access` takes the caller (role + user id) and applies the owner rule
+- [x] **F2.1** (1.3) `check_access` takes the caller (role + user id) and applies the owner rule
   (§2.1). Every caller of `check_access`, `filter_visible` and `visible_entries` passes the caller.
   Listings show a user's own files inside a folder they could not otherwise read. Tests:
   - a min_role 1 file owned by user A is served to A and is a 404 to B and to anonymous, on
     static dirs, `/files/serve` and the REST field route;
   - B cannot overwrite or delete A's file through `asUser`.
-- [ ] **F2.2** (1.3) Record the owner on every write path in the table in §2.1, and add the
+- [x] **F2.2** (1.3) Record the owner on every write path in the table in §2.1, and add the
   `write(bytes, { owner, min_role, filename })` options to the code `fs`. `setMeta` rules as in
   §2.1. Tests: one per write path, and that a user cannot take ownership through `setMeta`.
-- [ ] **F2.3** (1.3) The shared file response builder (§2.2) with streaming, Range,
+- [x] **F2.3** (1.3) The shared file response builder (§2.2) with streaming, Range,
   Content-Disposition (`filename*`) and the cheap ETag, used by static dirs, the REST field
   route, `/files/serve` and admin download. Tests:
   - `Range: bytes=0-99` gives 206 with 100 bytes;
@@ -425,20 +425,20 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
   - a `naïve 名前.png` filename survives;
   - a 50 MB file is served without the server's RSS growing by 50 MB (an `open_read` test double
     that counts).
-- [ ] **F2.4** `FileStore::open_read`, `open_append` and `concat` (§2.4), in the local and git
+- [x] **F2.4** `FileStore::open_read`, `open_append` and `concat` (§2.4), in the local and git
   drivers, with default fallbacks. Unit tests per driver, including that `concat` with a
   missing part fails without leaving a partial target.
 
 ### Phase 2: large uploads
-- [ ] **F2.5** (1.1) An explicit `DefaultBodyLimit` on the router from a new
+- [x] **F2.5** (1.1) An explicit `DefaultBodyLimit` on the router from a new
   `--max-request-body` setting (default 2 MiB, as today), and the 256 MiB constant
   (`router.rs:440`) becomes `--max-upload-bytes`. Test: both are honoured, and an oversize body is
   a JSON 413 `{error}` rather than axum's plain text.
-- [ ] **F2.6** (1.1) `UploadSlot` and `Application.uploads` (§2.3): model, validation in
+- [x] **F2.6** (1.1) `UploadSlot` and `Application.uploads` (§2.3): model, validation in
   `save_application`, `_fd_uploads`, the admin form section (a repeating group on the application
   form) and `update_application`'s `uploads { add, remove }` section (needs `allow_edit`).
   Included in backups with the application.
-- [ ] **F2.7** (1.1) The tus routes `{mount}/_upload/{name}` (§2.3): create (with the role, size,
+- [x] **F2.7** (1.1) The tus routes `{mount}/_upload/{name}` (§2.3): create (with the role, size,
   MIME and hook checks), `PATCH` streaming into `open_append`, `HEAD`, `DELETE`, completion
   (rename, meta, path and URL headers) and the 24 h sweep. Tests:
   - a 30 MB upload in 5 MB chunks, interrupted after the second chunk, resumes from `HEAD`'s
@@ -449,14 +449,14 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
   - the completed file is owned by the uploader and keeps its original name.
 
 ### Phase 3: code bodies
-- [ ] **F2.8** (1.2) `file.read({offset, length})`, `append`, `concat`, `sha256` and `url` in the
+- [x] **F2.8** (1.2) `file.read({offset, length})`, `append`, `concat`, `sha256` and `url` in the
   code `fs` (§2.5), plus the `--code-max-file-bytes` and `--code-max-copy-bytes` settings. Tests:
   joining three parts into a 20 MB file and hashing it works, with no 8 MB error.
-- [ ] **F2.9** (1.4) `body_type: bytes`, the `request` binding, and raw `response` bodies (§2.6),
+- [x] **F2.9** (1.4) `body_type: bytes`, the `request` binding, and raw `response` bodies (§2.6),
   through `code_scope`, the admin editor, `save_api_query` and the generator (`Blob` in and out).
   Tests: a PNG POSTed raw arrives as a `Uint8Array` with the right length; a query returning
   `response({ body: bytes, headers: { "content-type": "image/png" } })` is served as an image.
-- [ ] **F2.10** (1.3) File handles as `response` bodies (§2.6): served by the shared response
+- [x] **F2.10** (1.3) File handles as `response` bodies (§2.6): served by the shared response
   builder, with `filename` and `download`. The generator emits `Blob` and `<name>Url(params)`.
   `describe_code_api` and `AGENTS.md` show the password-protected share pattern. Tests:
   - a GET query that checks a password and returns a 50 MB file serves it with Range (206) and
@@ -466,7 +466,7 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
   - a handle opened `asUser` on a file that user cannot read is a 404.
 
 ### Phase 4: the client
-- [ ] **F2.11** (1.5) `helper.ts` gains `upload(slot, file, { onProgress, signal, retries,
+- [x] **F2.11** (1.5) `helper.ts` gains `upload(slot, file, { onProgress, signal, retries,
   chunkSize })`, a tus client with resume across retries (fingerprint in `localStorage`, wrapped in
   try/catch), and the generator emits `api.uploads.<name>(file, opts)` for each slot, resolving to
   `{ path, url }`. Tests: `typescript_typecheck.rs`, and a puppeteer check that uploads a 20 MB
@@ -491,9 +491,9 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 
 ## F3 — The code library
 
-- [ ] **F3.1** (2.2) `_fd_code_libraries`, its catalog store, and backup/restore as a kind
+- [x] **F3.1** (2.2) `_fd_code_libraries`, its catalog store, and backup/restore as a kind
   (§3.3). Tests: CRUD and the backup round-trip.
-- [ ] **F3.2** (2.2) `lib(name)` in the runtime: resolution (app, then instance), evaluation with
+- [x] **F3.2** (2.2) `lib(name)` in the runtime: resolution (app, then instance), evaluation with
   the caller's handles and authority, the per-isolate cache keyed by generation, cycle errors and
   the `require` message. Tests:
   - two queries share a helper;
@@ -501,9 +501,9 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
   - a library's `fs` under a query running `asUser` cannot read what that user cannot;
   - a cycle names the chain;
   - a trigger with no application cannot see an app library.
-- [ ] **F3.3** (2.2) Admin UI: Settings → Development → Code library (list, editor with the
+- [x] **F3.3** (2.2) Admin UI: Settings → Development → Code library (list, editor with the
   code typings, compile check on save, "used by"). Puppeteer check.
-- [ ] **F3.4** (2.2) MCP: `describe_code_libraries`, `save_code_library` and
+- [x] **F3.4** (2.2) MCP: `describe_code_libraries`, `save_code_library` and
   `delete_code_library` with the grants in §3.3. `describe_code_api` documents `lib()`.
   Tests: the grant refusals, and a save with a syntax error is refused with the line.
 
@@ -513,7 +513,7 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 2. Use it from two applications' queries. Change `requireUser`'s message once and see both
    change.
 
-- [ ] **F3.5** Tutorial section (in `docs/tutorial-triggers.md` or a new
+- [x] **F3.5** Tutorial section (in `docs/tutorial-triggers.md` or a new
   `docs/tutorial-code-library.md`) and its definition-of-done test. TECHNICAL_DESIGN §10.1.
 
 ---
@@ -571,23 +571,23 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 
 ## F6 — Shared translations
 
-- [ ] **F6.1** (5.3) The instance catalogue: `_fd_translations` rows with `application_id`
+- [x] **F6.1** (5.3) The instance catalogue: `_fd_translations` rows with `application_id`
   NULL (migration in `TABLES_RENAME.sql` if the column is `NOT NULL`), and the `CatalogStore`
   for it. Tests: CRUD per locale.
-- [ ] **F6.2** (5.3) Merge app → instance in `GET {mount}/i18n/{locale}.json`, for both file-
+- [x] **F6.2** (5.3) Merge app → instance in `GET {mount}/i18n/{locale}.json`, for both file-
   and row-backed app catalogues. Tests: an app key overrides; an instance-only key is served; a
   locale the app does not enable is still a 404.
-- [ ] **F6.3** (5.3) Admin: Settings → Translations (shared), reusing the app Translations screen,
+- [x] **F6.3** (5.3) Admin: Settings → Translations (shared), reusing the app Translations screen,
   with "Translate missing" (the LLM fill). The app's Translations screen shows inherited keys
   greyed, with "override". Puppeteer check.
-- [ ] **F6.4** (5.3) MCP `describe_translations` and `save_translations` take
+- [x] **F6.4** (5.3) MCP `describe_translations` and `save_translations` take
   `scope: "instance"`. `feldspar i18n translate --instance`. Tests.
 
 ### Try it
 1. Put "Sign in", "Password" and "Copy" in the shared German catalogue once. Two apps show them
   in German with no per-app translation.
 
-- [ ] **F6.5** `docs/I18N.md` and `docs/tutorial-i18n.md` updated, with a definition-of-done test.
+- [x] **F6.5** `docs/I18N.md` and `docs/tutorial-i18n.md` updated, with a definition-of-done test.
 
 ---
 

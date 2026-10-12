@@ -40,6 +40,10 @@ mod agg;
 mod analyze;
 mod ast;
 mod code;
+#[cfg(feature = "eval")]
+mod code_crypto;
+mod code_library;
+mod code_reply;
 mod eval;
 mod formula;
 mod geo;
@@ -67,6 +71,11 @@ pub use code::{
     MIN_MODULE_FN_WINDOW, MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost,
     ModuleFnHosts, ModuleFunction, PYTHON, SchemaSnapshot, TRIGGER_MARGIN, TriggerHost, V1_API_JS,
     console_sink, document_request, set_isolate_prime, take_console,
+};
+pub use code_library::{CodeLibraries, check_code_library, imported_libraries};
+pub use code_reply::{
+    CodeFailure, CodeResponse, FileReply, RawReply, SERVER_OWNED_HEADERS, allowed_header,
+    bytes_binding, bytes_key, code_failure, response_key, take_code_response,
 };
 #[cfg(feature = "eval")]
 pub use eval::DenoEvaluator;

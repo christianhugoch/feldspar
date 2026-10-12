@@ -47,6 +47,8 @@ mod analytics_spa_typecheck;
 mod api_token_admin_api;
 #[path = "app_builder_agent.rs"]
 mod app_builder_agent;
+#[path = "app_code_files.rs"]
+mod app_code_files;
 #[path = "app_file_access.rs"]
 mod app_file_access;
 #[path = "app_i18n.rs"]
@@ -71,6 +73,8 @@ mod app_signup;
 mod app_static_dirs;
 #[path = "app_trigger_api.rs"]
 mod app_trigger_api;
+#[path = "app_uploads.rs"]
+mod app_uploads;
 #[path = "backup_api.rs"]
 mod backup_api;
 #[path = "builder_route.rs"]
@@ -81,6 +85,8 @@ mod call_api;
 mod clear_all_api;
 #[path = "code_body_tables.rs"]
 mod code_body_tables;
+#[path = "code_libraries.rs"]
+mod code_libraries;
 #[path = "concurrent_code_bodies.rs"]
 mod concurrent_code_bodies;
 #[path = "constraint_api.rs"]
@@ -219,6 +225,10 @@ mod tls_live_domains;
 mod tls_serving;
 #[path = "trigger_admin_api.rs"]
 mod trigger_admin_api;
+#[path = "tutorial_code_library.rs"]
+mod tutorial_code_library;
+#[path = "tutorial_code_queries.rs"]
+mod tutorial_code_queries;
 #[path = "tutorial_live.rs"]
 mod tutorial_live;
 #[path = "tutorial_live_documents.rs"]
