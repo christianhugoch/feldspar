@@ -2,6 +2,26 @@
 
 Changes in reverse chronological order.
 
+## Fix: an application's subdomain edit takes effect without a restart
+
+Bug report: after moving the admin UI to its own subdomain and setting an application's
+subdomain to `@`, the base domain went on redirecting to the admin UI until the server was
+restarted.
+
+- **Cause.** `AppMounts::refresh_mount` (what `updateApplication` calls after a save) looked
+  the running mount up under the record's *new* subdomain. After a subdomain edit nothing is
+  mounted there yet, so it returned without doing anything and the application stayed on its
+  old subdomain until boot re-read the catalog. Not specific to `@`: any subdomain edit of a
+  mounted application was affected.
+- **Fix.** `refresh_mount` finds the mount by application id (`AppMounts::mounted_by_id`),
+  mounts the refreshed record on its new subdomain, then unmounts the old one. The old address
+  is only dropped once the new mount succeeded. The certificate is told through the existing
+  `remount`/`unmount` reporting.
+- **Test.** `admin_subdomain::an_application_edited_onto_the_base_domain_is_served_there_without_a_restart`
+  edits a mounted application's subdomain to `@` through `PUT /api/applications/{id}` and
+  asserts the base domain serves it on the next request (it was a 307 to the admin host), and
+  that the old subdomain no longer does.
+
 ## F6: shared translations
 
 TODO.md F6 (field report 5.3): one instance-wide catalogue for the strings every application

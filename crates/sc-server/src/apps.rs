@@ -941,13 +941,23 @@ impl AppMounts {
     ///
     /// An application that is not mounted is not an error: saving a locale set
     /// on an application nobody has built yet is an ordinary thing to do.
+    ///
+    /// A record whose **subdomain** changed moves the mount with it: the
+    /// application answers on the new name from the next request on, and the
+    /// old one goes back to resolving nothing.
     pub async fn refresh_mount(&self, app: Application) -> Result<()> {
         let Some(catalog) = self.catalog() else {
             return Ok(());
         };
-        let Some(mounted) = self.get(&app.subdomain) else {
+        // Found by id, not by subdomain: the subdomain is part of the record,
+        // so an edit that changes it would look for the mount under a name it
+        // is not on yet, find nothing, and leave the application serving at its
+        // old address until a restart.
+        let Some(mounted) = self.mounted_by_id(app.id) else {
             return Ok(());
         };
+        let previous = mounted.app.subdomain.clone();
+        let moved = previous != app.subdomain;
         if mounted.framework.build().is_some() {
             let refreshed = MountedApp::new_with(
                 app,
@@ -957,9 +967,19 @@ impl AppMounts {
                 self.triggers(),
             )?;
             self.remount(refreshed);
-            return Ok(());
+        } else {
+            build_and_mount(self, app).await?;
         }
-        build_and_mount(self, app).await.map(|_| ())
+        // After the new mount, so a failure above leaves the old address up.
+        if moved {
+            self.unmount(&previous);
+        }
+        Ok(())
+    }
+
+    /// The mount of the application `id`, whatever subdomain it is on.
+    fn mounted_by_id(&self, id: sc_app::AppId) -> Option<Arc<MountedApp>> {
+        self.read().values().find(|m| m.app.id == id).cloned()
     }
 
     /// Drop every mounted app's cached catalogues, so the next request for one

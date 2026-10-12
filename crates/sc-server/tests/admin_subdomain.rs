@@ -22,7 +22,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use sc_app::{Application, AssetBundle, CodeFramework, FrameworkRef};
+use sc_app::{Application, AssetBundle, BuildSpec, CodeFramework, FrameworkRef};
 use sc_auth::SessionStore;
 use sc_catalog::Catalog;
 use sc_db::DatabaseDriver;
@@ -351,6 +351,67 @@ async fn once_moved_the_base_domain_is_the_root_applications() -> sc_error::Resu
         Value::Null,
         "the admin API answered on the base domain"
     );
+    Ok(())
+}
+
+/// An application already being served is moved onto the base domain by
+/// editing its subdomain to `@`, and that is a save too: the running mount
+/// follows the record, so the base domain is the application's on the next
+/// request rather than after a restart, and its old subdomain stops serving it.
+#[tokio::test]
+async fn an_application_edited_onto_the_base_domain_is_served_there_without_a_restart()
+-> sc_error::Result<()> {
+    let (router, apps, catalog, mut old, _db) = setup().await?;
+    let (status, body) = old.save_admin_subdomain(json!("admin")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Served on `home.example.com`, from a built bundle.
+    let framework_ref = FrameworkRef::new("none")
+        .with("store", "site")
+        .with("source", "public");
+    let app = Application::new("Home", "home", framework_ref);
+    sc_app::save_application(&catalog, &app).await?;
+    let bundle = AssetBundle::new()
+        .with("index.html", "<h1>home page</h1>")
+        .fallback("index.html");
+    let framework = Arc::new(CodeFramework::new("code", bundle).with_build(BuildSpec {
+        command: "sh".to_owned(),
+        args: vec!["build.sh".to_owned()],
+        source_dir: "web".to_owned(),
+        output_dir: "web/dist".to_owned(),
+        install: None,
+    }));
+    apps.mount(MountedApp::new(app.clone(), framework, &catalog)?)?;
+    let mut subdomain = Browser::new(router.clone(), "home.example.com");
+    let page = subdomain.request("GET", "/", Some("text/html"), None).await;
+    assert_eq!(page.body, b"<h1>home page</h1>");
+
+    // The admin, on the admin UI's new host, edits the subdomain to `@`.
+    let mut admin = Browser::new(router.clone(), ADMIN_HOST);
+    admin.cookies = old.cookies.clone();
+    let (status, body) = admin
+        .api(
+            "PUT",
+            &format!("/api/applications/{}", app.id.0),
+            Some(json!({
+                "name": "Home",
+                "subdomain": "@",
+                "framework": { "name": "none", "config": { "store": "site", "source": "public" } },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The base domain is the application's, not a redirect to the admin UI.
+    let mut visitor = Browser::new(router.clone(), BASE_DOMAIN);
+    let page = visitor.request("GET", "/", Some("text/html"), None).await;
+    assert_eq!(page.status, StatusCode::OK, "{:?}", page.location);
+    assert_eq!(page.body, b"<h1>home page</h1>");
+    assert_eq!(apps.subdomains(), vec!["@".to_owned()]);
+
+    // And the name it left is no application's any more.
+    let left = subdomain.request("GET", "/", Some("text/html"), None).await;
+    assert_ne!(left.body, b"<h1>home page</h1>");
     Ok(())
 }
 
