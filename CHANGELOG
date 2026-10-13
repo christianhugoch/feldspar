@@ -2,6 +2,19 @@
 
 Changes in reverse chronological order.
 
+## GET custom queries accept `?flag=true` for a `bool` parameter
+
+User report: a GET query's `bool` parameter refused `true` and `1` from the query string
+("not a valid bool"). Query-string arguments were wrapped as JSON strings and coerced with
+`json_to_value`, whose `bool` case accepts only a JSON boolean, so no URL could supply one.
+
+- **`rest::custom::bind`** now parses a query-string argument with `catchall::parse`, the
+  form-input parser: `true/t/1/on/yes/y` and `false/f/0/off/no/n` (any case) for `bool`, and
+  the same text parsing for the other types. A `text` argument is still taken verbatim; a
+  blank non-text argument counts as missing (so a required one is refused). Body arguments
+  (POST etc.) still go through `json_to_value` and want a real JSON boolean.
+- Test: `a_query_string_bool_takes_the_usual_spellings`.
+
 ## Ownership formulas see a left-out insert field as null
 
 User report: a formula reading a field the insert did not send (`!owner || owner == user.id`)

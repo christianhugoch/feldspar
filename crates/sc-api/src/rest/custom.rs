@@ -969,26 +969,38 @@ fn bind(query: &CustomQuery, req: &ApiRequest, name: &str) -> Result<Value> {
             query.name
         ))
     })?;
-    let supplied: Option<Json> = if query.args_in_query() {
-        req.query_get(name).map(|v| Json::String(v.to_owned()))
-    } else {
-        req.body.get(name).filter(|v| !v.is_null()).cloned()
-    };
-    let Some(supplied) = supplied else {
-        if param.required {
-            return Err(Error::invalid(format!(
-                "this query needs the argument `{name}` ({})",
-                param.ty.to_basic().name()
-            )));
-        }
-        return Ok(Value::Null);
-    };
+    let basic = param.ty.to_basic();
     // Coerced against the declared type before the statement is prepared, so a
     // wrongly-typed argument is a 400 rather than a database error — and a
     // string that happens to be SQL is a *string*, because this is the only
     // route by which a caller's value reaches the query at all.
-    json_to_value(&param.ty.to_basic(), &supplied)
-        .map_err(|e| Error::invalid(format!("argument `{name}`: {e}")))
+    let value = if query.args_in_query() {
+        // A query string carries only text, so it is parsed the way a form
+        // input is (`?active=true`, `?active=1`), not as a JSON scalar —
+        // which would demand a JSON boolean no URL can hold. A blank
+        // non-text argument counts as absent.
+        match req.query_get(name) {
+            None => Value::Null,
+            Some(raw) if matches!(basic, BasicType::Text | BasicType::Other(_)) => {
+                Value::Text(raw.to_owned())
+            }
+            Some(raw) => sc_types::catchall::parse(&basic, raw)
+                .map_err(|e| Error::invalid(format!("argument `{name}`: {e}")))?,
+        }
+    } else {
+        match req.body.get(name).filter(|v| !v.is_null()) {
+            None => Value::Null,
+            Some(supplied) => json_to_value(&basic, supplied)
+                .map_err(|e| Error::invalid(format!("argument `{name}`: {e}")))?,
+        }
+    };
+    if value.is_null() && param.required {
+        return Err(Error::invalid(format!(
+            "this query needs the argument `{name}` ({})",
+            basic.name()
+        )));
+    }
+    Ok(value)
 }
 
 /// What a JavaScript or Python query's body sees of the request: `body`, the
@@ -1420,6 +1432,38 @@ mod tests {
         let scope = code_scope(&post, &req).unwrap();
         assert_eq!(scope["body"], json!({ "n": 3, "extra": [1, 2] }));
         assert_eq!(scope["query"], json!({ "page": "2" }));
+    }
+
+    #[test]
+    fn a_query_string_bool_takes_the_usual_spellings() {
+        let q = CustomQuery::new(
+            "active",
+            Method::Get,
+            "/active",
+            "SELECT * FROM books WHERE in_print = :in_print",
+        )
+        .params([CustomParam::new("in_print", ValueType::Bool)]);
+        let arg = |raw: &str| {
+            let req = ApiRequest::new(Method::Get, "/api/active").query("in_print", raw);
+            bind(&q, &req, "in_print")
+        };
+        for raw in ["true", "1", "TRUE", "yes"] {
+            assert_eq!(arg(raw).unwrap(), Value::Bool(true), "{raw}");
+        }
+        for raw in ["false", "0", "no"] {
+            assert_eq!(arg(raw).unwrap(), Value::Bool(false), "{raw}");
+        }
+        let msg = arg("maybe").unwrap_err().to_string();
+        assert!(msg.contains("`in_print`"), "{msg}");
+        // A blank value is a missing one, and this argument is required.
+        let msg = arg("").unwrap_err().to_string();
+        assert!(msg.contains("needs the argument"), "{msg}");
+
+        // A body still wants a JSON boolean.
+        let mut post = q.clone();
+        post.method = Method::Post;
+        let req = ApiRequest::new(Method::Post, "/api/active").body(json!({ "in_print": true }));
+        assert_eq!(bind(&post, &req, "in_print").unwrap(), Value::Bool(true));
     }
 
     #[test]
