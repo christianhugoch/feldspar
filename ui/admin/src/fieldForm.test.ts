@@ -214,6 +214,41 @@ describe("saving an edited field", () => {
     });
   });
 
+  it("round-trips a File's delete and conflict options", () => {
+    const choice = (name: string, options: string[], def: string) => ({
+      ...FILE.config_spec[0],
+      name,
+      label: name,
+      required: false,
+      default: def,
+      options,
+    });
+    const withOptions: FieldTypeItem = {
+      ...FILE,
+      config_spec: [
+        ...FILE.config_spec,
+        choice("on_delete", ["keep", "remove_file"], "keep"),
+        choice("on_conflict", ["overwrite", "suffix"], "overwrite"),
+      ],
+    };
+    const stored = field({
+      name: "cover",
+      kind: {
+        type: "file",
+        store: "uploads",
+        folder: null,
+        mime_allow: [],
+        on_delete: "remove_file",
+        on_conflict: "suffix",
+      },
+    });
+    const form = fieldForm(stored);
+    expect(form.attrs.on_delete).toBe("remove_file");
+    expect(form.attrs.on_conflict).toBe("suffix");
+    const body = updateFieldBody(form, withOptions);
+    expect(body.kind).toMatchObject({ on_delete: "remove_file", on_conflict: "suffix" });
+  });
+
   it("round-trips a Key unchanged, and still omits an empty summary", () => {
     const stored = field({
       name: "author",

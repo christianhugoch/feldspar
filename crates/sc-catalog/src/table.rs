@@ -753,6 +753,8 @@ mod tests {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec![],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         });
         let issues = table.apply_field_overlay(&meta);
         assert!(issues.is_empty(), "{issues:?}");

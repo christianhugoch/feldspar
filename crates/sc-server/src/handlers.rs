@@ -46,13 +46,13 @@ use sc_auth::{
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
-    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId,
-    SchemaProjection, Table, TableConstraint, TableId, check_db_connection_saveable,
-    check_file_store_saveable, connect_db_connection, connect_file_store_def, delete_db_connection,
-    delete_file_store, file_kind_config_spec, key_kind_config_spec, list_db_connections,
-    list_field_meta_for_table, list_file_stores, load_db_connection, load_db_connection_by_name,
-    load_file_store, load_file_store_by_name, orphan_table_meta, resolve_options,
-    save_db_connection, save_file_store,
+    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileOnConflict,
+    FileOnDelete, FileStoreId, SchemaProjection, Table, TableConstraint, TableId,
+    check_db_connection_saveable, check_file_store_saveable, connect_db_connection,
+    connect_file_store_def, delete_db_connection, delete_file_store, file_kind_config_spec,
+    key_kind_config_spec, list_db_connections, list_field_meta_for_table, list_file_stores,
+    load_db_connection, load_db_connection_by_name, load_file_store, load_file_store_by_name,
+    orphan_table_meta, resolve_options, save_db_connection, save_file_store,
 };
 use sc_catalog::{
     NEW_LOCAL_FILE_STORE, choosable_file_stores, file_store_settings, unique_file_store_name,
@@ -7001,11 +7001,15 @@ fn field_kind_json(kind: &DataFieldKind) -> Json {
             store,
             folder,
             mime_allow,
+            on_delete,
+            on_conflict,
         } => json!({
             "type": "file",
             "store": store.0,
             "folder": folder,
             "mime_allow": mime_allow,
+            "on_delete": on_delete.as_str(),
+            "on_conflict": on_conflict.as_str(),
         }),
         DataFieldKind::Calc { expression } => json!({
             "type": "calc",
@@ -7039,6 +7043,8 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
             store: FileStoreId(non_empty_str_field(kind, "store")?.to_owned()),
             folder: optional_present_str(kind, "folder"),
             mime_allow: string_array_field(kind, "mime_allow")?,
+            on_delete: file_option(kind, "on_delete", FileOnDelete::parse)?,
+            on_conflict: file_option(kind, "on_conflict", FileOnConflict::parse)?,
         }),
         "key" => Ok(DataFieldKind::Key {
             target_table: TableId(non_empty_str_field(kind, "target_table")?.to_owned()),
@@ -7051,6 +7057,23 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
             expression: non_empty_str_field(kind, "expression")?.to_owned(),
         }),
         other => Err(Error::invalid(format!("unknown field kind `{other}`"))),
+    }
+}
+
+/// A File kind's enumerated option: its default when absent, null or empty.
+fn file_option<T: Default>(
+    kind: &Map<String, Json>,
+    key: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T> {
+    match kind.get(key) {
+        None | Some(Json::Null) => Ok(T::default()),
+        Some(Json::String(s)) => {
+            parse(s).ok_or_else(|| Error::invalid(format!("`{key}` does not take `{s}`")))
+        }
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` should be a string, got {other}"
+        ))),
     }
 }
 

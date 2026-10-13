@@ -19,7 +19,8 @@ use crate::schema_edit::{
     self, ApplyOptions, FieldSettings, FieldSpec, Grants, Operation, TableSettings,
 };
 use sc_catalog::{
-    ATTR_OWNERSHIP_FORMULA, Catalog, DataFieldKind, FieldId, FileStoreId, Table, TableId,
+    ATTR_OWNERSHIP_FORMULA, Catalog, DataFieldKind, FieldId, FileOnConflict, FileOnDelete,
+    FileStoreId, Table, TableId,
 };
 use sc_error::{Error, Result};
 use sc_types::Attrs;
@@ -262,8 +263,22 @@ fn describe_field(field: &sc_catalog::DataField) -> Json {
         DataFieldKind::Calc { expression } => {
             out.insert("calculated".to_owned(), json!(expression));
         }
-        DataFieldKind::File { store, .. } => {
-            out.insert("file_store".to_owned(), json!(store.0));
+        DataFieldKind::File {
+            store,
+            folder,
+            mime_allow,
+            on_delete,
+            on_conflict,
+        } => {
+            out.insert(ARG_FILE_STORE.to_owned(), json!(store.0));
+            if let Some(folder) = folder {
+                out.insert(ARG_FILE_FOLDER.to_owned(), json!(folder));
+            }
+            if !mime_allow.is_empty() {
+                out.insert(ARG_FILE_MIME.to_owned(), json!(mime_allow));
+            }
+            out.insert(ARG_FILE_ON_DELETE.to_owned(), json!(on_delete.as_str()));
+            out.insert(ARG_FILE_ON_CONFLICT.to_owned(), json!(on_conflict.as_str()));
         }
         DataFieldKind::Plain => {}
     }
@@ -282,6 +297,10 @@ const ARG_FILE_STORE: &str = "file_store";
 const ARG_FILE_FOLDER: &str = "file_folder";
 /// A file field's allowed MIME types.
 const ARG_FILE_MIME: &str = "file_mime";
+/// What a file field does with its file when the row is deleted.
+const ARG_FILE_ON_DELETE: &str = "on_delete";
+/// What an upload into a file field does when the name is taken.
+const ARG_FILE_ON_CONFLICT: &str = "on_conflict";
 
 fn edit_description(grants: &Grants, rls_available: bool) -> String {
     let mut allowed: Vec<&str> = Vec::new();
@@ -573,6 +592,30 @@ fn add_file_properties(parameters: &mut Json) {
                      means any.",
             }),
         ),
+        (
+            ARG_FILE_ON_DELETE,
+            json!({
+                "type": "string",
+                "enum": ["keep", "remove_file"],
+                "description":
+                    "A file field's stored file when its row is deleted: `keep` \
+                     (default) leaves it in the store, `remove_file` deletes it once \
+                     the delete commits, unless another row still references it. On \
+                     `alter_field` it may be given without `file_store`.",
+            }),
+        ),
+        (
+            ARG_FILE_ON_CONFLICT,
+            json!({
+                "type": "string",
+                "enum": ["overwrite", "suffix"],
+                "description":
+                    "An upload into a file field whose name is already taken in the \
+                     folder: `overwrite` (default) replaces it, `suffix` stores it as \
+                     `name_1.ext`, `name_2.ext`, …. On `alter_field` it may be given \
+                     without `file_store`.",
+            }),
+        ),
     ];
     let item = &mut parameters["properties"][ARG_OPERATIONS]["items"];
     for (name, schema) in &file {
@@ -609,7 +652,9 @@ async fn edit(catalog: &Catalog, grants: &Grants, args: &Json) -> Result<Json> {
     let mut operations = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         operations.push(
-            parse_operation(item).map_err(|e| Error::invalid(format!("operation {index}: {e}")))?,
+            complete_file_alter(catalog, item)
+                .and_then(|item| parse_operation(&item))
+                .map_err(|e| Error::invalid(format!("operation {index}: {e}")))?,
         );
     }
 
@@ -854,6 +899,83 @@ fn parse_field_spec(item: &Json) -> Result<FieldSpec> {
     })
 }
 
+/// A file field's enumerated setting: its default when absent or null.
+fn file_choice<T: Default>(
+    obj: &Map<String, Json>,
+    key: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T> {
+    match optional_string(obj, key)? {
+        None => Ok(T::default()),
+        Some(text) => parse(&text).ok_or_else(|| {
+            Error::invalid(format!(
+                "`{key}` does not take `{text}`; the choices are {}",
+                match key {
+                    ARG_FILE_ON_DELETE => "`keep` and `remove_file`",
+                    _ => "`overwrite` and `suffix`",
+                }
+            ))
+        }),
+    }
+}
+
+/// An `alter_field` that changes a file field's settings without restating
+/// `file_store`, completed from the field as it is: the file settings it does
+/// not mention keep their current values. Anything else is left as it came.
+fn complete_file_alter(catalog: &Catalog, item: &Json) -> Result<Json> {
+    let Some(obj) = item.as_object() else {
+        return Ok(item.clone());
+    };
+    let mentions = [
+        ARG_FILE_FOLDER,
+        ARG_FILE_MIME,
+        ARG_FILE_ON_DELETE,
+        ARG_FILE_ON_CONFLICT,
+    ]
+    .iter()
+    .any(|k| obj.get(*k).is_some_and(|v| !v.is_null()));
+    if obj.get("op").and_then(Json::as_str) != Some("alter_field")
+        || obj.get(ARG_FILE_STORE).is_some_and(|v| !v.is_null())
+        || !mentions
+    {
+        return Ok(item.clone());
+    }
+    let (Some(table), Some(field)) = (
+        obj.get("table").and_then(Json::as_str),
+        obj.get("field").and_then(Json::as_str),
+    ) else {
+        return Ok(item.clone());
+    };
+    let Some(DataFieldKind::File {
+        store,
+        folder,
+        mime_allow,
+        on_delete,
+        on_conflict,
+    }) = catalog
+        .get(table.trim())?
+        .and_then(|t| t.field(field.trim()).map(|f| f.kind.clone()))
+    else {
+        return Ok(item.clone());
+    };
+    let mut obj = obj.clone();
+    obj.insert(ARG_FILE_STORE.to_owned(), json!(store.0));
+    let mut keep = |key: &str, value: Json| {
+        obj.entry(key.to_owned())
+            .and_modify(|v| {
+                if v.is_null() {
+                    *v = value.clone();
+                }
+            })
+            .or_insert(value);
+    };
+    keep(ARG_FILE_FOLDER, json!(folder));
+    keep(ARG_FILE_MIME, json!(mime_allow));
+    keep(ARG_FILE_ON_DELETE, json!(on_delete.as_str()));
+    keep(ARG_FILE_ON_CONFLICT, json!(on_conflict.as_str()));
+    Ok(Json::Object(obj))
+}
+
 /// A field's kind from the flat item: `references` makes it a foreign key,
 /// `expression` a calculated field and `file_store` a file field, and more than
 /// one of them is a contradiction worth naming rather than resolving by
@@ -897,7 +1019,22 @@ fn field_kind(obj: &Map<String, Json>) -> Result<Option<DataFieldKind>> {
                 .map(|f| f.trim().trim_matches('/').to_owned())
                 .filter(|f| !f.is_empty()),
             mime_allow,
+            on_delete: file_choice(obj, ARG_FILE_ON_DELETE, FileOnDelete::parse)?,
+            on_conflict: file_choice(obj, ARG_FILE_ON_CONFLICT, FileOnConflict::parse)?,
         }));
+    }
+    for key in [
+        ARG_FILE_FOLDER,
+        ARG_FILE_MIME,
+        ARG_FILE_ON_DELETE,
+        ARG_FILE_ON_CONFLICT,
+    ] {
+        if obj.get(key).is_some_and(|v| !v.is_null()) {
+            return Err(Error::invalid(format!(
+                "`{key}` is a file field's setting; give `{ARG_FILE_STORE}` too to make \
+                 this a file field"
+            )));
+        }
     }
     match (references, expression) {
         (Some(_), Some(_)) => Err(Error::invalid(
@@ -940,6 +1077,8 @@ mod tests {
                 store: FileStoreId("media".to_owned()),
                 folder: Some("slides".to_owned()),
                 mime_allow: vec!["image/png".to_owned()],
+                on_delete: Default::default(),
+                on_conflict: Default::default(),
             }
         );
 

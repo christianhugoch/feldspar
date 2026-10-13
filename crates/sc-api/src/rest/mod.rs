@@ -58,7 +58,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, load_file_store_by_name};
+use sc_catalog::{
+    CallerContext, Catalog, DataFieldKind, FileOnConflict, Table, load_file_store_by_name,
+};
 use sc_error::{Error, Repr, Result};
 use sc_expr::{JsEvaluator, Operation};
 use sc_files::{
@@ -1191,7 +1193,7 @@ impl RestProvider {
                         let existing = self
                             .owned_row(cat, &table, f, Operation::Update, user, id)
                             .await?;
-                        let (_, folder, _) = file_field(&table, field)?;
+                        let (_, folder, _, _) = file_field(&table, field)?;
                         let path = upload_path(folder, filename);
                         let mut changes = std::collections::BTreeMap::new();
                         changes.insert(field.clone(), Value::Text(path));
@@ -1638,7 +1640,7 @@ async fn download_inner(
     caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
-    let (store_name, _, _) = file_field(table, field)?;
+    let (store_name, ..) = file_field(table, field)?;
     let path = match rows::read_field_ctx(cat, table, field, id, context).await? {
         Value::Text(path) if !path.is_empty() => path,
         // The row exists but references nothing: for the caller that is "no
@@ -1707,7 +1709,7 @@ async fn upload_inner(
     caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
-    let (store_name, folder, mime_allow) = file_field(table, field)?;
+    let (store_name, folder, mime_allow, on_conflict) = file_field(table, field)?;
     let Some(data) = data else {
         return Err(Error::invalid(
             "expected the request body to be the file's bytes, sent with its own \
@@ -1720,6 +1722,15 @@ async fn upload_inner(
 
     let store = cat.require_file_store(store_name)?;
     let floor = store_floor(cat, store_name).await?;
+    // A field that keeps what is there gives the upload the first free
+    // `name_n.ext` instead: nothing is replaced, so there is nothing to check
+    // write access to below. Only the name changes, never the folder, so the
+    // ownership pre-check's view of the row (taken on the unsuffixed path)
+    // still holds for any rule about where the file lives.
+    let path = match on_conflict {
+        FileOnConflict::Overwrite => path,
+        FileOnConflict::Suffix => sc_files::free_path(store.as_ref(), &path).await?,
+    };
     // The field's folder is where the admin said uploads land, and the table's
     // write rule already let this caller upload, so a **new** file needs nothing
     // more — that is what makes a min_role 1 folder a private drop box (§2.1).
@@ -1743,13 +1754,14 @@ async fn upload_inner(
     Ok(ApiResponse::with_status(201, updated))
 }
 
-/// The `File` kind parameters of `field` on `table`: its store name, folder and
-/// MIME allow-list. A field that is not (or is no longer) a `File` is a
-/// not-found — the endpoint's own existence is what claimed otherwise.
+/// The `File` kind parameters of `field` on `table`: its store name, folder,
+/// MIME allow-list and what an upload does with a name that is taken. A field
+/// that is not (or is no longer) a `File` is a not-found — the endpoint's own
+/// existence is what claimed otherwise.
 fn file_field<'t>(
     table: &'t Table,
     field: &str,
-) -> Result<(&'t str, Option<&'t str>, &'t [String])> {
+) -> Result<(&'t str, Option<&'t str>, &'t [String], FileOnConflict)> {
     let found = table
         .field(field)
         .ok_or_else(|| Error::not_found(format!("`{}` has no field `{field}`", table.name)))?;
@@ -1758,7 +1770,14 @@ fn file_field<'t>(
             store,
             folder,
             mime_allow,
-        } => Ok((store.0.as_str(), folder.as_deref(), mime_allow.as_slice())),
+            on_conflict,
+            ..
+        } => Ok((
+            store.0.as_str(),
+            folder.as_deref(),
+            mime_allow.as_slice(),
+            *on_conflict,
+        )),
         _ => Err(Error::not_found(format!(
             "`{}.{field}` is not a File field",
             table.name
@@ -2032,6 +2051,8 @@ mod tests {
             store: FileStoreId("uploads".to_owned()),
             folder: Some("covers".to_owned()),
             mime_allow: vec!["image/png".to_owned()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         };
         t.fields.push(cover);
         t
@@ -2180,6 +2201,8 @@ mod tests {
             store: FileStoreId("uploads".to_owned()),
             folder: None,
             mime_allow: vec![],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         };
         t.fields.push(attachment);
         let p = RestProvider::project("/api", &[t]);

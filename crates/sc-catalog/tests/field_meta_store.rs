@@ -54,6 +54,8 @@ fn cover_meta() -> FieldMeta {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec!["image/png".into(), "image/jpeg".into()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         })
 }
 
@@ -86,6 +88,8 @@ async fn a_file_field_overlay_round_trips_through_its_row() -> Result<()> {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec!["image/png".into(), "image/jpeg".into()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         }
     );
 
@@ -139,6 +143,8 @@ async fn saving_again_updates_in_place_rather_than_inserting() -> Result<()> {
         store: FileStoreId("uploads".into()),
         folder: Some("covers".into()),
         mime_allow: vec!["image/png".into()],
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     };
     save_field_meta(&cat, &meta).await?;
 
@@ -155,6 +161,8 @@ async fn saving_again_updates_in_place_rather_than_inserting() -> Result<()> {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec!["image/png".into()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         }
     );
     Ok(())

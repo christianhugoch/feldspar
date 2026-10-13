@@ -779,6 +779,7 @@ async fn a_file_field_names_its_store_and_needs_no_type() -> Result<()> {
             store,
             folder,
             mime_allow,
+            ..
         } => {
             assert_eq!(store.0, "media");
             assert_eq!(folder.as_deref(), Some("slides"));
@@ -822,5 +823,110 @@ async fn a_file_field_names_its_store_and_needs_no_type() -> Result<()> {
     .to_string();
     assert!(as_type.contains("`file` is not a type"), "{as_type}");
     assert!(slides.field("thumb").is_none());
+    Ok(())
+}
+
+/// A file field's `on_delete` and `on_conflict` are set through `edit_schema`,
+/// on the field as it is made and later by an `alter_field` that names only
+/// the option — the field's store, folder and other option are kept — and
+/// `describe_schema` reports them back.
+#[tokio::test]
+async fn a_file_fields_delete_and_conflict_options_are_set_through_edit_schema() -> Result<()> {
+    use sc_catalog::{DataFieldKind, FileOnConflict, FileOnDelete};
+    let env = Env::new().await?;
+    env.with_file_store("media", None).await?;
+    let kind = |env: &Env| {
+        env.catalog
+            .require("slides")
+            .unwrap()
+            .field("picture")
+            .unwrap()
+            .kind
+            .clone()
+    };
+    let result = edit(
+        &env,
+        &default_grants(),
+        json!({"operations": [{
+            "op": "create_table", "table": "slides",
+            "fields": [
+                {"name": "id", "type": "int", "primary_key": true},
+                {"name": "picture", "file_store": "media", "file_folder": "slides",
+                 "on_delete": "remove_file"},
+            ],
+        }]}),
+    )
+    .await?;
+    assert_eq!(result["applied"], json!(true), "{result}");
+    let DataFieldKind::File {
+        on_delete,
+        on_conflict,
+        ..
+    } = kind(&env)
+    else {
+        panic!("a file field");
+    };
+    assert_eq!(on_delete, FileOnDelete::RemoveFile);
+    assert_eq!(on_conflict, FileOnConflict::Overwrite);
+
+    // Only the option: the rest of the field is kept.
+    edit(
+        &env,
+        &default_grants(),
+        json!({"operations": [{
+            "op": "alter_field", "table": "slides", "field": "picture",
+            "on_conflict": "suffix",
+        }]}),
+    )
+    .await?;
+    let DataFieldKind::File {
+        store,
+        folder,
+        on_delete,
+        on_conflict,
+        ..
+    } = kind(&env)
+    else {
+        panic!("still a file field");
+    };
+    assert_eq!(store.0, "media");
+    assert_eq!(folder.as_deref(), Some("slides"));
+    assert_eq!(on_delete, FileOnDelete::RemoveFile);
+    assert_eq!(on_conflict, FileOnConflict::Suffix);
+
+    let described = describe(&env, &default_grants(), json!({"table": "slides"})).await?;
+    let text = described.to_string();
+    assert!(
+        text.contains("\"on_delete\":\"remove_file\""),
+        "{described}"
+    );
+    assert!(text.contains("\"on_conflict\":\"suffix\""), "{described}");
+
+    // An unknown choice names the ones there are; an option on a field that
+    // is not a file says what is missing.
+    let bad = edit(
+        &env,
+        &default_grants(),
+        json!({"operations": [{
+            "op": "alter_field", "table": "slides", "field": "picture",
+            "on_delete": "shred",
+        }]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(bad.contains("`keep` and `remove_file`"), "{bad}");
+    let not_file = edit(
+        &env,
+        &default_grants(),
+        json!({"operations": [{
+            "op": "alter_field", "table": "slides", "field": "id",
+            "on_delete": "remove_file",
+        }]}),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(not_file.contains("`file_store`"), "{not_file}");
     Ok(())
 }

@@ -721,6 +721,8 @@ fn blog_tables() -> Vec<Table> {
         store: FileStoreId("uploads".to_owned()),
         folder: None,
         mime_allow: Vec::new(),
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     };
     let mut word_count = DataField::plain("word_count", TypeRef::Basic(BasicType::Int));
     word_count.kind = DataFieldKind::Calc {

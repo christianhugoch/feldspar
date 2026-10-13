@@ -17,7 +17,8 @@
 
 use crate::calc_read::CalcPlan;
 use sc_catalog::{
-    CallerContext, Catalog, DataField, DataFieldKind, SharedTx, Table, TableWrite, WriteOp,
+    CallerContext, Catalog, DataField, DataFieldKind, FileOnDelete, SharedTx, Table, TableWrite,
+    WriteOp,
 };
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
@@ -1000,6 +1001,7 @@ pub(crate) async fn delete_row_guarded_in(
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
     };
     let row = row_to_json(row);
+    remove_deleted_files(catalog, table, std::slice::from_ref(&row), executor).await;
     emit(
         catalog,
         table,
@@ -1028,10 +1030,11 @@ pub async fn delete_all_rows_ctx(
 ) -> Result<u64> {
     let executor = Executor::Pooled;
     let observed = catalog.observes_writes(&table.name, WriteOp::Delete);
+    let removes_files = !files_removed_on_delete(table).is_empty();
     let delete = Delete {
         table: table.name.clone(),
         filter: user_rows::delete_guard(table, context)?,
-        returning: if observed {
+        returning: if observed || removes_files {
             user_rows::projection(table)
         } else {
             // Text, because a literal goes out as a bind parameter and a
@@ -1041,6 +1044,10 @@ pub async fn delete_all_rows_ctx(
         },
     };
     let rows = run_write_in(catalog, table, Statement::from(delete), context, &executor).await?;
+    if removes_files {
+        let deleted: Vec<Json> = rows.iter().map(row_to_json).collect();
+        remove_deleted_files(catalog, table, &deleted, &executor).await;
+    }
     if observed {
         for row in &rows {
             let row = row_to_json(row);
@@ -1057,6 +1064,111 @@ pub async fn delete_all_rows_ctx(
         }
     }
     Ok(rows.len() as u64)
+}
+
+/// The `File` fields of `table` whose file goes with the row: `(column, store)`.
+fn files_removed_on_delete(table: &Table) -> Vec<(&str, &str)> {
+    table
+        .fields
+        .iter()
+        .filter_map(|field| match &field.kind {
+            DataFieldKind::File {
+                store,
+                on_delete: FileOnDelete::RemoveFile,
+                ..
+            } => Some((field.base.name.as_str(), store.0.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Remove the files deleted `rows` referenced through `on_delete: remove_file`
+/// fields.
+///
+/// A file another row of the table still references is kept: two rows may
+/// share a path, and the delete of one must not break the other. That check
+/// runs where the delete did, so inside a transaction it sees the transaction's
+/// own writes; on an RLS table, a row the server's connection cannot see does
+/// not count. The file itself goes only once the delete is durable: at once on
+/// the pooled path, and after the commit inside a transaction, so a rollback
+/// leaves both the row and its file. Deletes the database cascades from
+/// another table are not seen here.
+///
+/// Like a trigger's failure, a removal that fails is reported, not raised: the
+/// row is already gone, and the caller's delete succeeded.
+async fn remove_deleted_files(
+    catalog: &Catalog,
+    table: &Table,
+    rows: &[Json],
+    executor: &Executor,
+) {
+    for (column, store_name) in files_removed_on_delete(table) {
+        let store = match catalog.file_store(store_name) {
+            Ok(Some(store)) => store,
+            _ => continue,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for row in rows {
+            let Some(path) = row
+                .get(column)
+                .and_then(Json::as_str)
+                .filter(|p| !p.is_empty())
+            else {
+                continue;
+            };
+            if !seen.insert(path.to_owned()) {
+                continue;
+            }
+            match still_referenced(catalog, table, column, path, executor).await {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "feldspar: keeping `{path}` after a delete from `{}`: checking for \
+                         other references failed: {}",
+                        table.name,
+                        sc_error::format_chain(&e)
+                    );
+                    continue;
+                }
+            }
+            let store = store.clone();
+            let path = path.to_owned();
+            let remove = async move {
+                if let Err(e) = store.delete(&path).await {
+                    eprintln!(
+                        "feldspar: removing `{path}` after its row was deleted: {}",
+                        sc_error::format_chain(&e)
+                    );
+                }
+            };
+            match executor.serving(table) {
+                Some(tx) => tx.after_commit(move || {
+                    tokio::spawn(remove);
+                }),
+                None => remove.await,
+            }
+        }
+    }
+}
+
+/// Whether some row of `table` still has `path` in `column`.
+async fn still_referenced(
+    catalog: &Catalog,
+    table: &Table,
+    column: &str,
+    path: &str,
+    executor: &Executor,
+) -> Result<bool> {
+    let filter = Expr::col(column).eq(Expr::lit(Value::Text(path.to_owned())));
+    let select = read_select(
+        catalog,
+        table,
+        &RowQuery::new().where_(Some(filter)).limit(1),
+    )?;
+    Ok(!run_read_in(catalog, table, &select, None, false, executor)
+        .await?
+        .is_empty())
 }
 
 /// Raise the event one committed write is (§10.2), if anything is listening.
@@ -1304,6 +1416,7 @@ fn validate_file_write(
         store,
         folder,
         mime_allow,
+        ..
     } = &field.kind
     else {
         return Ok(());

@@ -2,6 +2,39 @@
 
 Changes in reverse chronological order.
 
+## File fields: remove the file with its row, suffix taken names
+
+From an external coding agent's feedback: a deleted row left its file behind (they ran an hourly
+orphan sweep), and an upload with a name already in the folder replaced the file that was there.
+Two new options on a `File` field, settable through `edit_schema` and the admin field editor.
+
+- **`DataFieldKind::File`** gained `on_delete: FileOnDelete` (`keep`, the default, or
+  `remove_file`) and `on_conflict: FileOnConflict` (`overwrite`, the default, or `suffix`). They
+  are stored in the `_fd_fields` attributes bag beside `store`/`folder`/`mime_allow`, only when
+  not the default, so existing rows need no migration. An unknown value is a named error.
+- **`on_delete: "remove_file"`.** The row layer (`delete_row_*` and `delete_all_rows_ctx`, i.e. every
+  delete that goes through `sc_api::rows`) removes each deleted row's
+  file, unless another row of the table still references the same path. Inside a transaction the
+  file goes only after the commit (`SharedTx::after_commit`), so a rollback keeps both. A failed
+  removal is logged, not raised. Not covered: rows the database cascades from another table, and,
+  on an RLS table, the "still referenced" check sees only rows the server connection can see.
+- **`on_conflict: "suffix"`.** A REST File-field upload whose path is taken lands at the first
+  free `name_1.ext`, `name_2.ext`, … (`sc_files::free_path`/`suffixed_path`; a dotfile has no
+  extension, only the last extension moves). The row references the suffixed path, and nothing
+  is overwritten, so the write check on an existing file does not apply.
+- **`edit_schema`** takes `on_delete` and `on_conflict` beside `file_store`/`file_folder`/
+  `file_mime`. An `alter_field` may give just these (or `file_folder`/`file_mime`) without
+  restating `file_store`: the rest of the file settings are kept from the field as it is. A file
+  setting on a field that is not a file says to give `file_store`. `describe_schema` now reports a
+  file field's folder, MIME list and both options.
+- **Admin UI.** The File kind's `config_spec` has two pick-lists ("When the row is deleted",
+  "When an upload's name is taken"); `listFields`/`createField`/`updateField` carry both options
+  on the kind object. The field editor is spec-driven, so no UI code changed.
+- Tests: `suffixed_path` unit test; `_fd_fields` round trip and defaults; `edit_schema` create,
+  option-only alter and errors (`admin_copilot`); end to end through the router
+  (`app_file_access`: suffixed second upload, file removed with its row, a shared file kept
+  until its last row goes); admin field-form round trip (`fieldForm.test.ts`).
+
 ## Query contracts and rate limits (TODO F4)
 
 Field report items 3.2 (untyped responses) and 3.4 (no rate limiting). A code query can now say

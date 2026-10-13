@@ -122,6 +122,10 @@ pub enum DataFieldKind {
         folder: Option<String>,
         /// Allowed MIME types (empty = any).
         mime_allow: Vec<String>,
+        /// What happens to the stored file when its row is deleted.
+        on_delete: FileOnDelete,
+        /// What an upload does when a file of the same name is already there.
+        on_conflict: FileOnConflict,
     },
     /// A **non-stored calculated field** (TODO Phase 8): no column on disk, only
     /// an `sc-expr` expression computed on read over the row's own fields,
@@ -134,6 +138,67 @@ pub enum DataFieldKind {
         /// The JavaScript expression, validated at merge time.
         expression: String,
     },
+}
+
+/// What a `File` field does with its stored file when the row is deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileOnDelete {
+    /// The file stays in its store (the default): other rows, or nothing at all,
+    /// may still want it.
+    #[default]
+    Keep,
+    /// The file is removed from its store once the delete has committed, unless
+    /// another row of the table still references the same path.
+    RemoveFile,
+}
+
+impl FileOnDelete {
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileOnDelete::Keep => "keep",
+            FileOnDelete::RemoveFile => "remove_file",
+        }
+    }
+
+    /// Parse the stored and wire spelling; an empty string is the default.
+    pub fn parse(s: &str) -> Option<FileOnDelete> {
+        match s.trim() {
+            "" | "keep" => Some(FileOnDelete::Keep),
+            "remove_file" => Some(FileOnDelete::RemoveFile),
+            _ => None,
+        }
+    }
+}
+
+/// What an upload into a `File` field does when the path it would land at is
+/// already taken.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileOnConflict {
+    /// The upload replaces the file that is there (the default).
+    #[default]
+    Overwrite,
+    /// The upload gets the first free name of `name_1.ext`, `name_2.ext`, ….
+    Suffix,
+}
+
+impl FileOnConflict {
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileOnConflict::Overwrite => "overwrite",
+            FileOnConflict::Suffix => "suffix",
+        }
+    }
+
+    /// Parse the stored and wire spelling; an empty string is the default.
+    pub fn parse(s: &str) -> Option<FileOnConflict> {
+        match s.trim() {
+            "" | "overwrite" => Some(FileOnConflict::Overwrite),
+            "suffix" => Some(FileOnConflict::Suffix),
+            _ => None,
+        }
+    }
 }
 
 impl DataField {
