@@ -72,6 +72,9 @@ pub struct HandlerCtx {
     /// than giving that route its own catalog handle is what keeps one code path
     /// for "write a file", however the bytes arrived.
     pub raw_body: Option<bytes::Bytes>,
+    /// The address the request came from (TODO F4.2): what login throttling
+    /// counts per IP. `None` where there was no socket.
+    pub client_ip: Option<std::net::IpAddr>,
     /// The Analytics application this request came through (analytics TODO
     /// A9.3), with what it allows; `None` on the admin host, which is the
     /// unrestricted Analytics UI.

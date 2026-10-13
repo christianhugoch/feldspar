@@ -398,6 +398,15 @@ describe("the types the code editor loads", () => {
          return response({ status: 201, headers: { "x-id": "7" }, body: { ok: true } });`,
       ),
     ).toEqual([]);
+    // TODO F4.5: the rate limiter.
+    expect(
+      check(
+        `ratelimit.check("share:" + String(user?.id), { max: 5, window: "15m" });
+         const under = ratelimit.hit("k", { max: 10, window: 60000 });
+         return { under: under === true };`,
+      ),
+    ).toEqual([]);
+    expect(check(`ratelimit.hit("k", { window: "1m" });`).join(" ")).toMatch(/max/);
     // The counter-test: a digest the sandbox does not have, and a string where
     // bytes are wanted.
     expect(check(`await crypto.subtle.digest("MD5", new Uint8Array(1));`).join(" ")).toMatch(/MD5/);

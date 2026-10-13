@@ -25,6 +25,8 @@ import {
   pythonAvailable,
   queryRowsFromConfig,
   queryRowsToConfig,
+  returnsApplies,
+  returnsError,
   statusSummary,
 } from "./customQueries";
 import { apiRowsFromApp, apiRowsToRequest, supportsCustomQueries } from "./apiRows";
@@ -241,5 +243,57 @@ describe("the note on a code query with no parameters (TODO F1.1)", () => {
     );
     // SQL declares exactly what it uses, so the note would be noise there.
     expect(needsParamsNote({ ...row, language: "sql" })).toBe(false);
+  });
+});
+
+describe("returns and rate limits (TODO F4.1, F4.3)", () => {
+  const js = {
+    ...blankQueryRow(),
+    name: "tagged",
+    path: "/tagged",
+    language: "javascript" as const,
+    code: "return {}",
+  };
+
+  it("sends a declared type parsed, and reads it back as text", () => {
+    const returns = { object: { id: "uuid", tags: { array: "string" } } };
+    const [stored] = queryRowsToConfig([{ ...js, returns: JSON.stringify(returns) }]);
+    expect(stored.returns).toEqual(returns);
+    const [row] = queryRowsFromConfig({ queries: [stored] });
+    expect(JSON.parse(row.returns)).toEqual(returns);
+    // A SQL query, or one that answers with bytes, declares none.
+    const [sql] = queryRowsToConfig([{ ...js, language: "sql", returns: '"int"' }]);
+    expect(sql.returns).toBeUndefined();
+    const [bytes] = queryRowsToConfig([{ ...js, responseType: "bytes", returns: '"int"' }]);
+    expect(bytes.returns).toBeUndefined();
+    expect(queryRowsToConfig([js])[0].returns).toBeUndefined();
+  });
+
+  it("says when the returns box is not JSON", () => {
+    expect(returnsError("")).toBeNull();
+    expect(returnsError('{"array": "int"}')).toBeNull();
+    expect(returnsError("{array: int}")).not.toBeNull();
+    expect(returnsApplies(js)).toBe(true);
+    expect(returnsApplies({ ...js, language: "sql" })).toBe(false);
+  });
+
+  it("round-trips the three rate limit modes", () => {
+    expect(queryRowsToConfig([js])[0].rate_limit).toBeUndefined();
+    const [none] = queryRowsToConfig([{ ...js, rateLimit: "none" }]);
+    expect(none.rate_limit).toEqual({});
+    const [custom] = queryRowsToConfig([
+      { ...js, rateLimit: "custom", ratePerIp: " 20/min ", ratePerUser: "" },
+    ]);
+    expect(custom.rate_limit).toEqual({ per_ip: "20/min" });
+    const rows = queryRowsFromConfig({ queries: [js, none, custom].map((q) => ({ ...q })) });
+    expect(queryRowsFromConfig({ queries: [none] })[0].rateLimit).toBe("none");
+    const [back] = queryRowsFromConfig({ queries: [custom] });
+    expect(back.rateLimit).toBe("custom");
+    expect(back.ratePerIp).toBe("20/min");
+    expect(rows[0].rateLimit).toBe("default");
+  });
+
+  it("reports a typed code query's check", () => {
+    expect(statusSummary({ kind: "checked", typed: true })).toMatch(/declared type/);
   });
 });

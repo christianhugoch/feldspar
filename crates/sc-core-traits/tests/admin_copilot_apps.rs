@@ -120,7 +120,7 @@ async fn a_query_the_agent_wrote_is_typed_by_the_database_and_lands_in_the_clien
 
     // The part no mock could produce: the shape is the *database's* answer to
     // `describe`, not the model's declaration and not this test's.
-    let returns = result["query"]["returns"].as_array().unwrap();
+    let returns = result["query"]["columns"].as_array().unwrap();
     assert_eq!(returns.len(), 2, "{result}");
     assert_eq!(returns[0]["name"], json!("author"));
     assert_eq!(returns[0]["type"], json!("text"));
@@ -219,7 +219,7 @@ async fn an_edit_merges_into_what_is_stored_and_is_its_own_grant() -> Result<()>
         json!("Books per author since a year")
     );
     assert_eq!(result["query"]["params"][0]["name"], json!("since"));
-    let returns = result["query"]["returns"].as_array().unwrap();
+    let returns = result["query"]["columns"].as_array().unwrap();
     assert_eq!(returns.len(), 3, "{result}");
     assert_eq!(returns[2]["name"], json!("latest"));
 
@@ -430,7 +430,7 @@ async fn describing_the_applications_reports_the_apis_and_their_queries() -> Res
     assert_eq!(api["serves_custom_queries"], json!(true));
     assert_eq!(api["queries"][0]["name"], json!("topAuthors"));
     assert_eq!(api["queries"][0]["params"][0]["type"], json!("int"));
-    assert_eq!(api["queries"][0]["returns"][0]["name"], json!("author"));
+    assert_eq!(api["queries"][0]["columns"][0]["name"], json!("author"));
 
     // An application nobody serves names the ones somebody does.
     let err = call(

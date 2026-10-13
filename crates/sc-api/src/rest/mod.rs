@@ -71,6 +71,7 @@ use serde_json::{Value as Json, json};
 pub mod custom;
 pub mod password;
 mod query;
+pub mod returns;
 
 use custom::CustomQuery;
 
@@ -759,6 +760,9 @@ impl RestProvider {
         cat: &Catalog,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
+        if let Err(limited) = self.custom_rate_limit(query, req, user) {
+            return Ok(ApiResponse::too_many_requests(limited));
+        }
         if let Some(action) = query.language.action() {
             return self.run_custom_code(query, action, req, cat, user).await;
         }
@@ -770,6 +774,34 @@ impl RestProvider {
             sc_catalog::run_in_context(cat, &caller, &statement).await
         }?;
         Ok(ApiResponse::ok(custom::rows_to_json(&rows)))
+    }
+
+    /// Count one call of `query` against its rate limits (TODO F4.3): per
+    /// client IP when the transport knows it, and per signed-in user. Both are
+    /// hit, so a refused call still counts against the other — a caller over
+    /// either limit is turned away, and spending one does not refill the other.
+    fn custom_rate_limit(
+        &self,
+        query: &CustomQuery,
+        req: &ApiRequest,
+        user: Option<&User>,
+    ) -> std::result::Result<(), sc_ratelimit::Limited> {
+        let limits = query.effective_rate_limit();
+        let scope = format!(
+            "query:{}:{}:{}",
+            self.application.map(|a| a.to_string()).unwrap_or_default(),
+            self.mount,
+            query.name
+        );
+        let limiter = sc_ratelimit::global();
+        let mut outcome = Ok(());
+        if let (Some(rate), Some(ip)) = (limits.per_ip, req.client_ip) {
+            outcome = outcome.and(limiter.hit(&format!("{scope}:ip:{ip}"), rate));
+        }
+        if let (Some(rate), Some(user)) = (limits.per_user, user) {
+            outcome = outcome.and(limiter.hit(&format!("{scope}:user:{}", user.id), rate));
+        }
+        outcome
     }
 
     /// Run a JavaScript or Python custom query (§13.4): its body, on the
@@ -809,7 +841,13 @@ impl RestProvider {
                 self.file_urls.clone(),
             )
             .await;
-        code_answer(result, cat, user).await
+        let answer = code_answer(result, cat, user).await;
+        if req.preview
+            && let Ok(response) = &answer
+        {
+            check_preview_returns(query, response);
+        }
+        answer
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -909,15 +947,22 @@ impl RestProvider {
     /// Uses the same `authenticate` the admin login does, but for **any** role —
     /// an app's users are not admins. A bad password and an unknown user are the
     /// same `401` with the same message: distinguishing them would tell an
-    /// attacker which emails are registered.
-    async fn login(&self, body: &Json, cat: &Catalog) -> Result<ApiResponse> {
-        let (email, password) = credentials(body)?;
+    /// attacker which emails are registered. Throttled per IP and per email
+    /// (TODO F4.4, [`crate::throttle`]), with the same `429` for either.
+    async fn login(&self, req: &ApiRequest, cat: &Catalog) -> Result<ApiResponse> {
+        let (email, password) = credentials(&req.body)?;
+        if let Err(limited) = crate::throttle::login_attempt(req.client_ip, &email) {
+            return Ok(ApiResponse::too_many_requests(limited));
+        }
         match authenticate(cat, &email, &password).await? {
             Some(user) => {
                 let summary = user_summary_json(&user);
                 Ok(ApiResponse::start_session(user, summary))
             }
-            None => Ok(ApiResponse::error(401, "invalid credentials")),
+            None => {
+                crate::throttle::login_failed(&email);
+                Ok(ApiResponse::error(401, "invalid credentials"))
+            }
         }
     }
 
@@ -1407,6 +1452,26 @@ async fn code_answer(
     Ok(ApiResponse::with_status(status, body))
 }
 
+/// In a run's preview, check a code query's successful JSON answer against its
+/// declared `returns` (TODO F4.1) and log a warning naming the first mismatch.
+/// The response goes out unchanged either way: the contract is for the
+/// author to hear about, not for the caller to be refused over.
+fn check_preview_returns(query: &CustomQuery, response: &ApiResponse) {
+    if !(200..300).contains(&response.status) || response.raw.is_some() || response.file.is_some() {
+        return;
+    }
+    let Some(schema) = query.returns_schema() else {
+        return;
+    };
+    if let Some(mismatch) = returns::check_returns(&schema, &response.body) {
+        sc_log::log_warn!(
+            "warning: custom query `{}` returned a value that does not match its \
+             declared `returns`: {mismatch}",
+            query.name
+        );
+    }
+}
+
 /// A body's `response(...)`, as the transport serves it: JSON with a status
 /// and headers (TODO F1.4), raw bytes under their content type (TODO F2.9), or
 /// a store file through the shared file response builder (TODO F2.10).
@@ -1762,6 +1827,8 @@ impl ApiProvider for RestProvider {
             raw: None,
             headers: Vec::new(),
             links: None,
+            client_ip: None,
+            preview: false,
         };
         Some(self.run_custom_code(query, action, &req, cat, user).await)
     }
@@ -1787,7 +1854,7 @@ impl RestProvider {
         }
 
         match &endpoint.handler {
-            HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req, cat).await,
             HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req.body, cat).await,
             HandlerRef::Named(_) if endpoint.name == INVITE && self.invite_min_role.is_some() => {
                 password::invite(&req, cat, user, self.mailer.as_ref()).await

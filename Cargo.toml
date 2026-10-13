@@ -4,6 +4,9 @@ members = [
     # Layer 0 — foundations
     "crates/sc-error",
     "crates/sc-log",
+    # The in-memory token-bucket limiter and the client-IP rule (TODO F4.2):
+    # per-query limits, login throttling and a code body's `ratelimit`.
+    "crates/sc-ratelimit",
     "crates/sc-config-file",
     # Internationalisation (TODO "one catalogue, two runtimes"): the `Locale`,
     # the negotiation, the catalogue, the message format, the `t!` macros and
@@ -132,6 +135,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 sc-error = { path = "crates/sc-error" }
 sc-log = { path = "crates/sc-log" }
+sc-ratelimit = { path = "crates/sc-ratelimit" }
 sc-i18n = { path = "crates/sc-i18n" }
 # `feldspar.toml` — the deployment file naming this machine's databases. Layer 0
 # because both ends of the workspace read it: the binary, to know where the

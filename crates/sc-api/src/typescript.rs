@@ -1275,6 +1275,11 @@ fn ts_type(schema: &TypeSchema) -> String {
         }
         TypeSchema::Array(inner) => format!("Array<{}>", ts_type(inner)),
         TypeSchema::Optional(inner) => format!("{} | null", ts_type(inner)),
+        TypeSchema::Union(alternatives) => alternatives
+            .iter()
+            .map(ts_type)
+            .collect::<Vec<_>>()
+            .join(" | "),
     }
 }
 

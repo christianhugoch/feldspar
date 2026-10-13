@@ -721,8 +721,7 @@ pub async fn fill_defaults(
 ) -> Result<Json> {
     let obj = require_object(body)?;
     let missing = |f: &&DataField| {
-        f.default_expression.is_some()
-            && obj.get(&f.base.name).is_none_or(Json::is_null)
+        f.default_expression.is_some() && obj.get(&f.base.name).is_none_or(Json::is_null)
     };
     if !table.fields.iter().any(|f| missing(&f)) {
         return Ok(body.clone());
@@ -735,17 +734,21 @@ pub async fn fill_defaults(
     };
     let evaluator = catalog.formula_evaluator();
     let shape = catalog.schema_shape()?;
-    let user: Option<std::collections::BTreeMap<String, Value>> = user.and_then(Json::as_object).map(|u| {
-        u.iter()
-            .map(|(k, v)| (k.clone(), sc_expr::value_from_json(v)))
-            .collect()
-    });
+    let user: Option<std::collections::BTreeMap<String, Value>> =
+        user.and_then(Json::as_object).map(|u| {
+            u.iter()
+                .map(|(k, v)| (k.clone(), sc_expr::value_from_json(v)))
+                .collect()
+        });
     // The row the expressions see: what the body gives, coerced as the insert
     // will coerce it. A key that is not a stored field is left for the insert
     // to refuse by name.
     let mut row = std::collections::BTreeMap::new();
     for (key, json) in obj {
-        if table.field(key).is_some_and(|f| !f.is_calc() && !f.is_collab_doc()) {
+        if table
+            .field(key)
+            .is_some_and(|f| !f.is_calc() && !f.is_collab_doc())
+        {
             row.insert(key.clone(), column_value(table, key, json)?);
         }
     }

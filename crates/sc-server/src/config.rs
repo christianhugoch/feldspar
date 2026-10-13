@@ -281,6 +281,12 @@ pub struct ServerConfig {
     /// without entering the isolate — a copy, a `concat` (`--code-max-copy-bytes`,
     /// default 256 MiB).
     pub code_max_copy_bytes: u64,
+    /// The proxies whose `X-Forwarded-For` names the client
+    /// (`--trusted-proxies`, a comma-separated list of addresses and CIDR
+    /// blocks; default none). Without it, a request's address is its socket's
+    /// peer and the header is ignored, because anybody can write one. What a
+    /// per-IP rate limit counts against (TODO F4.2).
+    pub trusted_proxies: sc_ratelimit::TrustedProxies,
 }
 
 /// The request body limit when `--max-request-body` is not given: 2 MiB, the
@@ -337,6 +343,7 @@ impl Default for ServerConfig {
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
             code_max_file_bytes: sc_api::code_host::MAX_FILE_BYTES,
             code_max_copy_bytes: sc_api::code_host::MAX_COPY_BYTES,
+            trusted_proxies: sc_ratelimit::TrustedProxies::none(),
         }
     }
 }
@@ -358,7 +365,8 @@ impl ServerConfig {
     /// `--browser <path>`, `--no-browser-sandbox`, `--browser-contexts <n>` and
     /// `--preview-idle-minutes <n>`, `--max-request-body <bytes>` and
     /// `--max-upload-bytes <bytes>`, `--code-max-file-bytes <bytes>` and
-    /// `--code-max-copy-bytes <bytes>` (all take a `K`, `M` or `G` suffix).
+    /// `--code-max-copy-bytes <bytes>` (all take a `K`, `M` or `G` suffix),
+    /// and `--trusted-proxies <list>`.
     /// Unknown flags are an
     /// [`Error::Config`], so a typo fails loudly rather than being ignored.
     pub fn from_args<I, S>(args: I) -> Result<ServerConfig>
@@ -548,6 +556,11 @@ impl ServerConfig {
                         .map_err(|_| {
                             Error::config(format!("--max-request-body `{raw}` is too large"))
                         })?;
+                }
+                "--trusted-proxies" => {
+                    let raw = next_value(&mut it, "--trusted-proxies")?;
+                    cfg.trusted_proxies = sc_ratelimit::TrustedProxies::parse(&raw)
+                        .map_err(|e| Error::config(format!("invalid --trusted-proxies: {e}")))?;
                 }
                 "--max-upload-bytes" => {
                     let raw = next_value(&mut it, "--max-upload-bytes")?;
@@ -891,6 +904,18 @@ mod tests {
         assert_eq!(cfg.code_max_file_bytes, 1024 * 1024);
         assert_eq!(cfg.code_max_copy_bytes, 1024 * 1024 * 1024);
         assert!(ServerConfig::from_args(["--code-max-file-bytes", "0"]).is_err());
+    }
+
+    /// `--trusted-proxies` (TODO F4.2): none by default, a list of addresses
+    /// and blocks when given, and a typo is refused.
+    #[test]
+    fn parses_the_trusted_proxies() {
+        assert!(ServerConfig::default().trusted_proxies.is_empty());
+        let cfg =
+            ServerConfig::from_args(["--trusted-proxies", "127.0.0.1, 10.0.0.0/8"]).expect("parse");
+        assert!(cfg.trusted_proxies.contains("10.1.2.3".parse().unwrap()));
+        assert!(!cfg.trusted_proxies.contains("192.0.2.1".parse().unwrap()));
+        assert!(ServerConfig::from_args(["--trusted-proxies", "10.0.0.0/40"]).is_err());
     }
 
     /// The Stan flags of TODO §20: unset, each is the engine's own default and

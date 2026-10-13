@@ -14,6 +14,10 @@ autotests = false
 
 [dependencies]
 sc-error.workspace = true
+# A preview's `returns` mismatch is a warning (TODO F4.1).
+sc-log.workspace = true
+# Per-query rate limits and login throttling (TODO F4.3, F4.4).
+sc-ratelimit.workspace = true
 sc-catalog.workspace = true
 # Ownership-formula enforcement (§7.3, Phase 5). Without the `eval` feature:
 # this crate translates formulas and holds an `Arc<dyn JsEvaluator>` seam; the
@@ -99,6 +103,7 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 # test that downloads every public dataset from its publisher.
 tokio-postgres.workspace = true
 reqwest.workspace = true
+sc-log = { workspace = true, features = ["capture"] }
 
 [lints]
 workspace = true

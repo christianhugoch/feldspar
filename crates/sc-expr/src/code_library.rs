@@ -199,9 +199,9 @@ const CHECK_NAME: &str = "library";
 /// with the line **in the library**. `Err` is the engine failing to answer.
 pub async fn check_code_library(evaluator: &dyn JsEvaluator, code: &str) -> Result<Option<String>> {
     // The check's run is a pure one — no host of any kind and no bindings — so
-    // its handle set is `console` alone, and the key below is the key the
-    // runtime will compile the library under for it.
-    let definition = library_definition(code, &library_params(vec!["console"]), false);
+    // its handle set is `console` and `ratelimit` alone, and the key below is
+    // the key the runtime will compile the library under for it.
+    let definition = library_definition(code, &library_params(vec!["console", "ratelimit"]), false);
     let key = library_key(&definition);
     let call = CodeCall {
         code: format!("return __scLibraryError(\"{key:016x}\");"),

@@ -189,12 +189,27 @@ pub fn admin_handlers_with(
         }
     });
 
+    /// A throttled sign-in (TODO F4.4): `429 {error, retry_after}`, which the
+    /// router also sends as `Retry-After`.
+    fn too_many_requests(limited: sc_ratelimit::Limited) -> HandlerResponse {
+        HandlerResponse::ok(json!({
+            "error": "too many requests",
+            "retry_after": limited.retry_after_secs(),
+        }))
+        .with_status(429)
+    }
+
     reg.register("login", {
         let catalog = catalog.clone();
         move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let (email, password) = credentials(&ctx.body)?;
+                // Throttled per IP and per email, as an application's login
+                // is (TODO F4.4), before the account is looked up.
+                if let Err(limited) = sc_api::throttle::login_attempt(ctx.client_ip, &email) {
+                    return Ok(too_many_requests(limited));
+                }
                 // The admin host signs in admins. An Analytics application
                 // (analytics TODO A9.3) signs in anybody whose password is
                 // right, on its own host: its role floor is what decides what
@@ -208,7 +223,10 @@ pub fn admin_handlers_with(
                         let body = user_summary_json(&user);
                         Ok(HandlerResponse::start_session(user, body))
                     }
-                    None => Err(Error::auth(t!(ctx.locale, "invalid credentials"))),
+                    None => {
+                        sc_api::throttle::login_failed(&email);
+                        Err(Error::auth(t!(ctx.locale, "invalid credentials")))
+                    }
                 }
             }
         }
@@ -6365,6 +6383,8 @@ pub fn admin_handlers_with(
                     // The admin's GraphQL explorer builds no emailed links.
                     headers: Vec::new(),
                     links: None,
+                    client_ip: None,
+                    preview: false,
                 };
                 let resp = provider.handle(req, &catalog, ctx.user.as_ref()).await?;
                 Ok(HandlerResponse::ok(resp.body).with_status(resp.status))

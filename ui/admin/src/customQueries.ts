@@ -97,6 +97,32 @@ export function responseTypeApplies(row: Pick<QueryRow, "language">): boolean {
   return row.language === "javascript";
 }
 
+/** Whether a declared `returns` type applies (TODO F4.1): a code query that
+ * answers with JSON. A SQL query is typed by its columns. */
+export function returnsApplies(row: Pick<QueryRow, "language" | "responseType">): boolean {
+  return isCode(row.language) && row.responseType === "json";
+}
+
+/** What is wrong with the `returns` box as JSON, or null when it is empty or
+ * parses. Whether the JSON is a *type* is the server's question, asked by
+ * Check and by the save. */
+export function returnsError(text: string): string | null {
+  if (!text.trim()) return null;
+  try {
+    JSON.parse(text);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** How a query's rate limit is chosen (TODO F4.3): the default (60/min per
+ * IP for a public code query, nothing otherwise), stated rates, or none. */
+export type RateLimitMode = "default" | "custom" | "none";
+
+/** The per-IP limit a public code query has unless it states one. */
+export const DEFAULT_PUBLIC_RATE = "60/min";
+
 /** One custom query, as the form edits it. */
 export type QueryRow = {
   name: string;
@@ -112,6 +138,13 @@ export type QueryRow = {
   bodyType: PayloadType;
   /** `bytes`: the client method resolves to a `Blob`. */
   responseType: PayloadType;
+  /** A code query's declared answer, as JSON text in the `returns` type
+   * language; empty for none. */
+  returns: string;
+  rateLimit: RateLimitMode;
+  /** Rates such as `20/min`, used when `rateLimit` is `custom`. */
+  ratePerIp: string;
+  ratePerUser: string;
   /** The columns last described — from the stored query when the form opened,
    * or from the check button. Shown as the preview of what the generated client
    * method will return. */
@@ -125,7 +158,7 @@ export type CheckStatus =
   | { kind: "ok"; columns: QueryColumn[] }
   /** A JavaScript or Python query passed every check but its body, which only
    * runs when it is called. */
-  | { kind: "checked" }
+  | { kind: "checked"; typed?: boolean }
   | { kind: "error"; message: string };
 
 /** The parameter types an admin may declare — the wire's `ValueType` names, in
@@ -172,6 +205,10 @@ export function blankQueryRow(): QueryRow {
     params: [],
     bodyType: "json",
     responseType: "json",
+    returns: "",
+    rateLimit: "default",
+    ratePerIp: "",
+    ratePerUser: "",
     columns: [],
   };
 }
@@ -213,6 +250,8 @@ function queryRowFrom(stored: unknown): QueryRow {
     minRole: typeof q.min_role === "number" ? q.min_role : ADMIN_ROLE,
     bodyType: payloadFrom(q.body_type),
     responseType: payloadFrom(q.response_type),
+    returns: q.returns === undefined || q.returns === null ? "" : JSON.stringify(q.returns, null, 2),
+    ...rateLimitFrom(q.rate_limit),
     params: params.map((p) => {
       const o = (p ?? {}) as Record<string, unknown>;
       return {
@@ -227,6 +266,18 @@ function queryRowFrom(stored: unknown): QueryRow {
       return { name: text(o.name), type: text(o.type) };
     }),
   };
+}
+
+function rateLimitFrom(
+  value: unknown,
+): Pick<QueryRow, "rateLimit" | "ratePerIp" | "ratePerUser"> {
+  if (!value || typeof value !== "object") {
+    return { rateLimit: "default", ratePerIp: "", ratePerUser: "" };
+  }
+  const o = value as Record<string, unknown>;
+  const ratePerIp = text(o.per_ip);
+  const ratePerUser = text(o.per_user);
+  return { rateLimit: ratePerIp || ratePerUser ? "custom" : "none", ratePerIp, ratePerUser };
 }
 
 function text(value: unknown): string {
@@ -247,6 +298,10 @@ export type StoredQuery = {
   /** Sent only when not `json`, as the server stores it. */
   body_type?: PayloadType;
   response_type?: PayloadType;
+  /** Sent only when declared. */
+  returns?: unknown;
+  /** Absent for the default; `{}` for no limit. */
+  rate_limit?: { per_ip?: string; per_user?: string };
 };
 
 /** The rows as the `queries` value of an API's config object.
@@ -275,6 +330,17 @@ export function queryRowsToConfig(rows: QueryRow[]): StoredQuery[] {
     // dropped rather than sent for the server to refuse.
     if (row.bodyType === "bytes" && bodyTypeApplies(row)) stored.body_type = "bytes";
     if (row.responseType === "bytes" && responseTypeApplies(row)) stored.response_type = "bytes";
+    if (row.returns.trim() && returnsApplies(row)) {
+      // Text that is not JSON goes as it is, and the server's refusal says so.
+      stored.returns = returnsError(row.returns) ? row.returns : JSON.parse(row.returns);
+    }
+    if (row.rateLimit === "none") stored.rate_limit = {};
+    if (row.rateLimit === "custom") {
+      const limit: { per_ip?: string; per_user?: string } = {};
+      if (row.ratePerIp.trim()) limit.per_ip = row.ratePerIp.trim();
+      if (row.ratePerUser.trim()) limit.per_user = row.ratePerUser.trim();
+      stored.rate_limit = limit;
+    }
     return stored;
   });
 }
@@ -308,7 +374,9 @@ export function statusSummary(status: CheckStatus): string {
         ? `Returns ${columnsSummary(status.columns)}`
         : "Prepared. It returns no columns.";
     case "checked":
-      return "Checked. It returns whatever its body returns, as JSON.";
+      return status.typed
+        ? "Checked. Its client method returns the declared type."
+        : "Checked. It returns whatever its body returns, as JSON.";
     case "error":
       return status.message;
   }

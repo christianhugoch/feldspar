@@ -43,7 +43,8 @@ into a second query: put it in a **code library** (below) and `lib()` it from bo
   gets `body` as a `Uint8Array` of the raw request body instead, and its declared params come
   from the query string; its client method takes a `Blob`, `ArrayBuffer` or `Uint8Array`.
 - `db`, `models`, `fetch`, `fs`, `trigger`, `modfn`, `console`, `lib` — below.
-- `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto`, `httpError`, `response` — below.
+- `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto`, `httpError`, `response`,
+  `ratelimit` — below.
 
 ## Bytes, randomness, hashes and passwords
 
@@ -91,6 +92,9 @@ return response({ body: pngBytes, headers: { "content-type": "image/png" } });
 return response({ file: fs("files").open(path), filename: "report.pdf", download: true });
 ```
 
+Brute force against that password is stopped by **`ratelimit`** below — per share, which no
+per-IP limit can express.
+
 This is how to write **any download rule** the store's role + owner rule cannot: a
 password-protected share, an expiring link, a revocable one, a quota, an audit log. The query
 is a GET (so links and `<video>` work), its `min_role` decides who may call it, and its code
@@ -98,6 +102,7 @@ decides the rest — on every request, so each Range request of a video re-check
 
 ```js
 // GET /share, params token (text) and password (text, optional), min_role 100, response_type bytes
+ratelimit.check("share:" + query.token, { max: 5, window: "15m" }); // 6th try in 15 min: 429
 const share = await db.shares.where({ token: query.token }).first();
 if (!share) throw httpError(404, "no such share");
 if (!(await crypto.password.verify(query.password ?? "", share.password_hash))) {
@@ -122,6 +127,39 @@ floor:
 if (body.size > 100e6 && user.role > 40) throw httpError(413, "100 MB at most");
 return { path: `${user.id}/${body.filename}`, meta: { project: "apollo" } };
 ```
+
+## Typed answers and rate limits (custom queries)
+
+**Declare what a query returns.** Save a JSON-answering code query with `returns` (in
+`save_api_query`) and its client method resolves to a typed `<Name>Response` instead of
+`unknown`. A type is a name — `"string"`, `"int"`, `"float"`, `"bool"`, `"json"` (anything),
+`"uuid"`, `"date"`, `"timestamp"` — or `{"object": {"prop": T, …}}`, `{"array": T}`,
+`{"optional": T}` (T or null; an optional property may be left out) or `{"union": [T, …]}`:
+
+```json
+{ "object": { "id": "uuid", "tags": { "array": "string" }, "note": { "optional": "string" } } }
+```
+
+It is a contract for the client and is not enforced on live calls. In a run's preview each
+answer is checked and a mismatch is logged as a warning (`$.tags[0]: expected text, got 3`).
+
+**Limits per query.** `rate_limit: { per_ip: "20/min", per_user: "1000/day" }` on a query
+answers the call over either with a **429** and `Retry-After`. A **public code query with no
+`rate_limit` gets 60/min per IP**; `rate_limit: {}` turns that off. Sign-in and password reset
+are throttled by the server itself.
+
+**Limits per anything else: `ratelimit`.** A token bucket per key, in this application's own
+namespace (two apps' `"share:abc"` are two counts):
+
+```js
+if (!ratelimit.hit("invite:" + user.id, { max: 10, window: "1h" })) return { queued: false };
+ratelimit.check("share:" + query.token, { max: 5, window: "15m" }); // throws httpError(429)
+```
+
+`hit` counts one and answers `true` while under the limit; `check` counts one and throws
+`httpError(429, …)` with `{ error, retry_after }` when over. `max` is the burst and the count per
+`window` (`"30s"`, `"15m"`, `"1h"`, `"1d"`, or milliseconds; default `"1m"`); the bucket
+refills evenly. Counts are in memory: a restart forgets them.
 
 ## `db`: reading and writing tables
 

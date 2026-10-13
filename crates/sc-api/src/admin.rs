@@ -6279,6 +6279,16 @@ fn custom_query_input_schema() -> TypeSchema {
         // `json` when absent (TODO F2.9/F2.10).
         StructField::new("body_type", TypeSchema::optional(TypeSchema::text())),
         StructField::new("response_type", TypeSchema::optional(TypeSchema::text())),
+        // A code query's declared answer, in the `returns` type language
+        // (TODO F4.1), and its rate limit (TODO F4.3).
+        StructField::new("returns", TypeSchema::optional(TypeSchema::json())),
+        StructField::new(
+            "rate_limit",
+            TypeSchema::optional(TypeSchema::struct_of([
+                StructField::new("per_ip", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("per_user", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
         StructField::new(
             "tables",
             TypeSchema::optional(TypeSchema::array(TypeSchema::text())),

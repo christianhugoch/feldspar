@@ -62,6 +62,15 @@ pub struct ApiRequest {
     /// that reached an application; `None` in a test or a tool call, where a
     /// provider asked to build a link says so rather than guessing a host.
     pub links: Option<AppLinks>,
+    /// The caller's address, as the transport decided it: the socket's peer,
+    /// or `X-Forwarded-For` when that peer is a trusted proxy (TODO F4.2).
+    /// What a per-IP rate limit counts against; `None` where there was no
+    /// socket (a test, a tool call), and then no per-IP limit applies.
+    pub client_ip: Option<std::net::IpAddr>,
+    /// Whether the request reached a coding run's **preview** of the
+    /// application rather than the live mount. A code query's declared
+    /// `returns` is checked here and only here (TODO F4.1).
+    pub preview: bool,
 }
 
 /// The applications a request can link to, as the transport that received it
@@ -115,6 +124,8 @@ impl ApiRequest {
             raw: None,
             headers: Vec::new(),
             links: None,
+            client_ip: None,
+            preview: false,
         }
     }
 
@@ -122,6 +133,19 @@ impl ApiRequest {
     /// chaining.
     pub fn links(mut self, links: Arc<dyn AppDirectory>) -> ApiRequest {
         self.links = Some(AppLinks(links));
+        self
+    }
+
+    /// Set the caller's address, returning `self` for chaining.
+    pub fn client_ip(mut self, ip: std::net::IpAddr) -> ApiRequest {
+        self.client_ip = Some(ip);
+        self
+    }
+
+    /// Mark the request as one to a run's preview, returning `self` for
+    /// chaining.
+    pub fn preview(mut self) -> ApiRequest {
+        self.preview = true;
         self
     }
 
@@ -288,6 +312,19 @@ impl ApiResponse {
     }
 
     /// An error response: `{"error": message}` with `status`.
+    /// A `429` for a rate limit that was hit (TODO F4.3): `{error,
+    /// retry_after}` and the `Retry-After` header, in whole seconds.
+    pub fn too_many_requests(limited: sc_ratelimit::Limited) -> ApiResponse {
+        let secs = limited.retry_after_secs();
+        let mut out = ApiResponse::with_status(
+            429,
+            serde_json::json!({ "error": "too many requests", "retry_after": secs }),
+        );
+        out.headers
+            .push(("retry-after".to_owned(), secs.to_string()));
+        out
+    }
+
     pub fn error(status: u16, message: impl Into<String>) -> ApiResponse {
         ApiResponse {
             status,

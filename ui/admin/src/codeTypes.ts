@@ -1218,6 +1218,24 @@ declare const crypto: {
   readonly subtle: ScSubtle;
   readonly password: ScPassword;
 };
+
+/** A rate: \`max\` per \`window\` (\`"30s"\`, \`"15m"\`, \`"1h"\`, \`"1d"\`, or
+ * milliseconds; default \`"1m"\`). \`max\` is also the burst. */
+interface ScRate {
+  max: number;
+  window?: string | number;
+}
+
+/** A token bucket per key, counted in this application's own namespace.
+ * \`ratelimit.check("share:" + query.token, { max: 5, window: "15m" })\` is
+ * how a password-protected share limits guesses per share. */
+declare const ratelimit: {
+  /** Count one hit on \`key\`: true while under the limit, false over it. */
+  hit(key: string, rate: ScRate): boolean;
+  /** Count one hit on \`key\`, and throw \`httpError(429)\` with
+   * \`{ error, retry_after }\` when over the limit. */
+  check(key: string, rate: ScRate): void;
+};
 `;
 }
 

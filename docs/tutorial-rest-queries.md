@@ -497,6 +497,73 @@ answers **503** `{"error":"timeout"}`.
 Exposed triggers (`POST /api/actions/<name>`) answer the same way: `httpError`, `response` and
 the 500 without a stack are the contract for every code body somebody calls over HTTP.
 
+## Step 12 — Typed answers and rate limits
+
+### Say what a code query returns
+
+`openShare`'s client method returns `unknown`: the server cannot know what a body returns. Tell
+it. In the query's **Returns** box (or `returns` in `save_api_query`):
+
+```json
+{ "object": { "title": "string" } }
+```
+
+Save, and the generated client has
+
+```ts
+export type OpenShareResponse = { title: string };
+const { title } = await api.openShare({ token });   // title: string
+```
+
+The type language is small: a name — `"string"`, `"int"`, `"float"`, `"bool"`, `"json"` (anything),
+`"uuid"`, `"date"`, `"timestamp"` — or `{ "object": { "prop": T, … } }`, `{ "array": T }`,
+`{ "optional": T }` (T or null, and the property may be left out) and `{ "union": [T, …] }`. It is
+a promise to the client, **not a filter**: a live call is never refused over it. While the coding
+agent's preview of the app runs, though, every answer is checked, and one that strays is logged
+while the page still gets the answer:
+
+```text
+warning: custom query `openShare` returned a value that does not match its declared `returns`: $.title: expected text, got 7
+```
+
+### Limits per query
+
+`openShare` is **Public**, and a public code query is limited to **60 calls a minute per IP** unless
+it says otherwise; the 61st is a **429** with a `Retry-After` header. `shareBook` costs a signature
+per call, so give it a limit per signed-in reader: **Rate limit** → *Custom*, **Per user**
+`30/hour` — stored as
+
+```json
+{ "per_user": "30/hour" }
+```
+
+Rates are a count and a window: `20/min`, `5/15m`, `1000/day`. *No limit* (`{}`) turns the public
+default off. Behind a reverse proxy, start the server with `--trusted-proxies 10.0.0.0/8` (the
+proxy's addresses) so the address counted is the client's from `X-Forwarded-For`; without it the
+header is ignored, because anybody can write one. Sign-in and password reset are throttled by the
+server itself, per address and per email, and the 429 looks the same whether the account exists or
+not.
+
+### Guesses per link: `ratelimit`
+
+A link with a password needs a limit per **link** — an attacker guessing one link's password
+from a thousand addresses never trips a per-IP limit. **`unlockBook`** — `GET`, sub-path
+`/books/unlock`, minimum role `Public (100)`, parameters `token` (text) and `password` (text):
+
+```js
+ratelimit.check("unlock:" + query.token, { max: 5, window: "15m" });
+const [id] = query.token.split(".");
+// In a real app the share is a row holding crypto.password.hash(password).
+if (query.password !== "open sesame") throw httpError(403, "wrong password");
+const book = await db.books.get(Number(id));
+return { title: book.title };
+```
+
+Five tries in fifteen minutes per link; the sixth is `429 {"error":"too many requests",
+"retry_after":…}` however right its password is, and every other link still opens.
+`ratelimit.hit(key, { max, window })` counts the same way but answers `true`/`false` instead of
+throwing. Keys belong to this application, so another app's `"unlock:1.x"` is another count.
+
 ## What to read next
 
 - [TECHNICAL_DESIGN.md §13.4](./TECHNICAL_DESIGN.md) — the REST provider, the taken and

@@ -2008,7 +2008,8 @@ impl Plan {
                 .kind(kind);
             meta.type_name = rich_name;
             meta.attributes = spec.attributes.clone();
-            meta.default_expression.clone_from(&field.default_expression);
+            meta.default_expression
+                .clone_from(&field.default_expression);
             meta
         });
         Ok(ResolvedField { field, meta })

@@ -278,6 +278,10 @@ pub(crate) async fn invite(
 /// address has an account here. The message itself is sent **after** the
 /// answer is decided, off the request, so how long the answer took says
 /// nothing either; a failure to send is logged for the admin.
+///
+/// The one other answer is a `429` (TODO F4.4): too many requests from this
+/// IP, or for this address, counted before the address is looked up — so it
+/// comes the same for an address with an account and one without.
 pub(crate) async fn forgot_password(
     req: &ApiRequest,
     cat: &Catalog,
@@ -285,6 +289,9 @@ pub(crate) async fn forgot_password(
 ) -> Result<ApiResponse> {
     let obj = require_object(&req.body)?;
     let email = required_text(obj, "email")?;
+    if let Err(limited) = crate::throttle::reset_attempt(req.client_ip, &email) {
+        return Ok(ApiResponse::too_many_requests(limited));
+    }
     let origin = link_origin(req, None)?;
     let ok = || Ok(ApiResponse::ok(json!({ "ok": true })));
     let Some(mailer) = mailer else {

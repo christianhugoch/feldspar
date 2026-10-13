@@ -2,6 +2,68 @@
 
 Changes in reverse chronological order.
 
+## Query contracts and rate limits (TODO F4)
+
+Field report items 3.2 (untyped responses) and 3.4 (no rate limiting). A code query can now say
+what it returns, every custom query can be rate limited, sign-in and password reset are
+throttled, and a code body has its own limiter for keys such as "guesses per share".
+
+- **`returns` (F4.1).** `CustomQuery::returns` holds a small JSON type language as written
+  (`sc_api::rest::returns`): scalar names (`"string"`, `"int"`, `"float"`, `"bool"`, `"json"`,
+  `"uuid"`, `"timestamp"`, …), `{object}`, `{array}`, `{optional}` and `{union}`. It is lowered
+  to a `TypeSchema`, which gained a `Union` variant (TypeScript `A | B`, JSON Schema `anyOf`,
+  and a nullable union adds a `null` alternative). The projected endpoint's output is the
+  lowered schema, so the generator emits a typed `XResponse`. A save refuses `returns` on a SQL
+  query or a `bytes` response, and refuses a declaration that does not parse, saying where it
+  fails. Live calls are not checked. A request to a run's **preview** (`MountedApp::is_preview`,
+  `ApiRequest::preview`) has its JSON answer checked with `check_returns`, and a mismatch is
+  logged as a warning (`$.count: expected int, got "three"`). The response is sent unchanged.
+- **`sc-ratelimit` (F4.2).** A new layer-0 crate with an in-memory token bucket keyed by string
+  (`Limiter`, `Rate::parse("20/min")`, `parse_window("15m")`, `hit`/`peek`/`reset`). The clock is
+  injectable (`ManualClock`). A sweep drops full buckets. `global()` is the process's limiter.
+  `client_ip` takes the socket peer, or the rightmost untrusted `X-Forwarded-For` entry when the
+  peer is in `TrustedProxies`. The server's new **`--trusted-proxies LIST`** flag holds that
+  list, and the router now extracts `ConnectInfo`. The address travels as
+  `ApiRequest::client_ip` and `HandlerCtx::client_ip`.
+- **Per-query limits (F4.3).** `CustomQuery::rate_limit: { per_ip, per_user }`, validated on
+  save. A public code query that states no limit gets `DEFAULT_PUBLIC_RATE` (60/min per IP).
+  `{}` means no limit. The REST provider checks the limit before running any custom query. Over
+  the limit, it answers `ApiResponse::too_many_requests`: `429 {error, retry_after}` plus
+  `Retry-After`. The router also adds `Retry-After` to any handler response with status 429 and
+  a `retry_after` field.
+- **Login and reset throttling (F4.4).** In `sc_api::throttle`. Login allows 20 attempts a
+  minute per IP and 10 failures per 15 minutes per email. Password reset allows 10 an hour per IP
+  and 5 an hour per email. The email is normalised and counted before the lookup, so the answer
+  is the same whether or not the account exists. This covers the app REST `login`,
+  `forgot-password`, and the admin and Analytics `login` handler.
+- **`ratelimit` in code bodies (F4.5).** `ratelimit.hit(key, { max, window })` returns true or
+  false, and `ratelimit.check(…)` throws `httpError(429)` with `{error, retry_after}`.
+  `ratelimit` is a per-run handle passed after `console`, so libraries get it too. The sync op
+  `op_sc_ratelimit` counts under the run's namespace (`CodeCall::ratelimit_scope`): `app:<id>` for
+  a custom query, `instance` for a trigger. The library save check's handle set now includes it.
+- **Editing.** `save_api_query` takes `returns` (an object, a JSON string, or null to clear) and
+  `rate_limit` (null for the default). `describe_applications` reports `returns`, `rate_limit`
+  and `effective_rate_limit`. **A SQL query's described columns are now reported as `columns`
+  instead of `returns`.** The admin API's `describeCustomQuery` accepts both new fields, and the
+  four clients were regenerated. The admin query editor has a **Returns** JSON box with inline
+  JSON validation and a **Rate limit** select (default, custom per IP and per user, or none).
+- **Agent text.** `describe_code_api` gained a "Typed answers and rate limits" section and
+  `ratelimit` in the share pattern. `codeTypes.ts` declares `ratelimit`. The scaffold's
+  `AGENTS.md` covers `returns`, `rate_limit` and `ratelimit.check`. TECHNICAL_DESIGN §10.1 and
+  §13.4 are updated. `docs/tutorial-rest-queries.md` has a new step 12.
+- **Tests.** Unit tests: `sc-ratelimit` (rates, burst and refill on a manual clock, peek, sweep,
+  trusted proxies, the client-IP walk), `rest::returns` (lowering, errors, value checks),
+  `custom.rs` (validation, endpoint typing, default limits, round trip), `throttle.rs`, the MCP
+  `build` round trip, `config.rs` (`--trusted-proxies`), and `sc-expr` `ratelimit_tests` (five
+  guesses lock one key; check is a 429; scopes are separate; bad arguments are named).
+  `typescript_typecheck::generated_returns_client_type_checks` covers object, array and union
+  answers. `sc-server/tests/query_contracts.rs` covers: a preview warning and no warning on the
+  live mount; the 21st call is a 429 with Retry-After; another IP is unaffected; a forged XFF is
+  ignored; a trusted proxy's XFF is honoured; per-email login lockout that looks the same for
+  real and unknown accounts, including the admin login; per-IP login and per-address reset
+  limits; and the share lockout. `tutorial_code_queries.rs` runs step 12 as printed. The UI tests
+  are `customQueries.test.ts` and `codeTypes.test.ts`.
+
 ## Default values for required fields
 
 A `NOT NULL` field can now have a **default value**: a JavaScript expression evaluated when an

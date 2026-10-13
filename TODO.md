@@ -527,26 +527,26 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 
 ## F4 — Query contracts and rate limits
 
-- [ ] **F4.1** (3.2) `returns` on custom queries (§4): the type language, lowering to
+- [x] **F4.1** (3.2) `returns` on custom queries (§4): the type language, lowering to
   `TypeSchema`, the admin editor (a JSON field with validation), `save_api_query`, and generated
   `XResponse` types. Validation runs in preview only. Tests: `typescript_typecheck.rs` with an
   object, array and union return type; a mismatch in preview logs a warning.
-- [ ] **F4.2** (3.4) The token-bucket limiter and the client IP (socket address, or
+- [x] **F4.2** (3.4) The token-bucket limiter and the client IP (socket address, or
   `X-Forwarded-For` behind `--trusted-proxies`). Unit tests with an injected clock.
-- [ ] **F4.3** (3.4) Per-query `rate_limit`, the default for public code queries, and 429 with
+- [x] **F4.3** (3.4) Per-query `rate_limit`, the default for public code queries, and 429 with
   `Retry-After`. The setting is in the admin editor and `save_api_query`. Tests: the 21st call in a
   minute is a 429; another IP is unaffected; a forged `X-Forwarded-For` from an untrusted peer is
   ignored.
-- [ ] **F4.4** (3.4) Login and password-reset throttling, per IP and per email, with the same
+- [x] **F4.4** (3.4) Login and password-reset throttling, per IP and per email, with the same
   limiter. The answer looks the same whether or not the account exists. Tests.
-- [ ] **F4.5** (3.4) `ratelimit.hit` and `ratelimit.check` in code bodies, namespaced per
+- [x] **F4.5** (3.4) `ratelimit.hit` and `ratelimit.check` in code bodies, namespaced per
   application. Test: five wrong passwords for one share key lock that key, and only that key.
 
 ### Try it
 1. A public query `openShare({ token, password })` uses `ratelimit.check("share:" + token,
    { max: 5, window: "15m" })`. The sixth wrong guess is a 429, and another share still opens.
 
-- [ ] **F4.6** `docs/tutorial-rest-queries.md` part (typed responses, rate limits) and its
+- [x] **F4.6** `docs/tutorial-rest-queries.md` part (typed responses, rate limits) and its
   definition-of-done test. TECHNICAL_DESIGN §13.4.
 
 ---

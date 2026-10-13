@@ -49,6 +49,10 @@ pub struct MountedApp {
     /// is born empty on every remount, which is what makes a `SIGHUP` and a
     /// rebuild re-read without either knowing this field exists.
     catalogs: RwLock<HashMap<String, ServedCatalog>>,
+    /// Whether this is a coding run's preview rather than the live mount
+    /// ([`mount_preview`](AppMounts::mount_preview) sets it). A preview
+    /// checks a code query's answer against its declared `returns` (TODO F4.1).
+    preview: bool,
 }
 
 /// One application catalogue, as bytes on the wire.
@@ -117,7 +121,13 @@ impl MountedApp {
             framework,
             providers,
             catalogs: RwLock::new(HashMap::new()),
+            preview: false,
         })
+    }
+
+    /// Whether this mount is a run's preview.
+    pub fn is_preview(&self) -> bool {
+        self.preview
     }
 
     /// The served catalogue for `tag`, if this mount has already read it.
@@ -419,7 +429,8 @@ impl AppMounts {
     /// label is random, and it is one DNS label with the subdomain
     /// (`k3j9x2m4pq--todo`), so the wildcard DNS and certificate that cover the
     /// application cover its previews.
-    pub fn mount_preview(&self, run: RunId, app: MountedApp) -> PreviewInfo {
+    pub fn mount_preview(&self, run: RunId, mut app: MountedApp) -> PreviewInfo {
+        app.preview = true;
         let subdomain = app.app.subdomain.clone();
         let mut previews = self.previews_mut();
         let label = previews
