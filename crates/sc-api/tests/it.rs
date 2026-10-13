@@ -17,6 +17,8 @@ mod admin_client_sync;
 mod calc_after_read;
 #[path = "calc_fields.rs"]
 mod calc_fields;
+#[path = "sync_changes.rs"]
+mod sync_changes;
 #[path = "code_host_as_user.rs"]
 mod code_host_as_user;
 #[path = "code_host_reads.rs"]

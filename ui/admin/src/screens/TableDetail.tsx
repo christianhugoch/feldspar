@@ -1215,6 +1215,7 @@ function Settings({
   const [write, setWrite] = useState(1);
   const [formula, setFormula] = useState("");
   const [rls, setRls] = useState(false);
+  const [sync, setSync] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -1228,6 +1229,7 @@ function Settings({
     setWrite(settings?.min_role_write ?? 1);
     setFormula(settings?.ownership_formula ?? "");
     setRls(settings?.rls_enabled ?? false);
+    setSync(settings?.sync_enabled ?? false);
     setSaved(false);
   }, [settings]);
 
@@ -1243,6 +1245,7 @@ function Settings({
         min_role_write: write,
         ownership_formula: formula.trim(),
         rls_enabled: rls,
+        sync_enabled: sync,
       });
       setSaved(true);
       onChange();
@@ -1346,6 +1349,19 @@ function Settings({
               />
               <Form.Text muted>
                 <T text="The formula becomes Postgres RLS policies enforced by the database itself. Needs a formula the database can evaluate." />
+              </Form.Text>
+            </Form.Group>
+          )}
+          {settings?.sync_available && (
+            <Form.Group className="mb-3" controlId="tableSyncEnabled">
+              <Form.Check
+                type="switch"
+                label={t("Offline sync")}
+                checked={sync}
+                onChange={(e) => setSync(e.target.checked)}
+              />
+              <Form.Text muted>
+                <T text="Records every change to this table, so apps can keep an offline copy and sync it. Rows created offline need a uuid key." />
               </Form.Text>
             </Form.Group>
           )}

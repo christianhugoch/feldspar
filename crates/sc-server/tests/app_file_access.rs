@@ -331,6 +331,7 @@ async fn a_file_fields_bytes_are_served_at_the_stricter_of_table_and_path_rules(
                 "min_role_write": 40,
                 "ownership_formula": "",
                 "rls_enabled": false,
+                "sync_enabled": false,
             })),
         )
         .await;

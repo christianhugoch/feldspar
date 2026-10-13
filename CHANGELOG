@@ -2,6 +2,19 @@
 
 Changes in reverse chronological order.
 
+## Offline sync: tables can record their changes
+
+The first step towards offline-first apps (design §14.11, `TODO-offline-sync.md`). A table's
+settings have an "Offline sync" switch. Switched on, every insert, update and delete on the table
+is recorded in a new change-log, `_fd_changes`, by a database trigger in the same transaction,
+including writes made outside Saltcorn. An update records which columns changed, and changes
+uploaded by a device are marked with the device. User tables gain no columns.
+
+- Needs a primary key of one column, in Saltcorn's own Postgres database. SQLite is not
+  supported yet.
+- Also available to the MCP schema tool as `sync_enabled`.
+- Tests: `crates/sc-api/tests/sync_changes.rs`.
+
 ## Live updates L5: the full suite, run against Postgres
 
 The whole workspace (`scripts/test.sh --workspace`, 4,560 tests), the `python-host` suite and the

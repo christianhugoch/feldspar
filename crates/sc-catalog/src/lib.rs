@@ -42,6 +42,7 @@ mod projection;
 mod provider;
 mod rls;
 mod spatial;
+mod sync;
 mod table;
 mod table_meta;
 mod tx;
@@ -92,6 +93,10 @@ pub use rls::{
     enable_rls_sql, run_in_context, run_in_context_read_only, set_caller_context,
 };
 pub use spatial::bootstrap_spatial;
+pub use sync::{
+    CHANGES_TABLE, bootstrap_sync, disable_sync_sql, enable_sync_sql, set_sync_enabled,
+    sync_enabled, sync_key,
+};
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{
     ATTR_METADATA_TABLE, ATTR_OWNERSHIP_FORMULA, ATTR_PROVIDER_CONFIG, ATTR_PROVIDER_MODULE,
