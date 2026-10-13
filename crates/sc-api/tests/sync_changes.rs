@@ -160,6 +160,46 @@ async fn sync_needs_a_key_of_one_column() -> Result<()> {
 }
 
 #[tokio::test]
+async fn the_change_log_cannot_be_swapped_by_the_search_path() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+    set_sync(&catalog, "todo", true).await?;
+
+    // A decoy change-log in a schema the writer puts first: the entry must still
+    // land in the real one.
+    sql(
+        &db,
+        "CREATE SCHEMA decoy;
+         CREATE TABLE decoy._fd_changes (LIKE public._fd_changes);
+         BEGIN;
+         SET LOCAL search_path = decoy, public;
+         INSERT INTO todo (title) VALUES ('milk');
+         COMMIT;",
+    )
+    .await?;
+    assert_eq!(changes(&db).await?.len(), 1);
+    let client = db.client().await?;
+    let decoy: i64 = client
+        .query_one("SELECT count(*) FROM decoy._fd_changes", &[])
+        .await
+        .map_err(|e| Error::database(e.to_string()))?
+        .get(0);
+    assert_eq!(decoy, 0);
+
+    // It writes with its owner's rights, so a writer needs none on the log.
+    let definer: bool = client
+        .query_one(
+            "SELECT prosecdef FROM pg_proc WHERE proname = '_fd_record_change'",
+            &[],
+        )
+        .await
+        .map_err(|e| Error::database(e.to_string()))?
+        .get(0);
+    assert!(definer);
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_says_it_cannot_record_changes_yet() -> Result<()> {
     let driver: Arc<dyn DatabaseDriver> =
         Arc::new(sc_db_sqlite::SqliteDriver::open_in_memory()?);

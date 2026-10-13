@@ -13,6 +13,8 @@ uploaded by a device are marked with the device. User tables gain no columns.
 - Needs a primary key of one column, in Saltcorn's own Postgres database. SQLite is not
   supported yet.
 - Also available to the MCP schema tool as `sync_enabled`.
+- Only the trigger can write the change-log: a writer needs no rights on it, and a changed
+  `search_path` cannot redirect entries.
 - Tests: `crates/sc-api/tests/sync_changes.rs`.
 
 ## File fields: remove the file with its row, suffix taken names

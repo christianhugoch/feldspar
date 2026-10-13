@@ -100,9 +100,14 @@ pub async fn bootstrap_sync(catalog: &Catalog) -> Result<()> {
 ///   insert of the new one: to a device, they are two different rows.
 /// - The device and its change number come from transaction-local settings,
 ///   which only a device's upload sets.
+/// - It runs with its owner's rights (`SECURITY DEFINER`), so whoever writes a
+///   synced table needs no rights on the change-log, and cannot forge entries
+///   in it. Its `search_path` is pinned to the schema the change-log was created
+///   in, so nobody can slip another `_fd_changes` in front of it.
 fn record_function_sql() -> String {
     format!(
-        r#"CREATE OR REPLACE FUNCTION {RECORD_FUNCTION}() RETURNS trigger LANGUAGE plpgsql AS $fd$
+        r#"CREATE OR REPLACE FUNCTION {RECORD_FUNCTION}() RETURNS trigger LANGUAGE plpgsql
+SECURITY DEFINER AS $fd$
 DECLARE
   pk      text  := TG_ARGV[0];
   new_row jsonb := CASE WHEN TG_OP <> 'DELETE' THEN to_jsonb(NEW) END;
@@ -130,7 +135,11 @@ BEGIN
           changed, txid_current(), cid, mut);
   RETURN NULL;
 END
-$fd$;"#
+$fd$;
+DO $fd$ BEGIN
+  EXECUTE format('ALTER FUNCTION {RECORD_FUNCTION}() SET search_path = %I, pg_temp',
+                 current_schema());
+END $fd$;"#
     )
 }
 

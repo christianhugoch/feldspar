@@ -10680,7 +10680,9 @@ keep working, so sync adds nothing to a user table. What it needs is:
 OR DELETE` row trigger per synced table, all calling one function with the primary-key column as
 its argument. A trigger writes the log entry in the same transaction as the change, and also
 catches writes made outside Feldspar. An update that changes nothing records nothing; a change
-of primary key is recorded as a delete and an insert. A device's upload sets who it is in
+of primary key is recorded as a delete and an insert. The function runs with its owner's rights
+and a fixed `search_path`, so a writer needs no rights on the change-log and cannot forge or
+redirect entries. A device's upload sets who it is in
 transaction-local settings (`sc.sync_client`, `sc.sync_mutation`), the way the caller is
 passed for row-level security, so its own changes come back marked as its own. Switching sync on
 needs a one-column primary key in Saltcorn's own Postgres database; on SQLite it is refused for

@@ -7,10 +7,6 @@ work through them in order.
 
 Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
-Decided (2026-10-12): offline inserts need a `uuid` key, integer keys are left possible for
-later; conflicts are merged field by field with the server winning a field changed on both
-sides; a device gets everything the user may read; changes are recorded by database triggers.
-
 ## S1 — Recording changes
 
 - [x] S1.1 `_fd_changes` and the shared trigger function, created at bootstrap (Postgres).
@@ -30,13 +26,21 @@ sides; a device gets everything the user may read; changes are recorded by datab
 
 ## S3 — Push and conflicts
 
-- [ ] S3.1 The push endpoint: a device's changes applied in order through the row layer in one
-      transaction, with the device's id and change numbers set for the trigger.
+- [ ] S3.1 The push endpoint: a device's inserts, updates and deletes applied in the device's
+      order through the row layer, with the user's rights and the device's id and change numbers
+      set for the trigger. Each change has its own savepoint: a refused one is reported with its
+      reason and the others go on.
 - [ ] S3.2 Retrying is safe: changes already applied are skipped.
-- [ ] S3.3 Field-wise merge, server wins on a field changed on both sides; an update of a
-      deleted row loses. The answer lists accepted and merged changes.
-- [ ] S3.4 Tests: each conflict case; a child inserted offline with its parent; a refused write
-      (access, validation) reported without stopping the others.
+- [ ] S3.3 Field-wise merge, server wins on a field changed on both sides. Delete against change:
+      a device's delete of a row changed on the server since the device saw it is refused (the
+      device gets the row back); a device's change of a row deleted on the server is refused (the
+      device removes it). The answer lists accepted, merged and refused changes.
+- [ ] S3.4 Refused for now, and reported: a change of a row's primary key from a device; a row
+      pointing at a row that no longer exists (deleted meanwhile); a delete the database's foreign
+      keys forbid.
+- [ ] S3.5 Tests: each conflict case; a child inserted offline with its parent; a delete made
+      offline; a refused write (access, validation, foreign key) reported without stopping the
+      others.
 
 ## S4 — The client
 
@@ -44,10 +48,19 @@ sides; a device gets everything the user may read; changes are recorded by datab
       `expo-sqlite` in React Native, IndexedDB in the browser.
 - [ ] S4.2 Background sync: pull and push when online, and a pull when a live `table_changes`
       stream says a synced table changed.
-- [ ] S4.3 A React Native example app that works offline. Tests with the client under Node.
+- [ ] S4.3 A pull is applied in one local transaction, foreign-key checks deferred to its end;
+      every insert or update entry fetches the current row and overwrites the local one, so a
+      local cascade or a key change cannot lose a row.
+- [ ] S4.4 A React Native example app that works offline. Tests with the client under Node.
 
 ## S5 — Cleanup and documentation
 
 - [ ] S5.1 Removing superseded log entries after a retention period; a device older than that
       reloads its tables.
 - [ ] S5.2 A tutorial for an offline-first app; TECHNICAL_DESIGN §14.11 brought up to date.
+
+## Later
+
+- [ ] Resolving instead of refusing a change whose referenced row was deleted meanwhile
+      (restore the parent, clear the reference, or keep it in a conflict list for a person).
+- [ ] Conflict strategies besides "server wins", chosen per table (`attributes.sync`).
