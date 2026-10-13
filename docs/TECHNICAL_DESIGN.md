@@ -1095,7 +1095,10 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   the same query (zero extra round trips) and are stripped before rows reach the wire. Writes
   inject the predicate into the `UPDATE`/`DELETE` `WHERE` and additionally run a reified check
   on the existing row and, for updates/inserts, on the merged proposed row (WITH CHECK
-  semantics — moving a row out of your own ownership is refused). An **untranslatable** formula
+  semantics — moving a row out of your own ownership is refused). An insert's proposed row is
+  the row as stored: default expressions filled first, and every stored field the request
+  leaves out is `null` (so `!owner || …` grants), except a column the database fills itself
+  (identity key, `DEFAULT`), which stays unbound and fails closed if read. An **untranslatable** formula
   falls back to fetch-then-filter through the reified evaluator.
 - **Postgres row-level security** (`DbCapabilities::row_level_security`; opt-in per table via
   `rls_enabled`). `sc-catalog` emits `ENABLE` + **`FORCE ROW LEVEL SECURITY`** and four

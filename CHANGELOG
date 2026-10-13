@@ -2,6 +2,24 @@
 
 Changes in reverse chronological order.
 
+## Ownership formulas see a left-out insert field as null
+
+User report: a formula reading a field the insert did not send (`!owner || owner == user.id`)
+refused the row ("this row is outside your ownership"). The proposed row held only the body's
+keys, so the evaluator failed on the unbound name and the failure denied. With RLS on, the
+`WITH CHECK` policy saw the stored NULL and granted, so the two mechanisms disagreed.
+
+- **`ownership::proposed_insert_row`** builds the insert's proposed row: the body's coerced
+  values, plus `null` for every stored field it leaves out. Used by the REST `Create` and
+  `insert_row_as` (MCP, actions, code host). Calc and `collab_doc` fields are skipped. Columns
+  the database fills (`DataField::generated`: identity/uuid keys, adopted `DEFAULT`s) stay
+  unbound, since `null` is not what gets stored; a formula reading one on insert still fails
+  closed.
+- Documented in TECHNICAL_DESIGN §7.3. Test: `default_values::a_field_the_insert_leaves_out_is_null_to_the_ownership_formula`
+  (with and without RLS; fails with the reported error when the fix is reverted). Note that on
+  an RLS table the formula must be written `owner === null || …`: a bare `!owner` cannot be
+  translated to a policy, and enabling RLS refuses it (unchanged).
+
 ## Streams opened by a code query (TODO F7)
 
 From an external coding agent's feedback (PaddiPad, a collaborative editor): a document or row

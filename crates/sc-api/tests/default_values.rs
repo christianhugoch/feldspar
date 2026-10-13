@@ -250,3 +250,80 @@ async fn a_default_is_refused_on_a_nullable_field_and_when_it_does_not_validate(
     assert_eq!(owner.default_expression, None);
     Ok(())
 }
+
+/// `tasks`, nullable `owner` with no default, and `formula` as its ownership.
+async fn create_tasks(catalog: &Catalog, formula: &str, rls: bool) -> Result<()> {
+    schema_edit::apply(
+        catalog,
+        &[Operation::CreateTable {
+            name: "tasks".into(),
+            database: String::new(),
+            settings: TableSettings {
+                min_role_read: Some(1),
+                min_role_write: Some(1),
+                ownership_formula: Some(formula.into()),
+                rls_enabled: Some(rls),
+                ..TableSettings::default()
+            },
+            fields: vec![
+                FieldSpec {
+                    primary_key: true,
+                    ..field("id", "int")
+                },
+                field("title", "text"),
+                field("owner", "text"),
+            ],
+        }],
+        &ApplyOptions::default(),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_field_the_insert_leaves_out_is_null_to_the_ownership_formula() -> Result<()> {
+    // With and without RLS: the runtime check and the `WITH CHECK` policy see
+    // the same row — the left-out `owner` as null — so they agree. (`!owner`
+    // is not translatable to SQL, so the RLS table spells it as a comparison.)
+    for (rls, formula) in [
+        (false, "!owner || owner === user.email"),
+        (false, "owner === null || owner === user.email"),
+        (true, "owner === null || owner === user.email"),
+    ] {
+        let db = TestDb::new().await?;
+        let catalog = setup(&db).await?;
+        create_tasks(&catalog, formula, rls).await?;
+        let tasks = catalog.require("tasks")?;
+        let ada = writer("ada@example.com");
+        let evaluator = catalog.formula_evaluator();
+        let insert = |body: serde_json::Value| {
+            let (catalog, tasks, ada, evaluator) = (&catalog, &tasks, &ada, &evaluator);
+            async move {
+                sc_api::insert_row_as(
+                    catalog,
+                    tasks,
+                    &body,
+                    40,
+                    Some(ada),
+                    evaluator.as_ref(),
+                    &[],
+                    &Executor::Pooled,
+                )
+                .await
+            }
+        };
+
+        // `owner` left out (and the identity `id`, which the database fills).
+        let row = insert(json!({ "title": "unowned" })).await?;
+        assert_eq!(row["owner"], json!(null), "rls={rls}");
+        assert!(row["id"].is_number(), "rls={rls}");
+        insert(json!({ "title": "mine", "owner": "ada@example.com" })).await?;
+        let err = insert(json!({ "title": "theirs", "owner": "bob@example.com" }))
+            .await
+            .expect_err("not ada's row");
+        // The policy's refusal surfaces as a not-found (`map_policy_violation`).
+        let expected = if rls { "no such row" } else { "outside" };
+        assert!(err.to_string().contains(expected), "rls={rls}: {err}");
+    }
+    Ok(())
+}

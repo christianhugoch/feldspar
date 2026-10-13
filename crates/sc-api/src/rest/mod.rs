@@ -1090,7 +1090,7 @@ impl RestProvider {
                     // An insert is checked against the proposed row, `_insert`
                     // folded true (§7.3) — WITH CHECK semantics at runtime.
                     Ok(Some(f)) => {
-                        let proposed = rows::coerce_row_values(&table, body)?;
+                        let proposed = ownership::proposed_insert_row(&table, body)?;
                         if !ownership::row_allowed(
                             cat,
                             &table,
