@@ -9,9 +9,15 @@
 //!   its generated client is typed for them alone, so this is the step between
 //!   `edit_schema` and writing code.
 //! - **`static_dirs`**: a file store's folder served on a URL path of the app.
+//! - **`uploads`**: upload slots, where a client uploads a large file to,
+//!   resumably (TODO F2, §2.3).
 //! - **`csp`**: single directives of the app's Content-Security-Policy.
 //! - **`locales`**: the languages the app is served in (§16.1). The
 //!   translations themselves are written by `save_translations`.
+//! - **`streams`**: the streams its pages may subscribe to over the live
+//!   socket. The streams themselves are instance-wide and written by
+//!   `edit_streams`; exposing one is an edit, like connecting a table, since
+//!   the stream's own `min_role` and row checks still decide who receives it.
 //!
 //! ## A grant per section, checked before anything changes
 //!
@@ -45,8 +51,11 @@ use sc_catalog::{AdminCall, Catalog, FileStoreId, TableId};
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
 
-use super::{TOOL_DESCRIBE_APPS, load_app, required_str};
-use crate::{Application, CspPolicy, StaticDir, app_default_locale, app_locales, set_app_locales};
+use super::{TOOL_DESCRIBE_APPS, TOOL_EDIT_STREAMS, load_app, required_str};
+use crate::{
+    Application, CspPolicy, StaticDir, StreamRef, UploadSlot, app_default_locale, app_locales,
+    set_app_locales,
+};
 
 /// Changes an application's connected tables, static directories, CSP or locales.
 pub const TOOL_UPDATE_APP: &str = "update_application";
@@ -59,6 +68,7 @@ pub fn update_tools() -> Vec<Arc<dyn AdminTool>> {
 const ARG_APPLICATION: &str = "application";
 const ARG_TABLES: &str = "tables";
 const ARG_STATIC_DIRS: &str = "static_dirs";
+const ARG_UPLOADS: &str = "uploads";
 const ARG_CSP: &str = "csp";
 const ARG_ADD: &str = "add";
 const ARG_REMOVE: &str = "remove";
@@ -68,6 +78,7 @@ const ARG_STORE: &str = "file_store";
 const ARG_PATH: &str = "path";
 const ARG_LOCALES: &str = "locales";
 const ARG_DEFAULT_LOCALE: &str = "default_locale";
+const ARG_STREAMS: &str = "streams";
 
 struct UpdateApp;
 
@@ -98,8 +109,8 @@ fn update_description(grants: &Grants) -> String {
     let edit = match grants.edit {
         true => "",
         false => {
-            " You may **not** change `tables`, `static_dirs` or `locales`: they need \
-             `allow_edit`."
+            " You may **not** change `tables`, `static_dirs`, `uploads`, `locales` or \
+             `streams`: they need `allow_edit`."
         }
     };
     let csp = match grants.access_changes {
@@ -114,7 +125,8 @@ fn update_description(grants: &Grants) -> String {
     };
     format!(
         "Change an application: the tables it serves, the store folders it serves \
-         as files, its Content-Security-Policy, or the languages it is served in. \
+         as files, its Content-Security-Policy, the languages it is served in, or \
+         the live streams it exposes. \
          Give only the sections you are \
          changing; one call may change several, and is saved as one, so a refused \
          section changes nothing.\n\n\
@@ -131,6 +143,20 @@ fn update_description(grants: &Grants) -> String {
          connected to is connected); `{ARG_REMOVE}` lists mounts. A mount must not \
          be at or under one of the app's API mounts. Each file is still served \
          only to someone its store's and its own access rules let read it.\n\
+         - `{ARG_UPLOADS}` — **upload slots**, where the app's client uploads a \
+         large file in resumable chunks: a tus 1.0 endpoint at \
+         `<api mount>/_upload/<name>`, with no request-size cap but the slot's. \
+         Prefer one over a code query that takes base64. `{ARG_ADD}` lists `{{ name, store, folder, min_role, max_bytes, \
+         mime_allow, hook }}` (a name in use is replaced; a store the app was not \
+         connected to is connected); `{ARG_REMOVE}` lists names. `min_role` is who \
+         may upload (1 admin … 100 public; default 1), `max_bytes` 0 is the \
+         server's limit, `mime_allow` is matched on the file name's type, and \
+         `hook` names one of the app's JavaScript or Python queries, called with \
+         `body = {{ filename, size, mime, slot }}` before an upload is accepted: \
+         it may `throw httpError(403, …)` to refuse, or return `{{ path, meta }}` \
+         to choose the file's path within the folder and extra attributes. A \
+         finished file is owned by its uploader, so a folder with min_role 1 \
+         keeps each user's files to themselves.\n\
          - `{ARG_CSP}` — maps a directive to its whole new source list, or to \
          `null` to remove it; directives not named are kept. The usual reasons: \
          `frame-ancestors` naming another app's origin (`'self' \
@@ -145,7 +171,12 @@ fn update_description(grants: &Grants) -> String {
          Enable a locale before `save_translations` writes into it. English is \
          the source language and needs no translations, but list `en` if \
          visitors should be able to pick it. Removing a locale keeps its \
-         translations.\n\n\
+         translations.\n\
+         - `{ARG_STREAMS}` — the **streams** its pages may subscribe to over the \
+         app's live socket (`live.<stream>` in the generated client). `{ARG_ADD}`, \
+         `{ARG_REMOVE}` and `{ARG_SET}` as for tables; create or change the streams \
+         themselves with `{TOOL_EDIT_STREAMS}`. A `table_changes` or `document` \
+         stream needs its table connected too.\n\n\
          `{TOOL_DESCRIBE_APPS}` shows what each application has now. The running \
          app serves the change at once; a bundle written against tables it did \
          not have still needs a rebuild.{edit}{csp}"
@@ -201,6 +232,53 @@ fn update_parameters() -> Json {
                 },
                 "additionalProperties": false,
             },
+            ARG_UPLOADS: {
+                "type": "object",
+                "description": "Change the upload slots.",
+                "properties": {
+                    ARG_ADD: {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "An identifier: the URL segment and `api.uploads.<name>`.",
+                                },
+                                "store": {
+                                    "type": "string",
+                                    "description": "The file store the files land in.",
+                                },
+                                "folder": {
+                                    "type": "string",
+                                    "description": "The folder in the store; empty for its root.",
+                                },
+                                "min_role": {
+                                    "type": "integer",
+                                    "description": "Who may upload: 1 (admin, the default) to 100 (public).",
+                                },
+                                "max_bytes": {
+                                    "type": "integer",
+                                    "description": "The largest file; 0 is the server's limit.",
+                                },
+                                "mime_allow": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Accepted MIME types; empty accepts any.",
+                                },
+                                "hook": {
+                                    "type": ["string", "null"],
+                                    "description": "A JavaScript or Python query of the app, called before accepting.",
+                                },
+                            },
+                            "required": ["name", "store"],
+                            "additionalProperties": false,
+                        },
+                    },
+                    ARG_REMOVE: names.clone(),
+                },
+                "additionalProperties": false,
+            },
             ARG_CSP: {
                 "type": "object",
                 "description":
@@ -210,6 +288,16 @@ fn update_parameters() -> Json {
                     "type": ["array", "null"],
                     "items": { "type": "string" },
                 },
+            },
+            ARG_STREAMS: {
+                "type": "object",
+                "description": "Change the streams it exposes.",
+                "properties": {
+                    ARG_ADD: names.clone(),
+                    ARG_REMOVE: names.clone(),
+                    ARG_SET: names.clone(),
+                },
+                "additionalProperties": false,
             },
             ARG_LOCALES: {
                 "type": "object",
@@ -237,10 +325,14 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
             ARG_APPLICATION,
             ARG_TABLES,
             ARG_STATIC_DIRS,
+            ARG_UPLOADS,
             ARG_CSP,
             ARG_LOCALES,
+            ARG_STREAMS,
         ],
     )?;
+    let streams = section(&args, ARG_STREAMS, &[ARG_ADD, ARG_REMOVE, ARG_SET])?;
+    let uploads = section(&args, ARG_UPLOADS, &[ARG_ADD, ARG_REMOVE])?;
     let tables = section(&args, ARG_TABLES, &[ARG_ADD, ARG_REMOVE, ARG_SET])?;
     let static_dirs = section(&args, ARG_STATIC_DIRS, &[ARG_ADD, ARG_REMOVE])?;
     let locales = section(
@@ -252,10 +344,16 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         None | Some(Json::Null) => None,
         Some(directives) => Some(directives),
     };
-    if tables.is_none() && static_dirs.is_none() && csp.is_none() && locales.is_none() {
+    if tables.is_none()
+        && static_dirs.is_none()
+        && uploads.is_none()
+        && csp.is_none()
+        && locales.is_none()
+        && streams.is_none()
+    {
         return Err(Error::invalid(format!(
-            "name at least one of `{ARG_TABLES}`, `{ARG_STATIC_DIRS}`, `{ARG_CSP}` and \
-             `{ARG_LOCALES}`; nothing was changed"
+            "name at least one of `{ARG_TABLES}`, `{ARG_STATIC_DIRS}`, `{ARG_UPLOADS}`, \
+             `{ARG_CSP}`, `{ARG_LOCALES}` and `{ARG_STREAMS}`; nothing was changed"
         )));
     }
     // Every grant before any change: a refused section refuses the call.
@@ -273,10 +371,24 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
             GRANT_EDIT,
         )?;
     }
+    if uploads.is_some() {
+        require_grant(
+            grants.edit,
+            "change an application's upload slots",
+            GRANT_EDIT,
+        )?;
+    }
     if locales.is_some() {
         require_grant(
             grants.edit,
             "change which languages an application is served in",
+            GRANT_EDIT,
+        )?;
+    }
+    if streams.is_some() {
+        require_grant(
+            grants.edit,
+            "change which streams an application exposes",
             GRANT_EDIT,
         )?;
     }
@@ -305,6 +417,22 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
             out["connected_file_stores"] = json!(connected);
         }
     }
+    if let Some(slots) = &uploads {
+        was.insert(
+            ARG_UPLOADS.to_owned(),
+            crate::upload_slots_json(&app.uploads),
+        );
+        let connected = change_uploads(ctx.catalog, &mut app, slots)?;
+        if !connected.is_empty() {
+            let mut all: Vec<Json> = out
+                .get("connected_file_stores")
+                .and_then(Json::as_array)
+                .cloned()
+                .unwrap_or_default();
+            all.extend(connected.into_iter().map(Json::String));
+            out["connected_file_stores"] = Json::Array(all);
+        }
+    }
     if let Some(directives) = csp {
         was.insert(ARG_CSP.to_owned(), csp_json(&app.csp));
         app.csp = changed_csp(&app.csp, directives)?;
@@ -314,6 +442,11 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         change_locales(&mut app, locales)?;
     }
 
+    if let Some(streams) = &streams {
+        was.insert(ARG_STREAMS.to_owned(), streams_json(&app));
+        change_streams(ctx.catalog, &mut app, streams).await?;
+    }
+
     let saved = save(ctx, &app, &mut out).await?;
     if tables.is_some() {
         out[ARG_TABLES] = tables_json(&saved);
@@ -321,12 +454,19 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
     if static_dirs.is_some() {
         out[ARG_STATIC_DIRS] = static_dirs_json(&saved.static_dirs);
     }
+    if uploads.is_some() {
+        out[ARG_UPLOADS] = crate::upload_slots_json(&saved.uploads);
+    }
     if csp.is_some() {
         out[ARG_CSP] = csp_json(&saved.csp);
         out["csp_header"] = json!(saved.csp.header_value());
     }
     if locales.is_some() {
         out[ARG_LOCALES] = locales_json(&saved)?;
+    }
+    if streams.is_some() {
+        out[ARG_STREAMS] = streams_json(&saved);
+        out["live_socket"] = json!(crate::live_socket_path(&saved));
     }
     out["was"] = Json::Object(was);
     Ok(out)
@@ -440,6 +580,48 @@ fn tables_json(app: &Application) -> Json {
     json!(app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>())
 }
 
+// --- streams ------------------------------------------------------------------
+
+async fn change_streams(
+    catalog: &Catalog,
+    app: &mut Application,
+    section: &Map<String, Json>,
+) -> Result<()> {
+    let mut streams: Vec<String> = match section.contains_key(ARG_SET) {
+        true => names(section, ARG_SET)?,
+        false => app.streams.iter().map(|s| s.0.clone()).collect(),
+    };
+    for add in names(section, ARG_ADD)? {
+        if !streams.contains(&add) {
+            streams.push(add);
+        }
+    }
+    let remove = names(section, ARG_REMOVE)?;
+    streams.retain(|s| !remove.contains(s));
+    let has_table = catalog.get(sc_stream::STREAMS_TABLE)?.is_some();
+    for stream in &streams {
+        if app.streams.iter().any(|s| &s.0 == stream) {
+            continue;
+        }
+        let exists = has_table
+            && sc_stream::load_stream_by_name(catalog, stream)
+                .await?
+                .is_some();
+        if !exists {
+            return Err(Error::invalid(format!(
+                "there is no stream `{stream}`; create it with `{TOOL_EDIT_STREAMS}` first. \
+                 Nothing was changed."
+            )));
+        }
+    }
+    app.streams = streams.into_iter().map(StreamRef).collect();
+    Ok(())
+}
+
+fn streams_json(app: &Application) -> Json {
+    json!(app.streams.iter().map(|s| s.0.clone()).collect::<Vec<_>>())
+}
+
 // --- static_dirs --------------------------------------------------------------
 
 /// Apply the section, returning the stores it connected.
@@ -530,6 +712,70 @@ fn mount_list(dirs: &[StaticDir]) -> String {
         true => "none".to_owned(),
         false => quoted(&dirs.iter().map(|d| d.mount.clone()).collect::<Vec<_>>()),
     }
+}
+
+// --- uploads ------------------------------------------------------------------
+
+/// Apply the section, returning the stores it connected.
+fn change_uploads(
+    catalog: &Catalog,
+    app: &mut Application,
+    section: &Map<String, Json>,
+) -> Result<Vec<String>> {
+    let remove = names(section, ARG_REMOVE)?;
+    for name in &remove {
+        if !app.uploads.iter().any(|s| &s.name == name) {
+            return Err(Error::invalid(format!(
+                "application `{}` has no upload slot `{name}`; it has {}. Nothing was changed.",
+                app.subdomain,
+                match app.uploads.is_empty() {
+                    true => "none".to_owned(),
+                    false => quoted(
+                        &app.uploads
+                            .iter()
+                            .map(|s| s.name.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                }
+            )));
+        }
+    }
+    app.uploads.retain(|s| !remove.contains(&s.name));
+
+    let added = match section.get(ARG_ADD) {
+        None | Some(Json::Null) => Vec::new(),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|item| {
+                UploadSlot::from_json(item)
+                    .map_err(|e| Error::invalid(format!("`{ARG_UPLOADS}.{ARG_ADD}`: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`{ARG_UPLOADS}.{ARG_ADD}` should be a list of upload slots, got {other}"
+            )));
+        }
+    };
+    let mut connected = Vec::new();
+    for slot in added {
+        if catalog.file_store(&slot.store)?.is_none() {
+            return Err(Error::invalid(format!(
+                "there is no file store `{}`; the file stores are {}. Nothing was changed.",
+                slot.store,
+                quoted(&catalog.file_store_names()?)
+            )));
+        }
+        let store = FileStoreId(slot.store.clone());
+        if !app.file_stores.contains(&store) {
+            app.file_stores.push(store);
+            connected.push(slot.store.clone());
+        }
+        app.uploads.retain(|s| s.name != slot.name);
+        app.uploads.push(slot);
+    }
+    crate::validate_upload_slots(app)?;
+    Ok(connected)
 }
 
 // --- csp ----------------------------------------------------------------------
@@ -651,7 +897,9 @@ async fn save(ctx: &ToolContext<'_>, app: &Application, out: &mut Json) -> Resul
             .map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path }))
             .collect::<Vec<_>>()
     );
+    body["uploads"] = crate::upload_slots_json(&app.uploads);
     body["csp"] = csp_json(&app.csp);
+    body["streams"] = streams_json(app);
     // Where the locales live (§9's column-vs-attributes rule).
     body["attributes"] = Json::Object(app.attributes.clone());
     let updated = host
@@ -776,7 +1024,8 @@ mod tests {
         let none = update_description(&Grants::none());
         assert!(
             none.contains(
-                "**not** change `tables`, `static_dirs` or `locales`: they need `allow_edit`"
+                "**not** change `tables`, `static_dirs`, `uploads`, `locales` or \
+                 `streams`: they need `allow_edit`"
             ),
             "{none}"
         );

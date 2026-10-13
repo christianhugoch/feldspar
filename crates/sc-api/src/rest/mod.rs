@@ -61,7 +61,9 @@ use sc_auth::{User, authenticate};
 use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, load_file_store_by_name};
 use sc_error::{Error, Repr, Result};
 use sc_expr::{JsEvaluator, Operation};
-use sc_files::{ROLE_PUBLIC, check_access, mime_for_path, validate_file_path};
+use sc_files::{
+    FileCaller, ROLE_PUBLIC, ServeFile, check_access, check_write, record_owner, validate_file_path,
+};
 use sc_query::Value;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
@@ -326,6 +328,12 @@ pub struct RestProvider {
     evaluator: Option<Arc<dyn JsEvaluator>>,
     /// The ceiling a list read is bounded by ([`DEFAULT_ROW_CAP`]).
     row_cap: u64,
+    /// Where the application serves store files — what a code query's
+    /// `file.url()` answers from (TODO F2.8).
+    file_urls: Option<Arc<dyn sc_action::FileUrls>>,
+    /// The application this provider serves — whose code libraries a code
+    /// query imports (TODO F3.2).
+    application: Option<uuid::Uuid>,
 }
 
 impl RestProvider {
@@ -602,7 +610,23 @@ impl RestProvider {
             dispatcher: None,
             evaluator: None,
             row_cap: DEFAULT_ROW_CAP,
+            file_urls: None,
+            application: None,
         }
+    }
+
+    /// Say which application this provider serves, so a code query's `lib()`
+    /// imports that application's code libraries (TODO F3.2).
+    pub fn with_application(mut self, application: uuid::Uuid) -> RestProvider {
+        self.application = Some(application);
+        self
+    }
+
+    /// Say where the application serves store files, so a code query's
+    /// `file.url()` can answer (TODO F2.8).
+    pub fn with_file_urls(mut self, urls: Arc<dyn sc_action::FileUrls>) -> RestProvider {
+        self.file_urls = Some(urls);
+        self
     }
 
     /// Offer sign-up: project `POST {mount}/signup`, which makes an account with
@@ -774,9 +798,18 @@ impl RestProvider {
         let scope = custom::code_scope(query, req)?;
         let caller = ownership::caller_context(user);
         let result = dispatcher
-            .run_code(cat, action, &query.name, &query.code, scope, Some(&caller))
-            .await?;
-        Ok(ApiResponse::ok(result))
+            .run_code(
+                cat,
+                action,
+                &query.name,
+                &query.code,
+                scope,
+                Some(&caller),
+                self.application,
+                self.file_urls.clone(),
+            )
+            .await;
+        code_answer(result, cat, user).await
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -824,8 +857,8 @@ impl RestProvider {
         let caller = ownership::caller_context(user);
         let result = dispatcher
             .run_trigger(cat, trigger, req.body.clone(), Some(&caller))
-            .await?;
-        Ok(ApiResponse::ok(result))
+            .await;
+        code_answer(result, cat, user).await
     }
 
     /// Add a developer-authored custom route as a bare endpoint (§13.4).
@@ -950,9 +983,10 @@ impl RestProvider {
         if table.rls_enabled {
             return self.run_rls(route, &table, params, req, cat, user).await;
         }
-        // The caller's role for the path-cumulative file rule. Anonymous is
-        // public; the table-level gate (floor or formula) runs separately.
-        let role = user.map_or(ROLE_PUBLIC, |u| u.role);
+        // The caller for the path-cumulative file rule and the owner rule
+        // (§2.1). Anonymous is public; the table-level gate (floor or formula)
+        // runs separately.
+        let role = file_caller(user);
         let meets_read = ownership::meets(user, table.access.min_role_read);
         let meets_write = ownership::meets(user, table.access.min_role_write);
         // The formula, for callers below the floor. Its absence there means
@@ -1091,7 +1125,7 @@ impl RestProvider {
                             .await?;
                     }
                 }
-                download(cat, &table, field, id()?, role).await?
+                download(cat, &table, field, id()?, &role).await?
             }
             RestOp::Upload { field } => {
                 let filename = params
@@ -1139,7 +1173,7 @@ impl RestProvider {
                     id()?,
                     filename,
                     req.raw.clone(),
-                    role,
+                    &role,
                     &caller,
                 )
                 .await?
@@ -1230,7 +1264,7 @@ impl RestProvider {
     ) -> Result<ApiResponse> {
         let ctx = ownership::caller_context(user);
         let body = &req.body;
-        let role = user.map_or(ROLE_PUBLIC, |u| u.role);
+        let role = file_caller(user);
         let id = || -> Result<&str> {
             params
                 .get("id")
@@ -1254,7 +1288,7 @@ impl RestProvider {
                 deleted()
             }
             RestOp::Download { field } => {
-                download_ctx(cat, table, field, id()?, role, &ctx).await?
+                download_ctx(cat, table, field, id()?, &role, &ctx).await?
             }
             RestOp::Upload { field } => {
                 let filename = params
@@ -1268,7 +1302,7 @@ impl RestProvider {
                     id()?,
                     filename,
                     req.raw.clone(),
-                    role,
+                    &role,
                     &ctx,
                 )
                 .await?
@@ -1303,6 +1337,174 @@ fn list_query_params() -> Vec<QueryParam> {
 /// acknowledges, and a caller who wanted the row could have read it. The
 /// GraphQL projection makes the other choice, which is why the shape is decided
 /// here rather than in the row layer.
+/// What a code body's run answers an HTTP caller with (TODO F1.4; design
+/// §10.1 "Status codes and error bodies") — a custom query's and an exposed
+/// trigger's alike:
+///
+/// - a `response({ status, headers, body })` is served as it says;
+/// - a `throw httpError(status, message, body?)` is that status with `body`, or
+///   `{ "error": message }`. A status outside 400–599 is a 500, with the reason
+///   in the log;
+/// - any other failure of the body is a **500** `{ "error": "internal error",
+///   "id" }` — or a **503** `{ "error": "timeout" }` when a clock or the heap
+///   stopped it — to a caller who is not an admin, with the full text (the
+///   query's name, the stack) in the log under that id. An admin gets the full
+///   text, under the same status;
+/// - a refusal before the body ran (a missing trigger, a role that may not run
+///   it) is left as the error it is.
+async fn code_answer(
+    result: Result<Json>,
+    cat: &Catalog,
+    user: Option<&User>,
+) -> Result<ApiResponse> {
+    let err = match result {
+        Ok(value) => {
+            return Ok(match sc_expr::take_code_response(value) {
+                Ok(reply) => code_response(reply, cat, user).await,
+                Err(value) => ApiResponse::ok(value),
+            });
+        }
+        Err(err) => err,
+    };
+    if let Some(reply) = err.http_reply() {
+        if !(400..=599).contains(&reply.status) {
+            let id = log_id();
+            eprintln!(
+                "feldspar: code failure {id}: httpError was given status {}, which is not \
+                 400–599 (message: {})",
+                reply.status, reply.message
+            );
+            return Ok(ApiResponse::with_status(
+                500,
+                json!({ "error": "internal error", "id": id }),
+            ));
+        }
+        let body = reply
+            .body
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or_else(|| json!({ "error": reply.message }));
+        return Ok(ApiResponse::with_status(reply.status, body));
+    }
+    let Some(failure) = sc_expr::code_failure(&err) else {
+        return Err(err);
+    };
+    let id = log_id();
+    let full = without_doubled_prefix(&err.causes());
+    eprintln!("feldspar: code failure {id}: {}", err.chain());
+    let (status, public) = match failure {
+        sc_expr::CodeFailure::Timeout => (503, json!({ "error": "timeout" })),
+        sc_expr::CodeFailure::Threw => (500, json!({ "error": "internal error", "id": id })),
+    };
+    let admin = user.is_some_and(|u| u.role == sc_auth::ROLE_ADMIN);
+    let body = match admin {
+        true => json!({ "error": full, "id": id }),
+        false => public,
+    };
+    Ok(ApiResponse::with_status(status, body))
+}
+
+/// A body's `response(...)`, as the transport serves it: JSON with a status
+/// and headers (TODO F1.4), raw bytes under their content type (TODO F2.9), or
+/// a store file through the shared file response builder (TODO F2.10).
+///
+/// A file handle opened `asUser` is checked against the caller here, by the
+/// owner rule (§2.1), and one they may not read is the `404` a missing file
+/// is. One opened with the default admin authority is not: the query's own
+/// code was the access check.
+async fn code_response(
+    reply: sc_expr::CodeResponse,
+    cat: &Catalog,
+    user: Option<&User>,
+) -> ApiResponse {
+    let sc_expr::CodeResponse {
+        status,
+        mut headers,
+        body,
+        raw,
+        file,
+    } = reply;
+    if let Some(file) = file {
+        let not_found = || ApiResponse::error(404, "not found");
+        if file.path.split('/').any(|s| s == ".." || s.is_empty()) {
+            return not_found();
+        }
+        let Ok(store) = cat.require_file_store(&file.store) else {
+            return not_found();
+        };
+        if file.authority != "admin" {
+            let floor = match load_file_store_by_name(cat, &file.store).await {
+                Ok(def) => def.and_then(|d| d.min_role),
+                Err(_) => return not_found(),
+            };
+            if check_access(store.as_ref(), floor, &file.path, &file_caller(user))
+                .await
+                .is_err()
+            {
+                return not_found();
+            }
+        }
+        // `cache-control` is the builder's to set, so the body's choice is
+        // handed to it rather than added beside its default.
+        let cache_control = headers
+            .iter()
+            .position(|(name, _)| name == "cache-control")
+            .map(|at| headers.remove(at).1);
+        let serve = ServeFile {
+            store,
+            path: file.path,
+            filename: file.filename,
+            download: file.download,
+            content_type: file.content_type,
+            cache_control,
+        };
+        return ApiResponse {
+            file: Some(Box::new(serve)),
+            headers,
+            ..ApiResponse::ok(Json::Null)
+        };
+    }
+    if let Some(raw) = raw {
+        use base64::Engine;
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&raw.base64) else {
+            return ApiResponse::with_status(500, json!({ "error": "internal error" }));
+        };
+        return ApiResponse {
+            status,
+            headers,
+            ..ApiResponse::file(bytes, raw.content_type)
+        };
+    }
+    ApiResponse {
+        headers,
+        ..ApiResponse::with_status(status, body)
+    }
+}
+
+/// The caller as a file rule sees them: the role (public when anonymous) and the
+/// user id the owner rule (§2.1) compares with.
+fn file_caller(user: Option<&User>) -> FileCaller {
+    FileCaller::new(
+        user.map_or(ROLE_PUBLIC, |u| u.role),
+        user.map(|u| u.id.to_string()),
+    )
+}
+
+/// A short id a failure is logged under and its caller is given, so the two
+/// can be matched without the caller seeing the log line.
+fn log_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_owned()
+}
+
+/// `invalid: custom query `q`: `code`: invalid: JavaScript code failed: …` as
+/// `custom query `q`: `code`: JavaScript code failed: …` — the category the
+/// error's `Display` puts on each layer says nothing to the admin reading it.
+fn without_doubled_prefix(text: &str) -> String {
+    text.strip_prefix("invalid: ")
+        .unwrap_or(text)
+        .replacen(": invalid: ", ": ", 1)
+}
+
 fn deleted() -> ApiResponse {
     ApiResponse::ok(json!({ "deleted": true }))
 }
@@ -1342,9 +1544,9 @@ async fn download(
     table: &Table,
     field: &str,
     id: &str,
-    role: u8,
+    caller: &FileCaller,
 ) -> Result<ApiResponse> {
-    download_inner(cat, table, field, id, role, None).await
+    download_inner(cat, table, field, id, caller, None).await
 }
 
 /// [`download`] resolving the row's file path through an RLS caller context
@@ -1354,10 +1556,10 @@ async fn download_ctx(
     table: &Table,
     field: &str,
     id: &str,
-    role: u8,
+    caller: &FileCaller,
     context: &CallerContext,
 ) -> Result<ApiResponse> {
-    download_inner(cat, table, field, id, role, Some(context)).await
+    download_inner(cat, table, field, id, caller, Some(context)).await
 }
 
 async fn download_inner(
@@ -1365,7 +1567,7 @@ async fn download_inner(
     table: &Table,
     field: &str,
     id: &str,
-    role: u8,
+    caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
     let (store_name, _, _) = file_field(table, field)?;
@@ -1381,13 +1583,21 @@ async fn download_inner(
     };
     let store = cat.require_file_store(store_name)?;
     let floor = store_floor(cat, store_name).await?;
-    check_access(store.as_ref(), floor, &path, role).await?;
-    let bytes = store.read(&path).await?;
-    // Content type by extension, exactly as the field's MIME allow-list is
-    // enforced — the two must agree on what a path is.
-    let content_type =
-        mime_for_path(&path).unwrap_or_else(|| "application/octet-stream".to_owned());
-    Ok(ApiResponse::file(bytes, content_type))
+    // A file the caller may not read is not found, exactly as a missing one is
+    // (§13.2): "forbidden" would confirm it exists.
+    if check_access(store.as_ref(), floor, &path, caller)
+        .await
+        .is_err()
+    {
+        return Err(Error::not_found(format!(
+            "row {id} has no file in `{field}`"
+        )));
+    }
+    // Served by the transport's file builder (TODO F2, §2.2): streamed, with
+    // Range, and named for the original upload. The content type is the one
+    // the path guesses, exactly as the field's MIME allow-list is enforced —
+    // the two must agree on what a path is.
+    Ok(ApiResponse::serve_file(ServeFile::new(store, path)))
 }
 
 /// Store an upload's bytes behind a row's `File` field (§4).
@@ -1412,10 +1622,10 @@ async fn upload_ctx(
     id: &str,
     filename: &str,
     data: Option<bytes::Bytes>,
-    role: u8,
+    caller: &FileCaller,
     context: &CallerContext,
 ) -> Result<ApiResponse> {
-    upload_inner(cat, table, field, id, filename, data, role, Some(context)).await
+    upload_inner(cat, table, field, id, filename, data, caller, Some(context)).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1426,7 +1636,7 @@ async fn upload_inner(
     id: &str,
     filename: &str,
     data: Option<bytes::Bytes>,
-    role: u8,
+    caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
     let (store_name, folder, mime_allow) = file_field(table, field)?;
@@ -1442,13 +1652,24 @@ async fn upload_inner(
 
     let store = cat.require_file_store(store_name)?;
     let floor = store_floor(cat, store_name).await?;
-    // Writing into a restricted place is as governed as reading from one.
-    check_access(store.as_ref(), floor, &path, role).await?;
+    // The field's folder is where the admin said uploads land, and the table's
+    // write rule already let this caller upload, so a **new** file needs nothing
+    // more — that is what makes a min_role 1 folder a private drop box (§2.1).
+    // Replacing a file that is there is a write to it: somebody else's upload,
+    // or a file the caller could not otherwise change, is refused.
+    if store.stat(&path).await?.is_some() {
+        check_write(store.as_ref(), floor, &path, caller).await?;
+    }
 
     // The row must exist (and be writable by the caller) before the bytes land:
     // failing afterwards would leave an orphaned file no row references.
     rows::read_field_ctx(cat, table, field, id, context).await?;
     store.write(&path, data).await?;
+    // The uploader owns it (§2.1), so they can read it back however private
+    // the folder is.
+    if let Some(owner) = &caller.user_id {
+        record_owner(store.as_ref(), &path, owner).await;
+    }
     let updated =
         rows::update_row_guarded(cat, table, id, &json!({ field: path }), None, context).await?;
     Ok(ApiResponse::with_status(201, updated))
@@ -1519,6 +1740,27 @@ impl ApiProvider for RestProvider {
             }
             other => other,
         }
+    }
+
+    async fn run_hook(
+        &self,
+        name: &str,
+        body: Json,
+        cat: &Arc<Catalog>,
+        user: Option<&User>,
+    ) -> Option<Result<ApiResponse>> {
+        let query = self.custom_routes.get(name)?;
+        let action = query.language.action()?;
+        let req = ApiRequest {
+            method: Method::Post,
+            path: format!("{}{}", self.mount.trim_end_matches('/'), query.path),
+            query: Vec::new(),
+            body,
+            raw: None,
+            headers: Vec::new(),
+            links: None,
+        };
+        Some(self.run_custom_code(query, action, &req, cat, user).await)
     }
 }
 

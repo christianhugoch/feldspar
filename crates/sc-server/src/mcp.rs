@@ -371,7 +371,9 @@ filesystem as usual; use these tools for everything that is configuration. There
 deliberately no tools for reading or writing row data, for browsing or writing files, or for \
 user management. Code you store here — a `run_js_code` trigger or workflow step, a \
 `javascript` API query — runs against this server's own JavaScript API, which is not one you \
-know from elsewhere: call `describe_code_api` before writing any.
+know from elsewhere: call `describe_code_api` before writing any. Code that two queries or \
+triggers share goes in a code library (`describe_code_libraries`, `save_code_library`), \
+imported with `lib(\"name\")`, rather than being copied into each.
 
 Building a new application. When the user asks you to build an application, a site or a tool \
 (\"build me a to-do list\"), build the whole first working draft without asking them anything \
@@ -398,6 +400,12 @@ subdomain; fix whatever the diagnostics report and build again until it succeeds
 
 To change an existing application, `describe_applications` gives its `project_dir`: work \
 there, connect any new table with `update_application`, and rebuild.
+
+Live updates (pages that update when rows change, collaborative editing, presence, toasts). \
+`edit_streams` creates the stream: `table_changes` for row changes, `document` on a \
+`collab_doc` field for a shared document (presence is built in), `internal` for messages that \
+code publishes. Then `update_application` with `streams: { add: [...] }` exposes it, and the \
+generated client gets a typed `live.<stream>` accessor.
 
 Translating an application (\"translate this app to German\", \"the German for 'Save' should \
 be …\"). You are the translator; the tools hold the strings and check your work. \

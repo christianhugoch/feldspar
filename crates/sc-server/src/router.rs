@@ -174,6 +174,11 @@ pub(crate) struct AppState {
     /// per request rather than at boot precisely so that turning it on is a save
     /// rather than a restart.
     pub(crate) mcp_endpoint_tools: Arc<Vec<Arc<dyn sc_api::mcp::AdminTool>>>,
+    /// The largest body read into memory (`--max-request-body`, TODO F2.5).
+    pub(crate) max_request_body: usize,
+    /// The largest upload (`--max-upload-bytes`): the admin file manager's and
+    /// the backup upload's ceiling, and the cap on every upload slot's own.
+    pub(crate) max_upload_bytes: u64,
 }
 
 /// Build the axum router for an endpoint set, serving no applications.
@@ -281,7 +286,12 @@ pub fn build_router_with_apps(
         extra_base_domains: Arc::new(config.extra_base_domains.clone()),
         lsp_slots: server_slots(),
         mcp_endpoint_tools,
+        max_request_body: config.max_request_body,
+        max_upload_bytes: config.max_upload_bytes,
     };
+    // The code body's file bounds are process-wide, like the code workers:
+    // every `fs` a run is handed starts from them (TODO F2.8).
+    sc_api::code_host::set_file_limits(config.code_max_file_bytes, config.code_max_copy_bytes);
 
     let app = Router::new()
         // Operational health check: a fixed, unauthenticated route (outside the
@@ -360,6 +370,13 @@ pub fn build_router_with_apps(
         // route because its answer is a cookie and a redirect, not JSON.
         .route(HANDOFF_ROUTE, axum::routing::get(admin_handoff))
         .fallback(dispatch)
+        // Explicit rather than axum's implicit 2 MiB (TODO F2.5): every `Bytes`
+        // extractor above reads at most `--max-request-body`. The fallback reads
+        // its body itself, under the same limit, because an application's upload
+        // slot must stream past it (`crate::uploads`).
+        .layer(axum::extract::DefaultBodyLimit::max(
+            config.max_request_body,
+        ))
         .with_state(state.clone())
         // CSRF runs outside dispatch so it guards every route and can mint the
         // double-submit cookie on the way out. It asks the live app registry
@@ -429,15 +446,68 @@ pub fn build_router_with_apps(
         // CSRF and the header layers have had their say. What it prints is the
         // stored log verbosity (Settings → Development): nothing below Info,
         // one line per request at Info (`sc_log::Verbosity`).
+        // axum answers an oversize `Bytes` body with a plain-text 413; every
+        // other refusal this server makes is `{error}` JSON, and a client should
+        // not need a second parser for this one.
+        .layer(axum::middleware::from_fn(json_payload_too_large))
         .layer(axum::middleware::from_fn(crate::logging::log_requests));
 
     Ok(app)
 }
 
-/// Ceiling on a single upload. Generous enough for the assets a code framework's
-/// source tree carries (images, fonts, sample data) while still bounding what one
-/// request can allocate.
-const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+/// The `413` every body over a limit gets, as `{error}` JSON.
+fn too_large(limit: impl std::fmt::Display, flag: &str) -> Response {
+    json_error(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!("the request body is over this server's {limit} byte limit ({flag})"),
+    )
+}
+
+/// Rewrite axum's own plain-text `413` (a `Bytes` extractor over the
+/// [`DefaultBodyLimit`](axum::extract::DefaultBodyLimit)) as the JSON one.
+async fn json_payload_too_large(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let response = next.run(request).await;
+    let plain = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|ct| ct.starts_with("text/plain"));
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE && plain {
+        return json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the request body is over this server's limit (--max-request-body)",
+        );
+    }
+    response
+}
+
+/// Read a whole body into memory, refusing it — as soon as it passes `limit`,
+/// without reading the rest — with the JSON `413`.
+pub(crate) async fn read_body(
+    body: Body,
+    limit: u64,
+    flag: &str,
+) -> std::result::Result<Bytes, Box<Response>> {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut out = bytes::BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            Box::new(json_error(
+                StatusCode::BAD_REQUEST,
+                format!("could not read the request body: {e}"),
+            ))
+        })?;
+        if (out.len() + chunk.len()) as u64 > limit {
+            return Err(Box::new(too_large(limit, flag)));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out.freeze())
+}
 
 /// The operational health check. Always `200 {"status":"ok"}`; reaching it at
 /// all is the signal that the server booted and is accepting requests.
@@ -481,17 +551,12 @@ async fn upload(
     };
 
     // Bounded rather than unbounded: the cap is what keeps a single request from
-    // exhausting memory. True streaming to disk would remove the ceiling and is
-    // the next step if it ever binds; this is already far above what
-    // base64-in-JSON could carry.
-    let bytes = match axum::body::to_bytes(body, MAX_UPLOAD_BYTES).await {
+    // exhausting memory. An application's upload slots stream to disk instead
+    // (`crate::uploads`); this is already far above what base64-in-JSON could
+    // carry.
+    let bytes = match read_body(body, state.max_upload_bytes, "--max-upload-bytes").await {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("upload exceeds the {MAX_UPLOAD_BYTES} byte limit"),
-            );
-        }
+        Err(response) => return *response,
     };
 
     // Kept for the `error` event, which needs to say where it happened and to
@@ -535,6 +600,9 @@ async fn upload(
 async fn download(
     State(state): State<AppState>,
     jar: CookieJar,
+    method: axum::http::Method,
+    uri: Uri,
+    headers: axum::http::HeaderMap,
     AxumPath((store_name, path)): AxumPath<(String, String)>,
 ) -> Response {
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
@@ -564,6 +632,10 @@ async fn download(
         locale: sc_i18n::active().default_locale().clone(),
     };
     match handler(ctx).await {
+        // The file itself, through the shared builder: streamed, with Range.
+        Ok(HandlerResponse {
+            serve: Some(file), ..
+        }) => crate::file_response::serve(&file, &method, &uri, &headers).await,
         Ok(resp) => {
             apply_response(&state, jar, session_token, SessionClient::default(), resp).await
         }
@@ -647,14 +719,9 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
             "this server has no backup handler registered",
         );
     };
-    let bytes = match axum::body::to_bytes(body, MAX_UPLOAD_BYTES).await {
+    let bytes = match read_body(body, state.max_upload_bytes, "--max-upload-bytes").await {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return json_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!("the backup exceeds the {MAX_UPLOAD_BYTES} byte limit"),
-            );
-        }
+        Err(response) => return *response,
     };
     let caller = user.clone();
     let ctx = HandlerCtx {
@@ -932,11 +999,31 @@ async fn dispatch(
     // Before `body`, and it has to be: an upgrade lives in the request's
     // extensions and must be taken while the parts are still in hand.
     MaybeUpgrade(ws): MaybeUpgrade,
-    body: Bytes,
+    // Not `Bytes`: an application's upload slot streams its body to disk, so
+    // the body is read here, once the route is known (TODO F2.5, F2.7).
+    body: Body,
 ) -> Response {
+    let resolved = resolve_app(&state, &headers, &jar);
+    // An upload slot's tus route (§2.3), before anything reads the body: a
+    // chunk is streamed into the store, under the slot's own limit rather than
+    // `--max-request-body`.
+    if let Resolved::App(app) = &resolved
+        && let Some(route) = sc_app::upload_route(&app.app, uri.path())
+    {
+        let csp = state.apps.app_csp(&app.app);
+        let anonymous = anonymous.is_some();
+        let response =
+            crate::uploads::handle(&state, app, route, &method, &headers, &jar, anonymous, body)
+                .await;
+        return with_csp(response, &csp);
+    }
+    let body = match read_body(body, state.max_request_body as u64, "--max-request-body").await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
     // An application claims the whole of its subdomain, so this comes first: on
     // `blog.example.com` every path is the blog's, not the admin's.
-    match resolve_app(&state, &headers, &jar) {
+    match resolved {
         Resolved::App(app) => {
             let csrf = csrf.map(|axum::Extension(token)| token.0);
             let anonymous = anonymous.is_some();
@@ -1182,6 +1269,49 @@ async fn admin_handoff(
     }
 }
 
+/// A code query's `response({ headers })` (TODO F1.4), added to `out`.
+/// Checked again here, where they are written: the server's own headers
+/// (cookies, CSP, framing, the content type) are never a body's. A header the
+/// response already has — a file response's `cache-control` — is replaced.
+fn with_code_headers(mut out: Response, extra: Vec<(String, String)>) -> Response {
+    let pairs: Vec<(header::HeaderName, HeaderValue)> = extra
+        .into_iter()
+        .filter(|(name, value)| sc_expr::allowed_header(name, value))
+        .filter_map(|(name, value)| {
+            Some((
+                header::HeaderName::from_bytes(name.as_bytes()).ok()?,
+                HeaderValue::from_str(&value).ok()?,
+            ))
+        })
+        .collect();
+    for (name, _) in &pairs {
+        out.headers_mut().remove(name);
+    }
+    for (name, value) in pairs {
+        out.headers_mut().append(name, value);
+    }
+    out
+}
+
+/// The headers a code query's `request.headers` shows (TODO F2.9): every one,
+/// lower-cased, except those that carry the caller's credentials — a body is
+/// told who is calling through `user`, never handed what would let it act as
+/// them elsewhere.
+fn code_request_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "cookie" | "authorization" | "proxy-authorization"
+            ) && !name.as_str().eq_ignore_ascii_case(CSRF_HEADER)
+        })
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+        })
+        .collect()
+}
+
 /// What a request's `Host` resolves to.
 enum Resolved {
     /// An application, or a run's preview of one.
@@ -1280,9 +1410,11 @@ async fn dispatch_app(
                         );
                     }
                 };
-            } else {
-                raw_body = Some(body.clone());
             }
+            // The bytes as they arrived, whatever they were labelled: a `File`
+            // field's upload and a `bytes` code query's body (TODO F2.9) both
+            // read them, and a clone of `Bytes` shares rather than copies.
+            raw_body = Some(body.clone());
         }
 
         let req = ApiRequest {
@@ -1291,6 +1423,7 @@ async fn dispatch_app(
             query: parse_query(uri),
             body: parsed_body,
             raw: raw_body,
+            headers: code_request_headers(headers),
             // What an emailed password link is built from: this request's own
             // origin, and the applications served beside it.
             links: Some(sc_api::AppLinks(Arc::new(RequestLinks::new(
@@ -1301,12 +1434,26 @@ async fn dispatch_app(
         // The provider enforces the endpoint's auth itself (§7), so unlike the
         // admin path there is no separate check here.
         return match provider.handle(req, catalog, user.as_ref()).await {
-            // A raw-bytes response — a file download (§4) — goes out as-is under
+            // A store file — a `File` field's download — through the shared
+            // builder (TODO F2, §2.2): streamed, ranged, and named.
+            // A code query's `response({ file })` (TODO F2.10) takes this
+            // road too, with the headers it chose.
+            Ok(sc_api::ApiResponse {
+                file: Some(file),
+                headers: extra,
+                ..
+            }) => {
+                let out = crate::file_response::serve(&file, &method, uri, headers).await;
+                with_csp(with_code_headers(out, extra), &csp)
+            }
+            // A raw-bytes response — a file download (§4), a code query's
+            // `response({ body: bytes })` (TODO F2.9) — goes out as-is under
             // its own content type; there is no JSON body and no session change
             // a download could carry.
             Ok(sc_api::ApiResponse {
                 raw: Some(raw),
                 status,
+                headers: extra,
                 ..
             }) => {
                 let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
@@ -1314,14 +1461,15 @@ async fn dispatch_app(
                 if let Ok(ct) = HeaderValue::from_str(&raw.content_type) {
                     out.headers_mut().insert(header::CONTENT_TYPE, ct);
                 }
-                with_csp(out, &csp)
+                with_csp(with_code_headers(out, extra), &csp)
             }
             // A provider's response is shaped exactly like a handler's — body,
             // status, session change — so it goes out through the same
             // `apply_response`: an app's `login` sets its session cookie the very
             // same way the admin's does.
-            Ok(resp) => with_csp(
-                apply_response(
+            Ok(resp) => {
+                let extra = resp.headers;
+                let out = apply_response(
                     state,
                     jar,
                     session_token,
@@ -1340,11 +1488,12 @@ async fn dispatch_app(
                         // A provider's raw body is served above, before this
                         // point: an application's download never reaches here.
                         download: None,
+                        serve: None,
                     },
                 )
-                .await,
-                &csp,
-            ),
+                .await;
+                with_csp(with_code_headers(out, extra), &csp)
+            }
             Err(e) => with_csp(
                 error_out(
                     state,
@@ -1366,7 +1515,7 @@ async fn dispatch_app(
     // reached.
     if let Some((dir, rest)) = app.app.static_dir_for(path) {
         return with_csp(
-            serve_static_dir(state, app, dir, rest, &method, headers, &jar).await,
+            serve_static_dir(state, app, dir, rest, &method, uri, headers, &jar).await,
             &csp,
         );
     }
@@ -1430,6 +1579,13 @@ async fn dispatch_app(
         .or_else(|| jar.get(CSRF_COOKIE).map(|c| c.value().to_owned()))
         .unwrap_or_default();
     match app.framework.handle(req, catalog).await {
+        // A store file (`/files/serve/*`) through the shared builder.
+        Ok(sc_app::AppResponse {
+            file: Some(file), ..
+        }) => with_csp(
+            crate::file_response::serve(&file, &method, uri, headers).await,
+            &csp,
+        ),
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             // The same session code an API provider's response goes through, so
@@ -1628,14 +1784,16 @@ async fn dispatch_analytics_api(
 ///
 /// The content type is [`sc_app::asset_content_type`], the code framework's own
 /// answer, so a `.png` in a bundle and a `.png` in a static directory are served
-/// identically. The ETag is over the bytes: these are images, they are requested
-/// on every page load, and they do not change.
+/// identically. The response is the shared builder's ([`crate::file_response`]):
+/// streamed, ranged, and validated by an ETag over size, time and path.
+#[allow(clippy::too_many_arguments)]
 async fn serve_static_dir(
     state: &AppState,
     app: &MountedApp,
     dir: &sc_app::StaticDir,
     rest: &str,
     method: &axum::http::Method,
+    uri: &Uri,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
 ) -> Response {
@@ -1684,7 +1842,10 @@ async fn serve_static_dir(
         },
         None => None,
     };
-    let role = user.as_ref().map_or(sc_files::ROLE_PUBLIC, |u| u.role);
+    let caller = sc_files::FileCaller::new(
+        user.as_ref().map_or(sc_files::ROLE_PUBLIC, |u| u.role),
+        user.as_ref().map(|u| u.id.to_string()),
+    );
 
     let floor = match sc_catalog::load_file_store_by_name(catalog, &dir.store.0).await {
         Ok(def) => def.and_then(|def| def.min_role),
@@ -1693,51 +1854,23 @@ async fn serve_static_dir(
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, "file store unreadable");
         }
     };
-    if sc_files::check_access(store.as_ref(), floor, &path, role)
+    if sc_files::check_access(store.as_ref(), floor, &path, &caller)
         .await
         .is_err()
     {
         return missing();
     }
 
-    let bytes = match store.read(&path).await {
-        Ok(bytes) => bytes,
-        Err(e) if matches!(e.repr(), Repr::NotFound(_)) => return missing(),
-        Err(e) => {
-            log_failure("reading a static directory's file", &e);
-            return missing();
-        }
-    };
-
-    let etag = crate::apps::etag_of(&bytes);
-    let matched = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
-
-    let mut response = if matched {
-        StatusCode::NOT_MODIFIED.into_response()
-    } else if method == axum::http::Method::HEAD {
-        StatusCode::OK.into_response()
-    } else {
-        (StatusCode::OK, bytes).into_response()
-    };
-    let out = response.headers_mut();
-    if let Ok(etag) = HeaderValue::from_str(&etag) {
-        out.insert(header::ETAG, etag);
-    }
-    out.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(sc_app::asset_content_type(&path)),
-    );
+    // The shared builder (TODO F2, §2.2): streamed, with Range (so a video
+    // seeks), the cheap ETag and the file's own name. The content type is the
+    // framework's own answer, so a `.png` here and in a bundle are served alike.
     // Revalidated rather than cached blind: an admin who replaces a logo must
     // not have to explain a stale one, and the ETag makes the second request
     // cheap anyway.
-    out.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache, must-revalidate"),
-    );
-    response
+    let file = sc_files::ServeFile::new(store, path.clone())
+        .content_type(sc_app::asset_content_type(&path))
+        .cache_control("private, no-cache, must-revalidate");
+    crate::file_response::serve(&file, method, uri, headers).await
 }
 
 /// An application's catalogue: `GET {mount}/i18n/{locale}.json` (§16.1, D7).
@@ -1747,6 +1880,8 @@ async fn serve_static_dir(
 /// "translate this application into Spanish" must not be a deploy. The file
 /// still lives in the admin's repository (or, for a Saltcorn UI app, in
 /// `_fd_translations`) — it is just read at request time instead of compiled in.
+/// The instance's shared catalogue is laid under it here (TODO F6), so lookup
+/// is app → instance → key with no change to the generated client.
 ///
 /// Three things make that affordable:
 ///
@@ -1810,17 +1945,10 @@ async fn app_i18n_catalog(
             let Some(catalog) = state.apps.catalog() else {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, "no catalog");
             };
-            let store = match sc_app::app_catalog_store(&app.app) {
-                Ok(store) => store,
-                Err(e) => {
-                    log_failure("resolving an application's catalogue store", &e);
-                    return json_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "this application's catalogue store is misconfigured",
-                    );
-                }
-            };
-            let messages = match store.load(catalog, &locale).await {
+            // The app's own catalogue over the instance's (TODO F6): a key the
+            // app translates wins, and one it lacks or left blank is the
+            // shared one. Merged here, so the client and `useT` never know.
+            let messages = match sc_app::merged_app_catalogue(catalog, &app.app, &locale).await {
                 Ok(Some(messages)) => messages,
                 // Enabled but not yet translated is an *empty* catalogue rather
                 // than a 404: the locale is one the application serves, and the
@@ -1897,7 +2025,7 @@ async fn app_i18n_catalog(
 /// so the session it may carry lends it no authority. A token that names no
 /// live session is an anonymous caller, and the token is returned anyway (a
 /// REST response may need to clear its cookie).
-async fn app_caller(
+pub(crate) async fn app_caller(
     state: &AppState,
     jar: &CookieJar,
     anonymous: bool,
@@ -2110,7 +2238,7 @@ impl sc_api::AppDirectory for RequestLinks {
 }
 
 /// Stamp an application's own CSP onto its response (design §13.2).
-fn with_csp(mut resp: Response, csp: &str) -> Response {
+pub(crate) fn with_csp(mut resp: Response, csp: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(csp) {
         resp.headers_mut()
             .insert(header::CONTENT_SECURITY_POLICY, value);
@@ -2217,7 +2345,7 @@ async fn handle_api(
 
 /// Check a user against an [`AuthRequirement`]. Returns `Some(rejection)` when
 /// the request is not authorized, `None` when it may proceed.
-fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response> {
+pub(crate) fn enforce_auth(auth: &AuthRequirement, user: Option<&User>) -> Option<Response> {
     // A caller who passes is answered before the locale is asked for: the
     // overwhelmingly common call costs what it always did.
     if auth.admits(user) {
@@ -2866,7 +2994,7 @@ fn hex_digit(b: u8) -> Option<u8> {
 }
 
 /// A JSON error body with the given status.
-fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
 }
 
@@ -2962,7 +3090,7 @@ enum Audience {
 
 /// Log a discarded lower-level failure at a call site that only knows "it broke"
 /// (no [`Error`] value to forward). Keeps those paths from failing silently.
-fn log_failure(context: &str, err: &(dyn std::error::Error + 'static)) {
+pub(crate) fn log_failure(context: &str, err: &(dyn std::error::Error + 'static)) {
     eprintln!("feldspar: {context}: {}", sc_error::format_chain(err));
 }
 

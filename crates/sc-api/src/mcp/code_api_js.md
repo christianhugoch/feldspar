@@ -7,6 +7,26 @@ you know. Do not guess a method: if it is not on this page, it does not exist. (
 code with `db`.) The body is the inside of an `async function`: write
 statements, `await` every database/network/file call, and `return` the result.
 
+## Choosing where logic goes
+
+Before writing a code body for an application, reach for these in order and stop at the first
+that can express it:
+
+1. **A table with access rules**: a minimum role to read and to write, and an **ownership
+   formula** (`user_id == user.id`) so each user reads and changes only their own rows. The
+   app's generated client then works with no server code, and the server enforces the rules for
+   every caller. Do not make tables admin-only and wrap them in code queries.
+2. **A File field** on that table for uploads: stored, served and access-checked with its row.
+   For a large file (over the 2 MB request limit) or one with no row, give the application an
+   **upload slot** (`update_application`'s `uploads`): resumable, streamed to disk, owned by
+   its uploader. Never accept a file as base64 in a code query.
+3. **A custom SQL query** (`language: sql`) for a read that is one statement.
+4. **A code query or trigger** (this page) only for what the above cannot express: several
+   steps, a call out with `fetch`, a password check, a computed status code.
+
+Never hand-write base64, UTF-8 or SHA: the globals below have them. And never copy a helper
+into a second query: put it in a **code library** (below) and `lib()` it from both.
+
 ## What is in scope
 
 - `row` — the row the event is about (`insert`/`update`/`delete` triggers only; naming it
@@ -15,8 +35,93 @@ statements, `await` every database/network/file call, and `return` the result.
 - `payload` — what a directly-run or scheduled trigger was called with, or `null`.
 - `context` — in a **workflow step** only: the run's context so far.
 - `body`, `query`, `user` — in a **custom API query** only: the request's JSON body, its
-  query string, and the caller. There is no `row` or `payload` there.
-- `db`, `models`, `fetch`, `fs`, `trigger`, `modfn`, `console` — below.
+  query string, and the caller. There is no `row` or `payload` there. The app's generated
+  client method always sends them (`api.myQuery({ anything: 1 })`), declared params or not;
+  a declared param is typed in the client and converted and required before the body runs.
+  `request` is `{ method, contentType, headers }` (headers lower-cased; cookies and
+  credentials removed). A query saved with `body_type: "bytes"` (JavaScript, POST/PUT/PATCH)
+  gets `body` as a `Uint8Array` of the raw request body instead, and its declared params come
+  from the query string; its client method takes a `Blob`, `ArrayBuffer` or `Uint8Array`.
+- `db`, `models`, `fetch`, `fs`, `trigger`, `modfn`, `console`, `lib` — below.
+- `btoa`, `atob`, `TextEncoder`, `TextDecoder`, `crypto`, `httpError`, `response` — below.
+
+## Bytes, randomness, hashes and passwords
+
+```js
+btoa("hi"); atob("aGk=");                               // binary strings, as in a browser
+const bytes = new TextEncoder().encode("naïve");        // UTF-8 only
+const text = new TextDecoder().decode(bytes);           // { fatal: true } throws on bad UTF-8
+const id = crypto.randomUUID();
+const nonce = crypto.getRandomValues(new Uint8Array(16)); // at most 65 536 bytes per call
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const sha = hex(await crypto.subtle.digest("SHA-256", bytes));   // also SHA-384, SHA-512
+const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
+  { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+const sig = await crypto.subtle.sign("HMAC", key, bytes);
+const ok = await crypto.subtle.verify("HMAC", key, sig, bytes);  // constant-time
+const hash = await crypto.password.hash(body.password);          // argon2id; store this string
+const right = await crypto.password.verify(body.password, row.password_hash); // true / false
+```
+
+`crypto.subtle` has SHA digests and HMAC only. `crypto.password` hashes off the JavaScript
+thread, so it does not count against the one-second slice.
+
+## Status codes (custom queries and triggers called as endpoints)
+
+```js
+if (!user) throw httpError(401, "sign in");             // 401 { "error": "sign in" }
+throw httpError(409, "taken", { field: "email" });      // 409, the third argument is the body
+return response({ status: 201, headers: { "x-id": id }, body: { id } });
+```
+
+`httpError` takes 400–599. `response` takes 200–599 and any header except the ones the server
+owns (`set-cookie`, the CSP, framing, `content-type` on a JSON body, …), which it refuses. **Any other throw is
+a 500** `{ "error": "internal error", "id": "…" }` to callers who are not admins — the query
+name and stack go to the server log under that id, and to admin callers. A body stopped by its
+timeout, its slice or the heap is a 503 `{ "error": "timeout" }`.
+
+**Bytes and files out.** A `Uint8Array` body is served raw under the `content-type` you name.
+A **file handle** is streamed by the server — Range requests, ETag, no size limit, the bytes
+never enter the sandbox — named `filename` (default: the file's own) and saved rather than shown
+with `download: true`. Save such a query with `response_type: "bytes"`: its client method then
+returns a `Blob`, and a GET also gets `<name>Url(params)` for `<img src>`, `<video>` and links.
+
+```js
+return response({ body: pngBytes, headers: { "content-type": "image/png" } });
+return response({ file: fs("files").open(path), filename: "report.pdf", download: true });
+```
+
+This is how to write **any download rule** the store's role + owner rule cannot: a
+password-protected share, an expiring link, a revocable one, a quota, an audit log. The query
+is a GET (so links and `<video>` work), its `min_role` decides who may call it, and its code
+decides the rest — on every request, so each Range request of a video re-checks the share:
+
+```js
+// GET /share, params token (text) and password (text, optional), min_role 100, response_type bytes
+const share = await db.shares.where({ token: query.token }).first();
+if (!share) throw httpError(404, "no such share");
+if (!(await crypto.password.verify(query.password ?? "", share.password_hash))) {
+  throw httpError(403, "wrong password");
+}
+return response({ file: fs("files").open(share.path), filename: share.original_name,
+                  download: true, headers: { "cache-control": "private, no-store" } });
+```
+
+A password in a URL lands in logs and history; where that matters, POST the password to a query
+that stores a short-lived token in a table and have the GET take the token. A handle opened with
+`fs(s).asUser()` is also checked against the caller when served (a file they may not read is a
+404); one opened as the default admin is not — the query's own code is the check.
+
+An upload slot's **hook** is a code query too (a POST is best). It runs before an upload is
+accepted, with `body = { filename, size, mime, slot }` and `user` the uploader; throw
+`httpError(403, …)` (or 413, …) to refuse, or return `{ path, meta, min_role }` — all optional —
+to choose the file's path inside the slot's folder, extra string attributes, and a stricter role
+floor:
+
+```js
+if (body.size > 100e6 && user.role > 40) throw httpError(413, "100 MB at most");
+return { path: `${user.id}/${body.filename}`, meta: { project: "apollo" } };
+```
 
 ## `db`: reading and writing tables
 
@@ -132,6 +237,16 @@ const f = fs("myFileStore").open("reports/summary.json");  // a file store an ad
 if (await f.exists()) { const data = await f.json(); }       // also .text(), .bytes(), .stat()
 await f.write({ total: 3 });                                  // replaces; parents are created
 const entries = await fs("myFileStore").dir("reports").list();
+// each entry is a file or directory handle: name, isDirectory, size, modified (as listed),
+// and JSON.stringify(entries) keeps all four; `await entry.stat()` works on either kind
+
+// Large files: never read one whole. These run host-side; nothing big enters the sandbox.
+const piece = await big.read({ offset: 16 * 1024 * 1024, length: 65536 }); // Uint8Array
+await log.append("one more line\n");                // creates the file if it is not there
+const size = await fs("s").open("out.bin").concat([part0, part1, part2]); // join, same store
+const digest = await big.sha256();                  // hex
+const url = await file.url({ download: true });     // where the app serves it, or null
+await f.write(bytes, { owner: user.id, minRole: 80, filename: "Report.pdf" }); // meta options
 
 await trigger("send_invoice").run({ id: row.id });    // run another trigger by name
 
@@ -139,9 +254,47 @@ const html = await modfn.md_to_html(row.notes);       // a function an installed
 console.log("checked", row.id);
 ```
 
+## `lib`: shared code (code libraries)
+
+Code that two queries or triggers need lives once, in a **code library**: a named body that
+assigns to `exports` (or `module.exports`). Save one with `save_code_library` (MCP) or in the
+admin under Settings → Development → Code library; `describe_code_libraries` lists them with
+who imports each.
+
+```js
+// library "auth", instance-wide:
+function requireUser() {
+  if (!user) throw httpError(401, "sign in first");
+  return user;
+}
+async function ownShare(token) {
+  const share = await db.shares.where({ token, owner: requireUser().id }).first();
+  if (!share) throw httpError(404, "no such share");
+  return share;
+}
+module.exports = { requireUser, ownShare };
+
+// any query or trigger:
+const { requireUser, ownShare } = lib("auth");
+const me = requireUser();
+```
+
+- `lib` is synchronous. A library's top level runs once per run however often it is imported,
+  with **the importing run's own** `db`, `fs`, `fetch`, `trigger`, `modfn`, `live`, `console`
+  and `user`, so it can do no more than the code that imported it. Nothing carries over from
+  one run to the next.
+- Names resolve to the application's own library first, then the instance-wide one. A trigger
+  belongs to no application and sees instance-wide libraries only.
+- A library may `lib()` another; a cycle throws naming the chain (`a → b → a`).
+- An edit reaches every importer on its next call. A save is compile-checked, and a syntax error
+  is refused naming its line.
+
 ## Bounds
 
 1000 rows per read (walk more with `.iter()`), 200 database calls, 50 fetches, 100 file
-operations and 20 trigger runs per run, 8 MB per response or file, the trigger's `timeout_ms`,
+operations and 20 trigger runs per run, 8 MB per fetch response and per file read or write
+(`--code-max-file-bytes`; read larger files in pieces), 256 MB per host-side copy or `concat`
+(`--code-max-copy-bytes`), the trigger's `timeout_ms`,
 and one second of computing without awaiting. Each is a named error, never a silent
-truncation. There are no timers, no `process`, no direct disk access, and `require` throws.
+truncation. There are no timers, no `process`, no direct disk access, and `require` throws
+(use `lib()`).

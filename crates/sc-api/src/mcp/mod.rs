@@ -80,6 +80,7 @@ pub use json_schema::{json_schema, object_schema, scalar_schema};
 pub use schema::{TOOL_DESCRIBE, TOOL_EDIT};
 pub use triggers::{
     TOOL_DELETE_TRIGGER, TOOL_DESCRIBE_ACTION, TOOL_DESCRIBE_TRIGGERS, TOOL_SAVE_TRIGGER,
+    setting_json,
 };
 
 /// May create tables, fields, triggers and custom SQL queries.

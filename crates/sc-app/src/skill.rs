@@ -289,7 +289,10 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          one transaction: a refused operation refuses the batch, naming its index.\n\
          3. A table this application should serve must be **connected** to it: \
          `update_application` with `tables: {{ add: [...] }}`. An application reaches only its \
-         connected tables, and the generated client is typed for them alone.\n\
+         connected tables, and the generated client is typed for them alone. For \
+         live updates, create the stream with `edit_streams` (`table_changes`, or \
+         `document` on a `collab_doc` field) and expose it in the same way: \
+         `update_application` with `streams: {{ add: [...] }}`.\n\
          4. Read the result. It names the applications it re-projected and which \
          of them **want a build** — a schema change rewrites the generated client \
          but runs no bundler, so an application with a build is serving one made \

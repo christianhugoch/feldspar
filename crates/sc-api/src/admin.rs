@@ -18,8 +18,8 @@
 //! them to the administration MCP server as tools (§13.6). It is **opt-in and
 //! deliberately sparse**: a coding agent pays for every tool in its context on
 //! every turn, so projecting all of these would be mechanical and wrong. The
-//! thirteen composite tools of `sc_api::mcp` and `sc_app::mcp` plus these seventeen
-//! come to thirty, and the number is a design constraint rather than an outcome —
+//! composite tools of `sc_api::mcp` and `sc_app::mcp` plus these tags are every
+//! tool an agent is offered, and the number is a design constraint rather than an outcome —
 //! `the_tier_two_tags_are_the_ones_that_were_argued_for` is the test that makes
 //! adding one a decision somebody has to write down.
 //!
@@ -350,7 +350,13 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listRoles", Method::Get, api().lit("roles"))
             .output(TypeSchema::array(role_schema()))
-            .auth(AuthRequirement::admin()),
+            .auth(AuthRequirement::admin())
+            .mcp(
+                "List the roles: each one's number (1 is admin, 100 is public — \
+                 anyone, signed in or not; a lower number is more privileged), name \
+                 and description. A user holds one role; a table, query, trigger or \
+                 stream's `min_role` is the least-privileged role that may use it.",
+            ),
     );
 
     set.register(
@@ -361,7 +367,16 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("description", TypeSchema::text()),
             ]))
             .output(role_schema())
-            .auth(AuthRequirement::admin()),
+            .auth(AuthRequirement::admin())
+            .mcp(
+                McpTag::new(
+                    "Create a role: `role` is its number, 2 to 99 (1 and 100 are built \
+                     in), lower being more privileged; `name` must be unused. A role \
+                     decides what its users may reach, so say plainly what you are \
+                     creating it for.",
+                )
+                .needs(Grant::AccessChanges),
+            ),
     );
 
     // Addressed by the role *number*, not the row id: the number is what
@@ -377,7 +392,15 @@ pub fn admin_endpoints() -> EndpointSet {
             "deleted",
             TypeSchema::bool(),
         )]))
-        .auth(AuthRequirement::admin()),
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Delete a role by its number. Refused for a built-in role and for one \
+                 a user still holds — move those users first.",
+            )
+            .needs(Grant::AccessChanges)
+            .and_needs(Grant::Drop),
+        ),
     );
 
     set.register(
@@ -1266,6 +1289,58 @@ pub fn admin_endpoints() -> EndpointSet {
                 TypeSchema::int(),
             )]))
             .auth(AuthRequirement::admin()),
+    );
+
+    // --- code libraries (TODO F3) --------------------------------------------
+    // Named, shared JavaScript that code queries and triggers import with
+    // `lib(name)`: instance-wide, or one application's. A save compile-checks
+    // the code (without running it). Not projected to MCP here: MCP has its own
+    // three tools (`describe_code_libraries`, `save_code_library`,
+    // `delete_code_library`), which speak names rather than ids.
+
+    set.register(
+        Endpoint::new(
+            "listCodeLibraries",
+            Method::Get,
+            api().lit("code-libraries"),
+        )
+        .output(TypeSchema::array(code_library_schema()))
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "createCodeLibrary",
+            Method::Post,
+            api().lit("code-libraries"),
+        )
+        .input(code_library_input_schema())
+        .output(code_library_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "updateCodeLibrary",
+            Method::Put,
+            api().lit("code-libraries").param("id", ValueType::Uuid),
+        )
+        .input(code_library_input_schema())
+        .output(code_library_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "deleteCodeLibrary",
+            Method::Delete,
+            api().lit("code-libraries").param("id", ValueType::Uuid),
+        )
+        .output(TypeSchema::struct_of([StructField::new(
+            "deleted",
+            TypeSchema::bool(),
+        )]))
+        .auth(AuthRequirement::admin()),
     );
 
     // --- agents (configuration) ---------------------------------------------
@@ -2378,6 +2453,51 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // --- The instance's shared catalogue (TODO F6) ----------------------------
+    // Strings every application serves under its own: the same screen payload,
+    // save and fill as an application's, without the application.
+
+    set.register(
+        Endpoint::new(
+            "getInstanceTranslations",
+            Method::Get,
+            api().lit("translations"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Save one locale of the shared catalogue, whole: a key left out is
+    // removed. Placeholders are checked as an application's are.
+    set.register(
+        Endpoint::new(
+            "saveInstanceTranslations",
+            Method::Put,
+            api().lit("translations").param("locale", ValueType::Text),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "messages",
+            TypeSchema::json(),
+        )]))
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // **Translate missing** for the shared catalogue: every key another locale
+    // of it has, filled into this one by the configured LLM.
+    set.register(
+        Endpoint::new(
+            "translateInstanceMissing",
+            Method::Post,
+            api()
+                .lit("translations")
+                .param("locale", ValueType::Text)
+                .lit("fill"),
+        )
+        .output(TypeSchema::json())
+        .auth(AuthRequirement::admin()),
+    );
+
     // v1's `/field/preview/:table/:field/:fieldview`: a fieldview rendered over
     // the first row the admin can read, as HTML for the canvas.
     set.register(
@@ -2557,7 +2677,11 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listUsers", Method::Get, api().lit("users"))
             .output(TypeSchema::array(user_row_schema()))
-            .auth(AuthRequirement::admin()),
+            .auth(AuthRequirement::admin())
+            .mcp(
+                "List the user accounts: id, email, role and whether each is disabled, \
+                 with any columns the admin added. Never the password hashes.",
+            ),
     );
 
     set.register(
@@ -2596,7 +2720,16 @@ pub fn admin_endpoints() -> EndpointSet {
             "deleted",
             TypeSchema::bool(),
         )]))
-        .auth(AuthRequirement::admin()),
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Delete a user account by id (from `listUsers`). Prefer \
+                 `setUserDisabled`, which keeps the row and everything that names it. \
+                 Refused for your own account and for the last enabled admin.",
+            )
+            .needs(Grant::AccessChanges)
+            .and_needs(Grant::Drop),
+        ),
     );
 
     set.register(
@@ -2613,7 +2746,16 @@ pub fn admin_endpoints() -> EndpointSet {
             TypeSchema::bool(),
         )]))
         .output(user_row_schema())
-        .auth(AuthRequirement::admin()),
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Disable (`disabled: true`) or re-enable a user account by id. A \
+                 disabled account cannot sign in and its sessions stop working, but \
+                 its row stays. Refused for your own account and for the last \
+                 enabled admin.",
+            )
+            .needs(Grant::AccessChanges),
+        ),
     );
 
     set.register(
@@ -4198,6 +4340,7 @@ fn backup_contents_schema() -> TypeSchema {
         StructField::new("fits", TypeSchema::int()),
         StructField::new("llm_providers", TypeSchema::int()),
         StructField::new("agents", TypeSchema::int()),
+        StructField::new("code_libraries", TypeSchema::int()),
         StructField::new("triggers", TypeSchema::int()),
         // The views and pages of every application on offer. They travel with
         // their application: a view restored without the application it belongs
@@ -4232,6 +4375,7 @@ fn backup_selection_schema() -> TypeSchema {
         StructField::new("fits", TypeSchema::bool()),
         StructField::new("llm_providers", TypeSchema::bool()),
         StructField::new("agents", TypeSchema::bool()),
+        StructField::new("code_libraries", TypeSchema::bool()),
         StructField::new("triggers", TypeSchema::bool()),
         StructField::new("views", TypeSchema::bool()),
         StructField::new("pages", TypeSchema::bool()),
@@ -4994,6 +5138,38 @@ fn enabled_trait_schema() -> TypeSchema {
 /// trigger's and a file store's are: an agent naming a provider that was deleted
 /// or a trait configured against a dropped table is **not in the live set** and
 /// will not answer, but it is still stored, still listed and still editable.
+/// A code library's editable fields (TODO F3): what a create or update sends.
+fn code_library_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("code", TypeSchema::text()),
+        // Absent or null: instance-wide.
+        StructField::new("application_id", TypeSchema::optional(TypeSchema::uuid())),
+    ])
+}
+
+/// A code library as listed: its fields, its application's subdomain, and the
+/// queries and triggers whose code imports it by name.
+fn code_library_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("id", TypeSchema::uuid()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        StructField::new("code", TypeSchema::text()),
+        StructField::new("application_id", TypeSchema::optional(TypeSchema::uuid())),
+        StructField::new("application", TypeSchema::optional(TypeSchema::text())),
+        StructField::new(
+            "used_by",
+            TypeSchema::optional(TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("kind", TypeSchema::text()),
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("application", TypeSchema::optional(TypeSchema::text())),
+            ]))),
+        ),
+    ])
+}
+
 fn agent_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(agent_fields());
@@ -5395,6 +5571,21 @@ fn static_dir_schema() -> TypeSchema {
     ])
 }
 
+/// An upload slot (TODO F2, §2.3): where a resumable upload lands, who may
+/// start one, how large and of which types, and the code query that decides
+/// the rest. `max_bytes` 0 is the server's own limit; `hook` null is none.
+fn upload_slot_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("store", TypeSchema::text()),
+        StructField::new("folder", TypeSchema::text()),
+        StructField::new("min_role", TypeSchema::int()),
+        StructField::new("max_bytes", TypeSchema::int()),
+        StructField::new("mime_allow", TypeSchema::array(TypeSchema::text())),
+        StructField::new("hook", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
 /// The fields common to an application on the wire — everything but its id. The
 /// nested `csp` and `attributes` are opaque JSON (a directive→sources map and a
 /// sparse bag respectively), matching how they are stored (§13.2).
@@ -5418,6 +5609,7 @@ fn application_fields() -> Vec<StructField> {
         StructField::new("streams", TypeSchema::array(TypeSchema::text())),
         StructField::new("apis", TypeSchema::array(api_config_schema())),
         StructField::new("static_dirs", TypeSchema::array(static_dir_schema())),
+        StructField::new("uploads", TypeSchema::array(upload_slot_schema())),
         StructField::new("csp", TypeSchema::json()),
         StructField::new("attributes", TypeSchema::json()),
     ]
@@ -6078,6 +6270,9 @@ fn custom_query_input_schema() -> TypeSchema {
             ])),
         ),
         StructField::new("min_role", TypeSchema::optional(TypeSchema::int())),
+        // `json` when absent (TODO F2.9/F2.10).
+        StructField::new("body_type", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("response_type", TypeSchema::optional(TypeSchema::text())),
         StructField::new(
             "tables",
             TypeSchema::optional(TypeSchema::array(TypeSchema::text())),
@@ -6538,6 +6733,12 @@ mod tests {
             tagged,
             [
                 "listTableProviders",
+                // Roles and accounts (TODO F1.9): an agent building an app from
+                // a terminal needs the roles its queries' `min_role` names, and
+                // the field report's agent had no way to make one.
+                "listRoles",
+                "createRole",
+                "deleteRole",
                 "listFieldTypes",
                 "listAgents",
                 "createAgent",
@@ -6548,6 +6749,10 @@ mod tests {
                 "getRun",
                 "listApplications",
                 "buildApplication",
+                // …and disabling or removing an account it made for testing.
+                "listUsers",
+                "deleteUser",
+                "setUserDisabled",
                 "listTriggers",
                 "listActions",
                 "getWorkflow",
@@ -6592,8 +6797,12 @@ mod tests {
             "updateBackupSchedule",
             "deleteBackupSchedule",
             "clearAll",
-            "listUsers",
+            // `listUsers`, `setUserDisabled` and `deleteUser` are projected
+            // (TODO F1.9); creating one, becoming one and setting a password
+            // still are not.
             "createUser",
+            "becomeUser",
+            "setRandomPassword",
             // And above all: a token that could mint tokens could not be
             // revoked (phase 2.4 says so in its own comment).
             "createApiToken",
@@ -6674,6 +6883,20 @@ mod tests {
         // Building writes the generated client and replaces what a subdomain
         // serves: a change to what is there, whatever the method reads as.
         assert_eq!(grant_of("buildApplication"), Some(Grant::Edit));
+        // Roles and accounts are access (TODO F1.9); deleting one is a deletion
+        // as well.
+        let also_of = |name: &str| {
+            set.find(name)
+                .and_then(|e| e.mcp.as_ref())
+                .and_then(|t| t.also)
+        };
+        for name in ["createRole", "setUserDisabled", "deleteRole", "deleteUser"] {
+            assert_eq!(grant_of(name), Some(Grant::AccessChanges), "{name}");
+        }
+        assert_eq!(also_of("createRole"), None);
+        assert_eq!(also_of("setUserDisabled"), None);
+        assert_eq!(also_of("deleteRole"), Some(Grant::Drop));
+        assert_eq!(also_of("deleteUser"), Some(Grant::Drop));
 
         for read_only in [
             "listAgents",
@@ -6687,6 +6910,8 @@ mod tests {
             "listTableProviders",
             "getWorkflow",
             "listWorkflowRuns",
+            "listRoles",
+            "listUsers",
         ] {
             assert_eq!(grant_of(read_only), None, "`{read_only}` only reads");
         }

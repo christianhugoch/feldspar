@@ -54,6 +54,8 @@ async fn run(args: &[String]) -> Result<()> {
         Some("mcp-token") => mcp_token_command(&args[1..]).await,
         Some("add-user") => add_user_command(&args[1..]).await,
         Some("modify-user") => modify_user_command(&args[1..]).await,
+        Some("delete-user") => delete_user_command(&args[1..]).await,
+        Some("role") => role_command(&args[1..]).await,
         Some("backup") => backup_command(&args[1..]).await,
         Some("restore") => restore_command(&args[1..]).await,
         Some("app") => app_command(&args[1..]).await,
@@ -1433,6 +1435,25 @@ async fn modify_user_command(args: &[String]) -> Result<()> {
         Some(arg) => Some(sc_cli::users::password_from(Some(arg))?),
         None => None,
     };
+    // First, so a refusal (the last enabled admin) changes nothing else.
+    if let Some(disabled) = parsed.disabled {
+        sc_auth::set_user_disabled(&catalog, user.id, disabled).await?;
+        if disabled {
+            // A disabled account stops resolving from a session it holds; the
+            // rows are dropped too, as the admin UI's "Disable" drops them.
+            sc_auth::SessionStore::database(catalog.clone())
+                .end_user_sessions(user.id)
+                .await?;
+        }
+        eprintln!(
+            "feldspar: {} is now {}",
+            parsed.email.trim(),
+            if disabled { "disabled" } else { "enabled" }
+        );
+    }
+    if role.is_none() && password.is_none() {
+        return Ok(());
+    }
     sc_auth::update_user(
         &catalog,
         user.id,
@@ -1455,6 +1476,74 @@ async fn modify_user_command(args: &[String]) -> Result<()> {
         eprintln!("feldspar: password changed for {}", parsed.email.trim());
     }
     Ok(())
+}
+
+/// `feldspar delete-user EMAIL` — delete an account from a terminal (TODO
+/// F1.8). The last enabled admin is refused, as it is in the admin UI.
+async fn delete_user_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let email = sc_cli::users::parse_delete_user(&rest)?;
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    let user = sc_auth::load_user_by_email(&catalog, email.trim())
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::not_found(format!("no user with the email `{}`", email.trim()))
+        })?;
+    sc_auth::delete_user(&catalog, user.id).await?;
+    sc_auth::SessionStore::database(catalog.clone())
+        .end_user_sessions(user.id)
+        .await?;
+    eprintln!("feldspar: deleted {}", email.trim());
+    Ok(())
+}
+
+/// `feldspar role list|add|delete` — the roles users and endpoints are
+/// assigned, from a terminal (TODO F1.8), over `sc-auth`'s own functions.
+async fn role_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let command = sc_cli::users::parse_role(&rest)?;
+    let catalog = connect_catalog(&db).await?;
+    sc_log::set_log_sql(false);
+    match command {
+        sc_cli::users::RoleCommand::List { json } => {
+            let roles = sc_auth::list_roles(&catalog).await?;
+            if json {
+                let out: Vec<serde_json::Value> = roles
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "role": r.role, "name": r.name, "description": r.description,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                return Ok(());
+            }
+            for r in &roles {
+                println!("{:>3}  {:<20} {}", r.role, r.name, r.description);
+            }
+            Ok(())
+        }
+        sc_cli::users::RoleCommand::Add {
+            name,
+            level,
+            description,
+        } => {
+            let role = sc_auth::Role::new(level, name.trim()).description(description.trim());
+            sc_auth::save_role(&catalog, &role).await?;
+            eprintln!("feldspar: created role {} ({level})", name.trim());
+            Ok(())
+        }
+        sc_cli::users::RoleCommand::Delete { role } => {
+            let found = sc_cli::auth::resolve_role(&catalog, &role).await?;
+            sc_auth::delete_role(&catalog, found.role).await?;
+            eprintln!("feldspar: deleted role {} ({})", found.name, found.role);
+            Ok(())
+        }
+    }
 }
 
 /// The FILE a `backup` or `restore` names, which comes first, and the
@@ -1713,6 +1802,11 @@ async fn i18n_command(args: &[String]) -> Result<()> {
         false => (None, args.to_vec()),
     };
     let parsed = I18nArgs::parse(&rest)?;
+    // The shared catalogue is in the database, not in a checkout.
+    if parsed.instance {
+        let db = db.ok_or_else(|| sc_error::Error::config("no database flags parsed"))?;
+        return i18n_translate_instance(&parsed, db).await;
+    }
     let root = match &parsed.root {
         Some(root) => root.clone(),
         None => find_root(&std::env::current_dir().map_err(|e| {
@@ -1972,25 +2066,7 @@ async fn i18n_translate(
         eprintln!("feldspar: database configured from {source}");
     }
     let catalog_db = connect_catalog(&db).await?;
-
-    // Which model. A named provider, or the installation's default provider,
-    // with its default model. The error says what to configure rather than what
-    // failed.
-    let provider = match &parsed.provider {
-        Some(name) => sc_llm::load_llm_provider_by_name(&catalog_db, name)
-            .await?
-            .ok_or_else(|| sc_error::Error::not_found(format!("no LLM provider named `{name}`")))?,
-        None => sc_llm::default_llm_provider(&catalog_db)
-            .await?
-            .ok_or_else(|| {
-                sc_error::Error::config(
-                    "no LLM provider is configured — add one in Settings → LLM providers, \
-                     or name one with --provider",
-                )
-            })?,
-    };
-    let model = sc_llm::require_llm_model(&catalog_db, &provider, parsed.model.as_deref()).await?;
-    let translator = sc_cli::i18n::LlmTranslator::new(sc_llm::connect_model(&provider, &model)?);
+    let translator = cli_translator(&catalog_db, parsed).await?;
     let source = sc_i18n::Locale::source();
 
     for domain in &parsed.domains {
@@ -2025,6 +2101,72 @@ async fn i18n_translate(
             );
         }
     }
+    Ok(())
+}
+
+/// The translator `--provider`/`--model` name: a named provider, or the
+/// installation's default provider, with its default model. The error says what
+/// to configure rather than what failed.
+async fn cli_translator(
+    catalog_db: &sc_catalog::Catalog,
+    parsed: &sc_cli::i18n::I18nArgs,
+) -> Result<sc_cli::i18n::LlmTranslator> {
+    let provider = match &parsed.provider {
+        Some(name) => sc_llm::load_llm_provider_by_name(catalog_db, name)
+            .await?
+            .ok_or_else(|| sc_error::Error::not_found(format!("no LLM provider named `{name}`")))?,
+        None => sc_llm::default_llm_provider(catalog_db)
+            .await?
+            .ok_or_else(|| {
+                sc_error::Error::config(
+                    "no LLM provider is configured — add one in Settings → LLM providers, \
+                     or name one with --provider",
+                )
+            })?,
+    };
+    let model = sc_llm::require_llm_model(catalog_db, &provider, parsed.model.as_deref()).await?;
+    Ok(sc_cli::i18n::LlmTranslator::new(sc_llm::connect_model(
+        &provider, &model,
+    )?))
+}
+
+/// `feldspar i18n translate --instance --locale L` — fill the instance's shared
+/// catalogue (TODO F6) through the configured LLM: every key another of its
+/// locales has, checked as the screen's **Translate missing** is.
+async fn i18n_translate_instance(parsed: &sc_cli::i18n::I18nArgs, db: DbConfig) -> Result<()> {
+    if parsed.locales.is_empty() {
+        return Err(sc_error::Error::config(
+            "feldspar i18n translate --instance needs a target: --locale de",
+        ));
+    }
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog_db = connect_catalog(&db).await?;
+    let translator = cli_translator(&catalog_db, parsed).await?;
+    for tag in &parsed.locales {
+        let locale = sc_i18n::Locale::parse(tag)?;
+        eprintln!(
+            "feldspar: shared catalogue → {}: translating with {}",
+            locale.as_str(),
+            translator.describes()
+        );
+        let report =
+            sc_server::translations::fill_instance_missing(&catalog_db, None, &locale, &translator)
+                .await?;
+        for warning in report["warnings"].as_array().into_iter().flatten() {
+            eprintln!("warning: {}", warning.as_str().unwrap_or_default());
+        }
+        eprintln!(
+            "feldspar: filled {}, refused {}, unanswered {}",
+            report["filled"],
+            report["rejected"].as_array().map_or(0, Vec::len),
+            report["unanswered"].as_array().map_or(0, Vec::len),
+        );
+    }
+    eprintln!(
+        "feldspar: a running server serves the change after `pkill -HUP feldspar` (or a restart)"
+    );
     Ok(())
 }
 
@@ -2068,6 +2210,7 @@ fn print_usage() {
     eprintln!(
         "  feldspar i18n translate --domain NAME --locale TAG [--provider NAME] [--model NAME]"
     );
+    eprintln!("  feldspar i18n translate --instance --locale TAG [--provider NAME] [--model NAME]");
     eprintln!("                          [database flags]");
     eprintln!("  feldspar auth token --app SUBDOMAIN (--email EMAIL | --admin | --role NAME)");
     eprintln!("                      [--format playwright|netscape] [--out PATH] [--url ORIGIN]");
@@ -2085,7 +2228,14 @@ fn print_usage() {
     eprintln!("  feldspar mcp-token list [--json] [database flags]");
     eprintln!("  feldspar mcp-token revoke ID [database flags]");
     eprintln!("  feldspar add-user EMAIL --role ROLE [--password [VALUE]] [database flags]");
-    eprintln!("  feldspar modify-user EMAIL [--role ROLE] [--password [VALUE]] [database flags]");
+    eprintln!(
+        "  feldspar modify-user EMAIL [--role ROLE] [--password [VALUE]] [--disabled|--enabled] \
+         [database flags]"
+    );
+    eprintln!("  feldspar delete-user EMAIL [database flags]");
+    eprintln!("  feldspar role list [--json] [database flags]");
+    eprintln!("  feldspar role add NAME --level N [--description TEXT] [database flags]");
+    eprintln!("  feldspar role delete NAME [database flags]");
     eprintln!("  feldspar app list [--json] [database flags]");
     eprintln!("  feldspar backup FILE [database flags]");
     eprintln!("  feldspar restore FILE [database flags] [server flags]");
@@ -2166,6 +2316,15 @@ fn print_usage() {
        line: leave --password out of add-user, or give it no value, and it is
        asked for without echo (or read as one line from stdin when that is not a
        terminal). A password starting with -- is written --password=VALUE.
+       modify-user --disabled stops an account signing in (and ends its
+       sessions) without deleting it; --enabled gives it back.
+
+  delete-user: deletes an account. The last enabled admin cannot be deleted
+       or disabled, here or anywhere else.
+
+  role: lists, adds and deletes roles. --level is the role's number, 1 (admin)
+       to 100 (public); a lower number is more privileged. A built-in role, or
+       one a user still holds, cannot be deleted.
 
   backup: writes everything this installation has to FILE, as the zip
        Settings → Backup downloads with every box ticked but SSL / TLS: the
@@ -2204,6 +2363,16 @@ fn print_usage() {
     --no-browser-sandbox     start that browser with --no-sandbox
     --browser-contexts N     view_app runs that may hold a browser context at once (default 4)
     --preview-idle-minutes N unmount a run's preview after N idle minutes (default 60)"
+    );
+    eprintln!(
+        "    --max-request-body N     the largest request body read into memory, in bytes or
+                             with K/M/G (default 2M); bigger bodies are a 413
+    --max-upload-bytes N     the largest file one upload may be: the file manager, a
+                             backup, an application's upload slots (default 256M)
+    --code-max-file-bytes N  the most one code-body file read or write may carry
+                             (default 8M); larger files are read in pieces
+    --code-max-copy-bytes N  the most one host-side copy or concat in a code body
+                             may move (default 256M)"
     );
     eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"

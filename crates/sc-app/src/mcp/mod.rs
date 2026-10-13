@@ -72,7 +72,7 @@ use sc_api::mcp::{
 };
 use sc_api::schema_edit::{GRANT_ACCESS_CHANGES, GRANT_CREATE, GRANT_DROP, GRANT_EDIT, Grants};
 use sc_api::{CustomParam, CustomQuery, Method, ValueType};
-use sc_auth::ROLE_ADMIN;
+use sc_auth::{ROLE_ADMIN, ROLE_PUBLIC};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
@@ -80,10 +80,16 @@ use serde_json::{Map, Value as Json, json};
 use crate::{ApiConfig, Application};
 
 mod create;
+mod libraries;
+mod streams;
 mod translate;
 mod update;
 
 pub use create::{TOOL_CREATE_APP, TOOL_CREATE_STORE};
+pub use libraries::{
+    TOOL_DELETE_CODE_LIBRARY, TOOL_DESCRIBE_CODE_LIBRARIES, TOOL_SAVE_CODE_LIBRARY,
+};
+pub use streams::TOOL_EDIT_STREAMS;
 pub use translate::{TOOL_DESCRIBE_TRANSLATIONS, TOOL_SAVE_TRANSLATIONS};
 pub use update::TOOL_UPDATE_APP;
 
@@ -105,9 +111,11 @@ pub fn app_tools() -> Vec<Arc<dyn AdminTool>> {
     let mut tools: Vec<Arc<dyn AdminTool>> = vec![Arc::new(DescribeApps)];
     tools.extend(create::create_tools());
     tools.extend(update::update_tools());
+    tools.extend(streams::stream_tools());
     tools.extend(translate::translate_tools());
     tools.push(Arc::new(SaveQuery));
     tools.push(Arc::new(DeleteQuery));
+    tools.extend(libraries::library_tools());
     tools
 }
 
@@ -208,9 +216,20 @@ const ARG_CODE: &str = "code";
 const ARG_LANGUAGE: &str = "language";
 const ARG_PARAMS: &str = "params";
 const ARG_MIN_ROLE: &str = "min_role";
+/// `true` is `min_role: 100` said the way people say it (TODO F1.6). Stored
+/// as the role; `min_role` stays the one fact.
+const ARG_PUBLIC: &str = "public";
+/// `json` (default) or `bytes`: what a JavaScript query's `body` is (TODO F2.9).
+const ARG_BODY_TYPE: &str = "body_type";
+/// `json` (default) or `bytes`: what a code query answers with, which types
+/// its client method (TODO F2.9/F2.10).
+const ARG_RESPONSE_TYPE: &str = "response_type";
 
 /// The arguments [`save`] accepts.
-const SAVE_ARGS: [&str; 10] = [
+const SAVE_ARGS: [&str; 13] = [
+    ARG_PUBLIC,
+    ARG_BODY_TYPE,
+    ARG_RESPONSE_TYPE,
     ARG_APPLICATION,
     ARG_API,
     ARG_NAME,
@@ -240,7 +259,8 @@ fn describe_apps_description() -> String {
          directory its source is in on this machine, `null` when that is not on \
          this disk — its `builder_agent`, the coding agent created to build \
          it, the file stores it is connected to, the store folders it serves \
-         (`static_dirs`) and its Content-Security-Policy (`csp`).\n\n\
+         (`static_dirs`), its upload slots (`uploads`, each with the `route` a \
+         client uploads to) and its Content-Security-Policy (`csp`).\n\n\
          Call this before `{TOOL_SAVE_QUERY}`: it tells you the application's \
          subdomain, which API a query goes on, and whether the name you have in \
          mind is already taken. For the tables a query's SQL can read, call \
@@ -310,6 +330,11 @@ fn application_json(app: &Application) -> Result<Json> {
         "streams": app.streams.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "file_stores": app.file_stores.iter().map(|s| s.0.clone()).collect::<Vec<_>>(),
         "static_dirs": update::static_dirs_json(&app.static_dirs),
+        "uploads": app.uploads.iter().map(|s| {
+            let mut slot = s.to_json();
+            slot["route"] = json!(crate::upload_path(app, &s.name));
+            slot
+        }).collect::<Vec<_>>(),
         "csp": update::csp_json(&app.csp),
         "apis": apis?,
     }))
@@ -348,6 +373,11 @@ fn query_json(query: &CustomQuery) -> Json {
         "code": query.code,
         "params": query.params.iter().map(param_json).collect::<Vec<_>>(),
         "min_role": query.min_role,
+        // Said, not left to be known: 100 is the public role, and "who can
+        // call this?" is the question a reader of this list is asking.
+        "public": query.min_role == ROLE_PUBLIC,
+        "body_type": query.body_type.as_str(),
+        "response_type": query.response_type.as_str(),
         // Server-written, never declared: the shape the database said this
         // statement produces when it was last saved. Empty means it has not been
         // described, which types the response as opaque rather than lying.
@@ -379,12 +409,13 @@ fn save_description(grants: &Grants) -> String {
     };
     let access = match grants.access_changes {
         true => format!(
-            "You may set `{ARG_MIN_ROLE}`, which decides who may call the \
-             endpoint. That changes what users of this deployment can reach, so \
+            "You may set `{ARG_MIN_ROLE}` (or `{ARG_PUBLIC}: true`, the same as \
+             `{ARG_MIN_ROLE}: 100`), which decides who may call the endpoint. That changes what users of this deployment can reach, so \
              say plainly what you are about to do before you do it."
         ),
         false => format!(
-            "You may **not** set `{ARG_MIN_ROLE}`; a call naming it is refused. \
+            "You may **not** set `{ARG_MIN_ROLE}` or `{ARG_PUBLIC}`; a call naming \
+             either is refused. \
              Without it a query is admin-only, which is the safe default."
         ),
     };
@@ -482,11 +513,45 @@ fn save_parameters() -> Json {
                      `run_python_code` body, with the request's JSON body as \
                      `body`, its query string as `query` and the caller as `user`; \
                      what it returns is the response. A code body is not prepared, \
-                     and a declared parameter need not appear in it. Its `db`, \
-                     `fetch` and `fs` are this server's own API: call \
-                     `describe_code_api` before writing a `javascript` body \
-                     rather than guessing the methods.",
+                     and a declared parameter need not appear in it; the app's \
+                     client method sends whatever it is given either way, but \
+                     declare the parameters the body reads so they are typed and \
+                     checked. `throw httpError(status, message)` and `return \
+                     response({ status, headers, body })` choose the status; any \
+                     other throw is a 500 with no stack for non-admin callers. \
+                     Its `db`, `fetch`, `fs` and `crypto` are this server's own \
+                     API: call `describe_code_api` before writing a `javascript` \
+                     body rather than guessing the methods. Prefer a table with an \
+                     ownership formula, or SQL, to a code body where either can \
+                     express it.",
                 "enum": ["sql", "javascript", "python"],
+            },
+            ARG_BODY_TYPE: {
+                "type": "string",
+                "description":
+                    "`javascript` with POST/PUT/PATCH only. `json` — the default — \
+                     makes `body` the parsed JSON object. `bytes` makes `body` a \
+                     `Uint8Array` of the raw request body (an image, a PDF, a CSV) \
+                     up to the server's --max-request-body; the declared params then \
+                     come from the query string, and `request.contentType` says \
+                     what was sent. The client method takes a `Blob`, \
+                     `ArrayBuffer` or `Uint8Array`. For files larger than a request \
+                     body, use an application upload slot instead.",
+                "enum": ["json", "bytes"],
+            },
+            ARG_RESPONSE_TYPE: {
+                "type": "string",
+                "description":
+                    "`javascript` only. `json` — the default — for a body that \
+                     returns JSON. `bytes` for one that returns `response({ body: \
+                     uint8array, headers: { \"content-type\": … } })` or \
+                     `response({ file: fs(store).open(path), filename, download })`: \
+                     the client method then resolves to a `Blob`, and a GET query \
+                     also gets `<name>Url(params)` for `<img src>`, `<video>` and \
+                     download links. A file is streamed with Range support and no \
+                     size limit — this is how to write a custom download rule \
+                     (password-protected or expiring shares).",
+                "enum": ["json", "bytes"],
             },
             ARG_PARAMS: {
                 "type": "array",
@@ -525,10 +590,18 @@ fn save_parameters() -> Json {
                 "type": "integer",
                 "description":
                     "Least-privileged role that may call this endpoint, 1 (admin) \
-                     to 100 (anyone). A new query is admin-only unless this says \
-                     otherwise.",
+                     to 100 (anyone — **public**, no sign-in). A new query is \
+                     admin-only unless this says otherwise.",
                 "minimum": 1,
                 "maximum": 100,
+            },
+            ARG_PUBLIC: {
+                "type": "boolean",
+                "description":
+                    "`true` makes the endpoint public — callable by anyone, \
+                     signed in or not — and is the same as `min_role: 100`. Send \
+                     one or the other; if you send both they must agree. Needs \
+                     the same grant as `min_role`.",
             },
         },
         "required": [ARG_APPLICATION, ARG_NAME],
@@ -558,7 +631,7 @@ async fn save(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Jso
         )?,
         None => require_grant(grants.create, "add a custom SQL query", GRANT_CREATE)?,
     }
-    if args.contains_key(ARG_MIN_ROLE) {
+    if args.contains_key(ARG_MIN_ROLE) || args.contains_key(ARG_PUBLIC) {
         require_grant(
             grants.access_changes,
             "set who may call a custom SQL query",
@@ -602,6 +675,7 @@ async fn save(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Result<Jso
     }
 
     let stored = stored_query(&saved, &mount, &name)?;
+    notes.extend(sc_api::undeclared_params_note(&stored));
     Ok(json!({
         "saved": name,
         "application": subdomain,
@@ -666,6 +740,26 @@ fn build(
         }
         None => existing.map(|q| q.language).unwrap_or_default(),
     };
+    query.body_type = match optional_string(args, ARG_BODY_TYPE)? {
+        Some(raw) => {
+            serde_json::from_value(Json::String(raw.trim().to_lowercase())).map_err(|_| {
+                Error::invalid(format!(
+                    "`{ARG_BODY_TYPE}` should be `json` or `bytes`, got `{raw}`"
+                ))
+            })?
+        }
+        None => existing.map(|q| q.body_type).unwrap_or_default(),
+    };
+    query.response_type = match optional_string(args, ARG_RESPONSE_TYPE)? {
+        Some(raw) => {
+            serde_json::from_value(Json::String(raw.trim().to_lowercase())).map_err(|_| {
+                Error::invalid(format!(
+                    "`{ARG_RESPONSE_TYPE}` should be `json` or `bytes`, got `{raw}`"
+                ))
+            })?
+        }
+        None => existing.map(|q| q.response_type).unwrap_or_default(),
+    };
     query.description = match args.contains_key(ARG_DESCRIPTION) {
         true => optional_string(args, ARG_DESCRIPTION)?.unwrap_or_default(),
         false => existing.map(|q| q.description.clone()).unwrap_or_default(),
@@ -677,11 +771,32 @@ fn build(
     // Admin unless stated, on a create as well as on an edit that does not name
     // it: an access nobody has thought about must not be the one that turns out
     // to be public (§13.4).
-    query.min_role = match optional_role(args, ARG_MIN_ROLE)? {
+    query.min_role = match requested_role(args)? {
         Some(role) => role,
         None => existing.map(|q| q.min_role).unwrap_or(ROLE_ADMIN),
     };
     Ok(query)
+}
+
+/// The role floor the arguments ask for: `min_role`, or `public: true` for
+/// 100. Both together must agree, and `public: false` says only "not 100" —
+/// so on its own it is refused rather than guessed into some other role.
+fn requested_role(args: &Map<String, Json>) -> Result<Option<u8>> {
+    let role = optional_role(args, ARG_MIN_ROLE)?;
+    let public = optional_bool(args, ARG_PUBLIC)?;
+    match (role, public) {
+        (role, None) => Ok(role),
+        (None, Some(true)) => Ok(Some(ROLE_PUBLIC)),
+        (Some(role), Some(public)) if (role == ROLE_PUBLIC) == public => Ok(Some(role)),
+        (Some(role), Some(public)) => Err(Error::invalid(format!(
+            "`{ARG_PUBLIC}: {public}` and `{ARG_MIN_ROLE}: {role}` disagree: public is \
+             {ARG_MIN_ROLE} {ROLE_PUBLIC}. Send one of them"
+        ))),
+        (None, Some(false)) => Err(Error::invalid(format!(
+            "`{ARG_PUBLIC}: false` does not say who may call it; send `{ARG_MIN_ROLE}` \
+             with the least-privileged role that may (1 is admin)"
+        ))),
+    }
 }
 
 /// The declared parameters, as sent. `null` is an empty list — how a query that
@@ -963,6 +1078,59 @@ mod tests {
         // because both go through the same constructor.
         assert_eq!(query.path, "/reports/top-authors");
         assert!(query.columns.is_empty());
+    }
+
+    /// TODO F2.9/F2.10: the body and response types are arguments, kept on
+    /// an edit that does not name them, refused when misspelt, and reported.
+    #[test]
+    fn body_and_response_types_are_set_kept_and_reported() {
+        let query = build(
+            "upload",
+            None,
+            &args(&[
+                (ARG_PATH, json!("/upload")),
+                (ARG_METHOD, json!("POST")),
+                (ARG_LANGUAGE, json!("javascript")),
+                (ARG_CODE, json!("return body.length;")),
+                (ARG_BODY_TYPE, json!("bytes")),
+                (ARG_RESPONSE_TYPE, json!("Bytes")),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(query.body_type, sc_api::BodyType::Bytes);
+        assert_eq!(query.response_type, sc_api::ResponseType::Bytes);
+        let edited = build("upload", Some(&query), &args(&[])).unwrap();
+        assert_eq!(edited.body_type, sc_api::BodyType::Bytes);
+        assert_eq!(edited.response_type, sc_api::ResponseType::Bytes);
+        let reported = query_json(&edited);
+        assert_eq!(reported["body_type"], json!("bytes"));
+        assert_eq!(reported["response_type"], json!("bytes"));
+
+        let err = build(
+            "upload",
+            Some(&query),
+            &args(&[(ARG_BODY_TYPE, json!("blob"))]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(ARG_BODY_TYPE), "{err}");
+        // What the type means is checked where every query is validated: a
+        // bytes body on a GET, or from SQL, is refused by name.
+        let get = build("upload", Some(&query), &args(&[(ARG_METHOD, json!("GET"))])).unwrap();
+        let err = sc_api::validate_custom_queries(&[get], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("POST, PUT or PATCH"), "{err}");
+        let sql = build(
+            "upload",
+            Some(&query),
+            &args(&[(ARG_LANGUAGE, json!("sql")), (ARG_CODE, json!("select 1"))]),
+        )
+        .unwrap();
+        let err = sc_api::validate_custom_queries(&[sql], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("JavaScript"), "{err}");
     }
 
     #[test]

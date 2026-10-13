@@ -22,6 +22,8 @@ use sc_catalog::{Attrs, FileStoreId, TableId};
 use serde_json::Value as Json;
 use uuid::Uuid;
 
+use crate::uploads::UploadSlot;
+
 /// Identifies an application within the server: the UUID primary key of its
 /// `_fd_applications` row (design §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -505,6 +507,9 @@ pub struct Application {
     pub apis: Vec<ApiConfig>,
     /// Statically-served store subdirectories, each on a sub-path.
     pub static_dirs: Vec<StaticDir>,
+    /// Named places a client may upload a large file to, resumably, at
+    /// `{mount}/_upload/{name}` (TODO F2, §2.3).
+    pub uploads: Vec<UploadSlot>,
     /// The content-security policy (strict by default).
     pub csp: CspPolicy,
     /// Sparse per-app values that do not warrant a column of their own (the §9
@@ -513,7 +518,53 @@ pub struct Application {
     pub attributes: Attrs,
 }
 
+/// The framework name of a Saltcorn UI application, whose `/files/serve/*`
+/// serves any store file the caller may read (kept in step with
+/// `sc_viewpattern::SALTCORN_UI_FRAMEWORK`, which this crate does not depend on).
+const SALTCORN_UI: &str = "saltcorn-ui";
+
+/// Where an application serves its store files, for a code body's
+/// `file.url()` (TODO F2.8) — the same answer the upload route's
+/// `Feldspar-File-Url` gives.
+#[derive(Debug, Clone)]
+pub struct AppFileUrls {
+    static_dirs: Vec<StaticDir>,
+    saltcorn_ui: bool,
+}
+
+impl AppFileUrls {
+    /// The routes `app` serves files on.
+    pub fn of(app: &Application) -> AppFileUrls {
+        AppFileUrls {
+            static_dirs: app.static_dirs.clone(),
+            saltcorn_ui: app.framework.name == SALTCORN_UI,
+        }
+    }
+}
+
+impl sc_action::FileUrls for AppFileUrls {
+    fn file_url(&self, store: &str, path: &str) -> Option<String> {
+        let covered = self
+            .static_dirs
+            .iter()
+            .filter(|d| d.store.0 == store)
+            .filter_map(|d| d.url_for(path))
+            .min_by_key(String::len);
+        covered.or_else(|| {
+            self.saltcorn_ui
+                .then(|| format!("/files/serve/{store}/{}", path.trim_matches('/')))
+        })
+    }
+}
+
 impl Application {
+    /// The URL a store file is served at on this application: through a static
+    /// directory that covers it, or a Saltcorn UI application's `/files/serve`.
+    /// `None` when no route serves it.
+    pub fn file_url(&self, store: &str, path: &str) -> Option<String> {
+        sc_action::FileUrls::file_url(&AppFileUrls::of(self), store, path)
+    }
+
     /// Start a **new** application with the given name, subdomain and primary
     /// framework, minting a fresh [`AppId`].
     ///
@@ -539,6 +590,7 @@ impl Application {
             streams: Vec::new(),
             apis: Vec::new(),
             static_dirs: Vec::new(),
+            uploads: Vec::new(),
             csp: CspPolicy::strict(),
             attributes: Attrs::new(),
         }
@@ -590,6 +642,12 @@ impl Application {
     /// Serve a store subdirectory on a sub-path.
     pub fn with_static_dir(mut self, dir: StaticDir) -> Application {
         self.static_dirs.push(dir);
+        self
+    }
+
+    /// Declare an upload slot.
+    pub fn with_upload(mut self, slot: UploadSlot) -> Application {
+        self.uploads.push(slot);
         self
     }
 
