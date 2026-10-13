@@ -968,6 +968,10 @@ pub struct CodeCall<'a> {
     /// already resolved for the body's application. `None` imports nothing:
     /// `lib` is still in scope, and says there is no such library.
     pub libraries: Option<Arc<CodeLibraries>>,
+    /// What this run's `ratelimit` keys are counted under (TODO F4.5): the
+    /// application's id for a custom query, so two applications' `"share:x"`
+    /// are two counts. `None` is the instance's own namespace, a trigger's.
+    pub ratelimit_scope: Option<String>,
 }
 
 impl Default for CodeCall<'_> {
@@ -990,6 +994,7 @@ impl Default for CodeCall<'_> {
             max_trigger_runs: DEFAULT_MAX_TRIGGER_RUNS,
             max_module_calls: DEFAULT_MAX_MODULE_CALLS,
             libraries: None,
+            ratelimit_scope: None,
         }
     }
 }
@@ -1165,6 +1170,12 @@ pub(crate) const V1_FIELD: &str = "Field";
 /// its own variable in order to give it ours.
 #[cfg(feature = "eval")]
 pub(crate) const CONSOLE: &str = "console";
+
+/// The name the rate limiter binds under in a code body (TODO F4.5):
+/// `ratelimit.hit(key, { max, window })` and `ratelimit.check(…)`. Every body
+/// has it, on `console`'s terms — a body that binds the name keeps its own.
+#[cfg(feature = "eval")]
+pub(crate) const RATELIMIT: &str = "ratelimit";
 
 /// The console methods a body may call. Everything else on `console` — `table`,
 /// `time`, `group` — is deliberately absent: a method that silently did nothing
@@ -3837,6 +3848,52 @@ const SETUP: &str = r#"
       try { return String(v); } catch (__) { return "[unprintable]"; }
     }
   };
+  // `ratelimit` (TODO F4.5): a token bucket per key, counted on the host in
+  // this run's application's namespace. `hit` answers whether the call is
+  // under the limit; `check` throws `httpError(429)` when it is not.
+  const ratelimitOp = Deno.core.ops.op_sc_ratelimit;
+  fixed("__scMakeRatelimit", (token) => {
+    const ask = (method, key, options) => {
+      if (typeof key !== "string" || key === "") {
+        throw new TypeError(
+          "ratelimit." + method + "() takes a key first, as in " +
+          "ratelimit." + method + "(\"share:\" + token, { max: 5, window: \"15m\" })"
+        );
+      }
+      const o = options === undefined || options === null ? {} : options;
+      if (typeof o !== "object") {
+        throw new TypeError("ratelimit." + method + "()'s options are { max, window }");
+      }
+      const max = o.max;
+      if (!Number.isInteger(max) || max < 1) {
+        throw new TypeError("ratelimit." + method + "() needs max, a whole number of at least 1");
+      }
+      const window = o.window === undefined ? "1m" : o.window;
+      if (typeof window !== "string" && !(typeof window === "number" && window > 0)) {
+        throw new TypeError(
+          "ratelimit." + method + "()'s window is a duration such as \"30s\", \"15m\" or " +
+          "\"1h\", or milliseconds"
+        );
+      }
+      const reply = JSON.parse(ratelimitOp(token, key, max, String(window)));
+      if (own(reply, "error")) throw new Error(reply.error);
+      return reply;
+    };
+    return Object.freeze({
+      hit(key, options) {
+        return ask("hit", key, options).ok === true;
+      },
+      check(key, options) {
+        const reply = ask("check", key, options);
+        if (reply.ok !== true) {
+          throw httpError(429, "too many requests", {
+            error: "too many requests",
+            retry_after: reply.retry_after,
+          });
+        }
+      },
+    });
+  });
   fixed("__scMakeConsole", (token, methods) => {
     const console = {};
     for (const level of methods) {
@@ -3851,11 +3908,12 @@ const SETUP: &str = r#"
   // so a run's script carries the source only the first time and is
   // `__scInvoke(token, key, bindings)` every time after.
   const bodies = new Map();
-  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsLive, wantsV1, wantsConsole, wantsLib, body) => {
+  fixed("__scDefine", (key, wantsDb, wantsFetch, wantsFs, wantsTrigger, wantsModFn, wantsLive, wantsV1, wantsConsole, wantsRatelimit, wantsLib, body) => {
     bodies.set(key, {
       body: body, wantsDb: wantsDb, wantsFetch: wantsFetch, wantsFs: wantsFs,
       wantsTrigger: wantsTrigger, wantsModFn: wantsModFn, wantsLive: wantsLive,
-      wantsV1: wantsV1, wantsConsole: wantsConsole, wantsLib: wantsLib,
+      wantsV1: wantsV1, wantsConsole: wantsConsole, wantsRatelimit: wantsRatelimit,
+      wantsLib: wantsLib,
     });
   });
   // The code libraries compiled on this isolate (TODO F3.2), by content key:
@@ -4072,6 +4130,7 @@ const SETUP: &str = r#"
       // Last in the list, because it is the one handle every body may have:
       // appending it keeps every other parameter where it was.
       if (entry.wantsConsole) handles.push(__scMakeConsole(token, consoleMethods));
+      if (entry.wantsRatelimit) handles.push(__scMakeRatelimit(token));
       // `lib` after the console, and built over every handle before it: a
       // library runs with exactly what the importing run has (TODO F3.2).
       if (entry.wantsLib) {
@@ -4176,6 +4235,8 @@ struct RunState {
     live: Option<Arc<dyn LiveHost>>,
     /// The publish budget ([`MAX_LIVE_PUBLISHES`]).
     publishes_left: u32,
+    /// Where `ratelimit` counts ([`CodeCall::ratelimit_scope`]).
+    ratelimit_scope: String,
     /// How long this run may execute JavaScript without yielding, before the
     /// watchdog stops it: [`DEFAULT_JS_SLICE`], never more than its own timeout.
     /// A *fresh* window each time it resumes, not a budget it spends — the
@@ -5027,6 +5088,54 @@ fn op_sc_fail(state: &mut OpState, #[string] token: &str, #[string] message: &st
     );
 }
 
+/// One `ratelimit.hit` / `ratelimit.check` (TODO F4.5): a hit on `key` in the
+/// run's namespace, at `max` per `window` (a duration such as `"15m"`, or
+/// milliseconds). Answers `{"ok": true}`, `{"ok": false, "retry_after": s}` or
+/// `{"error": …}`. Synchronous: the limiter is an in-memory table.
+#[cfg(feature = "eval")]
+#[deno_core::op2]
+#[string]
+fn op_sc_ratelimit(
+    state: &mut OpState,
+    #[string] token: &str,
+    #[string] key: &str,
+    max: u32,
+    #[string] window: &str,
+) -> String {
+    let reply = ratelimit_hit(state, token, key, max, window);
+    serde_json::to_string(&reply).unwrap_or_else(|_| r#"{"error":"ratelimit"}"#.to_owned())
+}
+
+#[cfg(feature = "eval")]
+fn ratelimit_hit(state: &mut OpState, token: &str, key: &str, max: u32, window: &str) -> Json {
+    let scope = {
+        let Some(table) = state.try_borrow_mut::<RunTable>() else {
+            return refuse("this code body cannot use ratelimit");
+        };
+        let Some(run) = table.runs.get(token) else {
+            return refuse("this ratelimit call belongs to a code run that has already finished");
+        };
+        run.ratelimit_scope.clone()
+    };
+    if key.len() > 512 {
+        return refuse("a ratelimit key may be at most 512 bytes");
+    }
+    let window = match window.parse::<f64>() {
+        Ok(ms) if ms.is_finite() && ms > 0.0 => Duration::from_secs_f64(ms / 1000.0),
+        _ => match sc_ratelimit::parse_window(window) {
+            Ok(window) => window,
+            Err(e) => return refuse(e),
+        },
+    };
+    let rate = sc_ratelimit::Rate::new(max, window);
+    match sc_ratelimit::global().hit(&format!("code:{scope}:{key}"), rate) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(limited) => {
+            serde_json::json!({ "ok": false, "retry_after": limited.retry_after_secs() })
+        }
+    }
+}
+
 /// A run threw `httpError(status, message, body?)` (TODO F1.4): a deliberate
 /// answer, not a failure. `body` is the JSON text of the body the guest gave,
 /// or empty for none. The status is carried as given; the transport checks its
@@ -5105,6 +5214,7 @@ deno_core::extension!(
         op_sc_password_hash,
         op_sc_password_verify,
         op_sc_http_error,
+        op_sc_ratelimit,
         op_sc_respond,
         op_sc_bytes_key
     ]
@@ -5307,6 +5417,8 @@ struct CodeRun {
     max_module_calls: u32,
     /// The libraries `lib(name)` may import ([`CodeCall::libraries`]).
     libraries: Option<Arc<CodeLibraries>>,
+    /// Where `ratelimit` counts ([`CodeCall::ratelimit_scope`], resolved).
+    ratelimit_scope: String,
     /// When the wall clock this run is being measured against started — set only
     /// on a run that is being **re-queued** after its isolate was terminated
     /// under it. A second start is not a second timeout: the caller is still
@@ -5709,6 +5821,10 @@ impl CodeRuntime {
                     max_trigger_runs: call.max_trigger_runs,
                     max_module_calls: call.max_module_calls,
                     libraries: call.libraries.clone(),
+                    ratelimit_scope: call
+                        .ratelimit_scope
+                        .clone()
+                        .unwrap_or_else(|| "instance".to_owned()),
                     started: None,
                 }),
                 reply,
@@ -6442,6 +6558,7 @@ fn start_run(
                 max_module_calls: run.max_module_calls,
                 live: run.live.clone(),
                 publishes_left: MAX_LIVE_PUBLISHES,
+                ratelimit_scope: run.ratelimit_scope.clone(),
                 slice: DEFAULT_JS_SLICE.min(run.timeout),
                 // Kept until the first host call, which is exactly as long as
                 // re-running this body would provably repeat nothing.
@@ -6620,6 +6737,8 @@ struct RunScripts {
     /// `console` of its own — the console is not a capability, it is the way a
     /// body says what it is doing.
     wants_console: bool,
+    /// Whether it takes `ratelimit` (TODO F4.5), on `console`'s terms.
+    wants_ratelimit: bool,
     /// Whether it takes `lib` (TODO F3.2): every body that has not bound a
     /// `lib` of its own, last of all the handles.
     wants_lib: bool,
@@ -6769,6 +6888,12 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
     if wants_console {
         names.push(CONSOLE);
     }
+    // After the console, for the console's reason, and before the library
+    // parameters are taken: a library counts in its importer's namespace.
+    let wants_ratelimit = !call.bindings.contains_key(RATELIMIT);
+    if wants_ratelimit {
+        names.push(RATELIMIT);
+    }
     // A library imported by this run takes the handles above — the very ones
     // the guest passes the body after its bindings — and nothing else of the
     // body's: not its bindings (but `user`, which the guest passes on its own),
@@ -6811,6 +6936,7 @@ fn build_run_scripts(call: &CodeRun) -> Result<RunScripts> {
         wants_live,
         wants_v1,
         wants_console,
+        wants_ratelimit,
         wants_lib,
         library_params,
     })
@@ -7092,6 +7218,7 @@ fn build_script(
         wants_live,
         wants_v1,
         wants_console,
+        wants_ratelimit,
         wants_lib,
         library_params: _,
     } = scripts;
@@ -7115,7 +7242,7 @@ fn build_script(
         script.push_str(&format!(
             "__scDefine(\"{key:016x}\", {wants_db}, {wants_fetch}, {wants_files}, \
              {wants_triggers}, {wants_module_fns}, {wants_live}, {wants_v1}, {wants_console}, \
-             {wants_lib}, {definition});\n"
+             {wants_ratelimit}, {wants_lib}, {definition});\n"
         ));
     }
     // The token is 32 hex characters this crate minted and the key is 16 this
@@ -9008,6 +9135,7 @@ mod tests {
             max_trigger_runs: 10,
             max_module_calls: 10,
             libraries: None,
+            ratelimit_scope: "instance".to_owned(),
             schema: None,
             console: None,
             started: None,
@@ -12954,5 +13082,97 @@ mod tests {
             .expect("a syntax error");
         assert!(err.starts_with("SyntaxError"), "{err}");
         assert!(err.contains("(line 3)"), "{err}");
+    }
+}
+
+/// `ratelimit` as a body sees it (TODO F4.5): run through a real isolate.
+#[cfg(all(test, feature = "eval"))]
+mod ratelimit_tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::{CodeCall, CodeRuntime};
+
+    fn call(code: &str, scope: &str) -> CodeCall<'static> {
+        CodeCall {
+            code: code.to_owned(),
+            timeout: Some(Duration::from_secs(60)),
+            ratelimit_scope: Some(scope.to_owned()),
+            ..CodeCall::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn five_wrong_guesses_lock_one_key_and_only_that_key() {
+        let rt = CodeRuntime::with_workers(1);
+        let scope = format!("app:test-{}", std::process::id());
+        let out = rt
+            .run(call(
+                r#"
+                const opts = { max: 5, window: "15m" };
+                const a = [];
+                for (let i = 0; i < 6; i++) a.push(ratelimit.hit("share:a", opts));
+                return { a, b: ratelimit.hit("share:b", opts) };
+                "#,
+                &scope,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out["a"], json!([true, true, true, true, true, false]));
+        assert_eq!(out["b"], json!(true));
+
+        // `check` throws `httpError(429)` with the wait in its body…
+        let err = rt
+            .run(call(
+                r#"ratelimit.check("share:a", { max: 5, window: "15m" }); return "in";"#,
+                &scope,
+            ))
+            .await
+            .unwrap_err();
+        let reply = err.http_reply().expect("an httpError");
+        assert_eq!(reply.status, 429);
+        let body: serde_json::Value = serde_json::from_str(reply.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["error"], json!("too many requests"));
+        assert!(body["retry_after"].as_u64().unwrap() >= 1, "{body}");
+
+        // …and another application's `share:a` is a count of its own.
+        let other = rt
+            .run(call(
+                r#"ratelimit.check("share:a", { max: 5, window: "15m" }); return "in";"#,
+                &format!("{scope}-other"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(other, json!("in"));
+    }
+
+    #[tokio::test]
+    async fn bad_arguments_are_refused_by_name() {
+        let rt = CodeRuntime::with_workers(1);
+        for (code, expected) in [
+            (r#"ratelimit.hit("", { max: 1 })"#, "takes a key first"),
+            (r#"ratelimit.hit("k", { max: 0 })"#, "needs max"),
+            (
+                r#"ratelimit.hit("k", { max: 1, window: "a fortnight" })"#,
+                "not a window",
+            ),
+        ] {
+            let err = rt
+                .run(call(code, "app:bad-args"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{code}: {err}");
+        }
+        // A window in milliseconds works too.
+        let ok = rt
+            .run(call(
+                r#"return ratelimit.hit("ms", { max: 1, window: 500 });"#,
+                "app:ms",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(ok, json!(true));
     }
 }

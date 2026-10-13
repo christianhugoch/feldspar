@@ -17,7 +17,8 @@
 
 use crate::calc_read::CalcPlan;
 use sc_catalog::{
-    CallerContext, Catalog, DataField, DataFieldKind, SharedTx, Table, TableWrite, WriteOp,
+    CallerContext, Catalog, DataField, DataFieldKind, FileOnDelete, SharedTx, Table, TableWrite,
+    WriteOp,
 };
 use sc_db::Row;
 use sc_error::{Error, Repr, Result};
@@ -654,6 +655,7 @@ pub async fn create_row_in(
     context: Option<&CallerContext>,
     executor: &Executor,
 ) -> Result<Json> {
+    let body = &fill_defaults(catalog, table, body, context.and_then(|c| c.user.as_ref())).await?;
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
     reject_document_writes(table, obj)?;
@@ -691,6 +693,105 @@ pub async fn create_row_in(
     )
     .await;
     Ok(row)
+}
+
+/// The insert `body` with every field that has a
+/// [default expression](DataField::default_expression) and is left out, or sent
+/// as `null`, filled in from it.
+///
+/// Each expression is evaluated with `user` (the writing user's object, or
+/// `null` for none) and the row's other values in scope — the values the body
+/// gives, then the defaults already filled, in field order — under the
+/// `_insert` flag. It may follow a Key with Ⱶ and call a module function, which
+/// are fetched first, exactly as a calculated field's are.
+///
+/// Idempotent: a body whose defaulted fields are all given is returned as it
+/// is. That is what lets an ownership check fill the defaults before deciding
+/// (an `owner` defaulted to `user.id` is what the formula then grants on) and
+/// [`create_row_in`] fill them again for the callers that check nothing.
+///
+/// An expression that throws, yields a value the field's type refuses, or yields
+/// nothing (`null` or `undefined` — `user.email` with no user) for a `NOT NULL`
+/// field fails the insert naming the field, rather than leaving the database to
+/// report a null it cannot say the origin of.
+pub async fn fill_defaults(
+    catalog: &Catalog,
+    table: &Table,
+    body: &Json,
+    user: Option<&Json>,
+) -> Result<Json> {
+    let obj = require_object(body)?;
+    let missing = |f: &&DataField| {
+        f.default_expression.is_some() && obj.get(&f.base.name).is_none_or(Json::is_null)
+    };
+    if !table.fields.iter().any(|f| missing(&f)) {
+        return Ok(body.clone());
+    }
+    let failed = |field: &str, e: &dyn std::fmt::Display| {
+        Error::invalid(format!(
+            "the default value of `{}.{field}` could not be computed: {e}",
+            table.name
+        ))
+    };
+    let evaluator = catalog.formula_evaluator();
+    let shape = catalog.schema_shape()?;
+    let user: Option<std::collections::BTreeMap<String, Value>> =
+        user.and_then(Json::as_object).map(|u| {
+            u.iter()
+                .map(|(k, v)| (k.clone(), sc_expr::value_from_json(v)))
+                .collect()
+        });
+    // The row the expressions see: what the body gives, coerced as the insert
+    // will coerce it. A key that is not a stored field is left for the insert
+    // to refuse by name.
+    let mut row = std::collections::BTreeMap::new();
+    for (key, json) in obj {
+        if table
+            .field(key)
+            .is_some_and(|f| !f.is_calc() && !f.is_collab_doc())
+        {
+            row.insert(key.clone(), column_value(table, key, json)?);
+        }
+    }
+    let mut filled = obj.clone();
+    for field in table.fields.iter().filter(missing) {
+        let name = &field.base.name;
+        let Some(source) = &field.default_expression else {
+            continue;
+        };
+        let Some(evaluator) = &evaluator else {
+            return Err(failed(name, &"no formula evaluator is running"));
+        };
+        let formula = sc_expr::Formula::parse(source).map_err(|e| failed(name, &e))?;
+        let analysis = formula
+            .validate(&shape, &table.name)
+            .map_err(|e| failed(name, &e))?;
+        let mut bound = row.clone();
+        sc_catalog::prefetch_bindings(catalog, table, &analysis, &shape, &mut bound)
+            .await
+            .map_err(|e| failed(name, &e))?;
+        let call = sc_expr::FormulaCall {
+            formula,
+            op: sc_expr::Operation::Insert,
+            row: bound,
+            user: user.clone(),
+            ambient: sc_expr::AmbientValues::new(),
+        };
+        let json = evaluator
+            .eval_value(call)
+            .await
+            .map_err(|e| failed(name, &e))?;
+        if json.is_null() {
+            if field.required {
+                return Err(failed(name, &"it gave no value, and the field is required"));
+            }
+            continue;
+        }
+        let value = column_value(table, name, &json)?;
+        row.insert(name.clone(), value);
+        filled.insert(name.clone(), json);
+    }
+    Ok(Json::Object(filled))
 }
 
 /// Update the row of `table` whose primary key is `id`, returning the updated
@@ -900,6 +1001,7 @@ pub(crate) async fn delete_row_guarded_in(
         return Err(Error::not_found(format!("no row with {pk} = {id}")));
     };
     let row = row_to_json(row);
+    remove_deleted_files(catalog, table, std::slice::from_ref(&row), executor).await;
     emit(
         catalog,
         table,
@@ -928,10 +1030,11 @@ pub async fn delete_all_rows_ctx(
 ) -> Result<u64> {
     let executor = Executor::Pooled;
     let observed = catalog.observes_writes(&table.name, WriteOp::Delete);
+    let removes_files = !files_removed_on_delete(table).is_empty();
     let delete = Delete {
         table: table.name.clone(),
         filter: user_rows::delete_guard(table, context)?,
-        returning: if observed {
+        returning: if observed || removes_files {
             user_rows::projection(table)
         } else {
             // Text, because a literal goes out as a bind parameter and a
@@ -941,6 +1044,10 @@ pub async fn delete_all_rows_ctx(
         },
     };
     let rows = run_write_in(catalog, table, Statement::from(delete), context, &executor).await?;
+    if removes_files {
+        let deleted: Vec<Json> = rows.iter().map(row_to_json).collect();
+        remove_deleted_files(catalog, table, &deleted, &executor).await;
+    }
     if observed {
         for row in &rows {
             let row = row_to_json(row);
@@ -957,6 +1064,111 @@ pub async fn delete_all_rows_ctx(
         }
     }
     Ok(rows.len() as u64)
+}
+
+/// The `File` fields of `table` whose file goes with the row: `(column, store)`.
+fn files_removed_on_delete(table: &Table) -> Vec<(&str, &str)> {
+    table
+        .fields
+        .iter()
+        .filter_map(|field| match &field.kind {
+            DataFieldKind::File {
+                store,
+                on_delete: FileOnDelete::RemoveFile,
+                ..
+            } => Some((field.base.name.as_str(), store.0.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Remove the files deleted `rows` referenced through `on_delete: remove_file`
+/// fields.
+///
+/// A file another row of the table still references is kept: two rows may
+/// share a path, and the delete of one must not break the other. That check
+/// runs where the delete did, so inside a transaction it sees the transaction's
+/// own writes; on an RLS table, a row the server's connection cannot see does
+/// not count. The file itself goes only once the delete is durable: at once on
+/// the pooled path, and after the commit inside a transaction, so a rollback
+/// leaves both the row and its file. Deletes the database cascades from
+/// another table are not seen here.
+///
+/// Like a trigger's failure, a removal that fails is reported, not raised: the
+/// row is already gone, and the caller's delete succeeded.
+async fn remove_deleted_files(
+    catalog: &Catalog,
+    table: &Table,
+    rows: &[Json],
+    executor: &Executor,
+) {
+    for (column, store_name) in files_removed_on_delete(table) {
+        let store = match catalog.file_store(store_name) {
+            Ok(Some(store)) => store,
+            _ => continue,
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for row in rows {
+            let Some(path) = row
+                .get(column)
+                .and_then(Json::as_str)
+                .filter(|p| !p.is_empty())
+            else {
+                continue;
+            };
+            if !seen.insert(path.to_owned()) {
+                continue;
+            }
+            match still_referenced(catalog, table, column, path, executor).await {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "feldspar: keeping `{path}` after a delete from `{}`: checking for \
+                         other references failed: {}",
+                        table.name,
+                        sc_error::format_chain(&e)
+                    );
+                    continue;
+                }
+            }
+            let store = store.clone();
+            let path = path.to_owned();
+            let remove = async move {
+                if let Err(e) = store.delete(&path).await {
+                    eprintln!(
+                        "feldspar: removing `{path}` after its row was deleted: {}",
+                        sc_error::format_chain(&e)
+                    );
+                }
+            };
+            match executor.serving(table) {
+                Some(tx) => tx.after_commit(move || {
+                    tokio::spawn(remove);
+                }),
+                None => remove.await,
+            }
+        }
+    }
+}
+
+/// Whether some row of `table` still has `path` in `column`.
+async fn still_referenced(
+    catalog: &Catalog,
+    table: &Table,
+    column: &str,
+    path: &str,
+    executor: &Executor,
+) -> Result<bool> {
+    let filter = Expr::col(column).eq(Expr::lit(Value::Text(path.to_owned())));
+    let select = read_select(
+        catalog,
+        table,
+        &RowQuery::new().where_(Some(filter)).limit(1),
+    )?;
+    Ok(!run_read_in(catalog, table, &select, None, false, executor)
+        .await?
+        .is_empty())
 }
 
 /// Raise the event one committed write is (§10.2), if anything is listening.
@@ -1204,6 +1416,7 @@ fn validate_file_write(
         store,
         folder,
         mime_allow,
+        ..
     } = &field.kind
     else {
         return Ok(());

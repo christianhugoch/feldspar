@@ -79,6 +79,14 @@ pub struct DataField {
     /// admin UI says about a key ("this one numbers itself") is what the column
     /// actually does rather than what creating it was supposed to do.
     pub generated: Option<ColumnGenerator>,
+    /// A JavaScript expression that supplies the value when an insert leaves
+    /// this field out (or sends `null`), if one is set.
+    ///
+    /// An overlay fact, unlike [`generated`](DataField::generated): the database
+    /// knows nothing of it, and the row layer evaluates it before the `INSERT`,
+    /// with `user` (the writing user) and the row's other values in scope. Only
+    /// a `NOT NULL` field may carry one (`schema_edit` refuses it elsewhere).
+    pub default_expression: Option<String>,
     /// What the field references, if anything.
     pub kind: DataFieldKind,
 }
@@ -114,6 +122,10 @@ pub enum DataFieldKind {
         folder: Option<String>,
         /// Allowed MIME types (empty = any).
         mime_allow: Vec<String>,
+        /// What happens to the stored file when its row is deleted.
+        on_delete: FileOnDelete,
+        /// What an upload does when a file of the same name is already there.
+        on_conflict: FileOnConflict,
     },
     /// A **non-stored calculated field** (TODO Phase 8): no column on disk, only
     /// an `sc-expr` expression computed on read over the row's own fields,
@@ -128,6 +140,67 @@ pub enum DataFieldKind {
     },
 }
 
+/// What a `File` field does with its stored file when the row is deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileOnDelete {
+    /// The file stays in its store (the default): other rows, or nothing at all,
+    /// may still want it.
+    #[default]
+    Keep,
+    /// The file is removed from its store once the delete has committed, unless
+    /// another row of the table still references the same path.
+    RemoveFile,
+}
+
+impl FileOnDelete {
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileOnDelete::Keep => "keep",
+            FileOnDelete::RemoveFile => "remove_file",
+        }
+    }
+
+    /// Parse the stored and wire spelling; an empty string is the default.
+    pub fn parse(s: &str) -> Option<FileOnDelete> {
+        match s.trim() {
+            "" | "keep" => Some(FileOnDelete::Keep),
+            "remove_file" => Some(FileOnDelete::RemoveFile),
+            _ => None,
+        }
+    }
+}
+
+/// What an upload into a `File` field does when the path it would land at is
+/// already taken.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileOnConflict {
+    /// The upload replaces the file that is there (the default).
+    #[default]
+    Overwrite,
+    /// The upload gets the first free name of `name_1.ext`, `name_2.ext`, ….
+    Suffix,
+}
+
+impl FileOnConflict {
+    /// The stored and wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileOnConflict::Overwrite => "overwrite",
+            FileOnConflict::Suffix => "suffix",
+        }
+    }
+
+    /// Parse the stored and wire spelling; an empty string is the default.
+    pub fn parse(s: &str) -> Option<FileOnConflict> {
+        match s.trim() {
+            "" | "overwrite" => Some(FileOnConflict::Overwrite),
+            "suffix" => Some(FileOnConflict::Suffix),
+            _ => None,
+        }
+    }
+}
+
 impl DataField {
     /// A plain, nullable, non-unique, non-key column of the given name and type —
     /// the base to tweak with the builder methods below.
@@ -138,6 +211,7 @@ impl DataField {
             unique: false,
             primary_key: false,
             generated: None,
+            default_expression: None,
             kind: DataFieldKind::Plain,
         }
     }
@@ -170,6 +244,19 @@ impl DataField {
     pub fn generated(mut self, generator: ColumnGenerator) -> DataField {
         self.generated = Some(generator);
         self
+    }
+
+    /// Give the field a default-value expression — see
+    /// [`DataField::default_expression`].
+    pub fn default_expression(mut self, expression: impl Into<String>) -> DataField {
+        self.default_expression = Some(expression.into());
+        self
+    }
+
+    /// Whether an insert may leave this field out and still get a value: the
+    /// column fills itself in, or a default expression supplies one.
+    pub fn has_default(&self) -> bool {
+        self.generated.is_some() || self.default_expression.is_some()
     }
 
     /// This field's calculated-field expression, if it is one (Phase 8).
@@ -241,6 +328,7 @@ impl DataField {
             unique: false,
             primary_key,
             generated: col.generated.clone(),
+            default_expression: None,
             kind,
         }
     }

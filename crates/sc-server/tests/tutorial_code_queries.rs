@@ -1,7 +1,7 @@
-//! `docs/tutorial-rest-queries.md` step 11, run (TODO F1.11): the two code
-//! queries the tutorial prints, **read out of the tutorial itself**, served by
-//! a real router over a real Postgres — so the page cannot drift from what the
-//! server does.
+//! `docs/tutorial-rest-queries.md` steps 11 and 12, run (TODO F1.11, F4.6):
+//! the code queries the tutorial prints, **read out of the tutorial itself**,
+//! served by a real router over a real Postgres — so the page cannot drift
+//! from what the server does.
 //!
 //! What it walks: a role made from a terminal's point of view (`Reader`), a
 //! `POST` that declares no parameters yet receives its body (F1.1), HMAC and
@@ -51,6 +51,31 @@ fn step_11_bodies() -> (String, String) {
     let share = blocks.next().expect("shareBook's body");
     let open = blocks.next().expect("openShare's body");
     (share, open)
+}
+
+/// Step 12's blocks: the `returns` declaration and the rate limit (its two
+/// `json` blocks), and `unlockBook`'s body (its `js` block).
+fn step_12_blocks() -> (Value, sc_api::QueryRateLimit, String) {
+    let doc = include_str!("../../../docs/tutorial-rest-queries.md");
+    let step = doc
+        .split("## Step 12")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("the tutorial has a step 12");
+    let blocks = |fence: &str| -> Vec<String> {
+        step.split(fence)
+            .skip(1)
+            .map(|b| b.split("\n```").next().expect("a closed block").to_owned())
+            .collect()
+    };
+    let json_blocks = blocks("```json\n");
+    let returns = serde_json::from_str(&json_blocks[0]).expect("the returns block is JSON");
+    let limit = serde_json::from_str(&json_blocks[1]).expect("the rate limit block");
+    let unlock = blocks("```js\n")
+        .into_iter()
+        .next()
+        .expect("unlockBook's body");
+    (returns, limit, unlock)
 }
 
 async fn send(
@@ -114,6 +139,29 @@ async fn sign_in(router: &Router, email: &str) -> (String, String) {
     (cookie(&set, SESSION_COOKIE).expect("a session"), csrf)
 }
 
+/// The queries as the tutorial leaves them at the end of step 12.
+fn tutorial_queries() -> Vec<CustomQuery> {
+    let (share, open) = step_11_bodies();
+    let (returns, limit, unlock) = step_12_blocks();
+    vec![
+        CustomQuery::new("shareBook", Method::Post, "/books/share", share)
+            .language(QueryLanguage::Javascript)
+            .min_role(80)
+            .rate_limit(limit),
+        CustomQuery::new("openShare", Method::Get, "/shares/open", open)
+            .language(QueryLanguage::Javascript)
+            .min_role(ROLE_PUBLIC)
+            .returns(returns),
+        CustomQuery::new("unlockBook", Method::Get, "/books/unlock", unlock)
+            .language(QueryLanguage::Javascript)
+            .min_role(ROLE_PUBLIC)
+            .params([
+                sc_api::CustomParam::new("token", sc_api::ValueType::Text),
+                sc_api::CustomParam::new("password", sc_api::ValueType::Text),
+            ]),
+    ]
+}
+
 async fn setup() -> sc_error::Result<(Router, TestDb)> {
     let db = TestDb::new().await?;
     db.client()
@@ -150,19 +198,8 @@ async fn setup() -> sc_error::Result<(Router, TestDb)> {
     create_user(&catalog, ADMIN, PASSWORD, ROLE_ADMIN).await?;
     save_table_meta(&catalog, &TableMeta::new("books")).await?;
 
-    let (share, open) = step_11_bodies();
     let mut api = ApiConfig::new("rest", "/api");
-    set_custom_queries(
-        &mut api.config,
-        &[
-            CustomQuery::new("shareBook", Method::Post, "/books/share", share)
-                .language(QueryLanguage::Javascript)
-                .min_role(80),
-            CustomQuery::new("openShare", Method::Get, "/shares/open", open)
-                .language(QueryLanguage::Javascript)
-                .min_role(ROLE_PUBLIC),
-        ],
-    )?;
+    set_custom_queries(&mut api.config, &tutorial_queries())?;
     let app = Application::new("Library", "library", FrameworkRef::new("code"))
         .with_table(TableId("authors".to_owned()))
         .with_table(TableId("books".to_owned()))
@@ -293,5 +330,76 @@ async fn the_rest_tutorials_code_queries_run_as_printed() -> sc_error::Result<()
         status.is_client_error() && status != StatusCode::NOT_FOUND,
         "{status}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_rest_tutorials_typed_answers_and_limits_hold_as_printed() -> sc_error::Result<()> {
+    // The declared answer types the generated method.
+    let queries = tutorial_queries();
+    sc_api::validate_custom_queries(&queries, &[])?;
+    let provider = sc_api::RestProvider::project("/api", &[]).with_queries(queries.clone())?;
+    let client = sc_api::generate_client(sc_api::ApiProvider::endpoints(&provider));
+    assert!(
+        client.contains("export type OpenShareResponse = { title: string };"),
+        "{client}"
+    );
+    // `shareBook` is limited per reader; `openShare`, public and stating
+    // nothing, gets the public default.
+    let limits: Vec<_> = queries.iter().map(|q| q.effective_rate_limit()).collect();
+    assert_eq!(
+        limits[0].per_user.map(|r| r.to_string()),
+        Some("30/1h".to_owned())
+    );
+    assert_eq!(
+        limits[1].per_ip.map(|r| r.to_string()),
+        Some("60/1m".to_owned())
+    );
+
+    let (router, _db) = setup().await?;
+    let r = &router;
+
+    // Five wrong guesses at one link, then a 429 even with the right password…
+    for n in 0..5 {
+        let (status, body, _) = send(
+            r,
+            "GET",
+            "/api/books/unlock?token=1.abc&password=guess",
+            None,
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "#{n}: {body}");
+        assert_eq!(body, json!({ "error": "wrong password" }));
+    }
+    let (status, body, _) = send(
+        r,
+        "GET",
+        "/api/books/unlock?token=1.abc&password=open%20sesame",
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], json!("too many requests"));
+    assert!(
+        body["retry_after"].as_u64().is_some_and(|s| s >= 1),
+        "{body}"
+    );
+
+    // …and another link still opens.
+    let (status, body, _) = send(
+        r,
+        "GET",
+        "/api/books/unlock?token=1.xyz&password=open%20sesame",
+        None,
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "title": "Piranesi" }));
     Ok(())
 }

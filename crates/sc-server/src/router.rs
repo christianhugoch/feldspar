@@ -179,6 +179,9 @@ pub(crate) struct AppState {
     /// The largest upload (`--max-upload-bytes`): the admin file manager's and
     /// the backup upload's ceiling, and the cap on every upload slot's own.
     pub(crate) max_upload_bytes: u64,
+    /// The proxies whose `X-Forwarded-For` is believed (`--trusted-proxies`,
+    /// TODO F4.2).
+    pub(crate) trusted_proxies: Arc<sc_ratelimit::TrustedProxies>,
 }
 
 /// Build the axum router for an endpoint set, serving no applications.
@@ -288,6 +291,7 @@ pub fn build_router_with_apps(
         mcp_endpoint_tools,
         max_request_body: config.max_request_body,
         max_upload_bytes: config.max_upload_bytes,
+        trusted_proxies: Arc::new(config.trusted_proxies.clone()),
     };
     // The code body's file bounds are process-wide, like the code workers:
     // every `fs` a run is handed starts from them (TODO F2.8).
@@ -566,6 +570,7 @@ async fn upload(
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
         analytics_app: None,
+        client_ip: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
         query: Vec::new(),
         body: serde_json::Value::Null,
@@ -624,6 +629,7 @@ async fn download(
     let ctx = HandlerCtx {
         raw_body: None,
         analytics_app: None,
+        client_ip: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
         query: Vec::new(),
         body: serde_json::Value::Null,
@@ -674,6 +680,7 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
     let ctx = HandlerCtx {
         raw_body: None,
         analytics_app: None,
+        client_ip: None,
         path_params: HashMap::new(),
         query: Vec::new(),
         body: selection,
@@ -727,6 +734,7 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
         analytics_app: None,
+        client_ip: None,
         path_params: HashMap::new(),
         query: Vec::new(),
         body: Value::Null,
@@ -996,6 +1004,9 @@ async fn dispatch(
     jar: CookieJar,
     csrf: Option<axum::Extension<crate::security::CsrfToken>>,
     anonymous: Option<axum::Extension<AnonymousCaller>>,
+    // The socket's peer, when the listener attached one (an in-process
+    // request has none): what the client's address is decided from.
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     // Before `body`, and it has to be: an upgrade lives in the request's
     // extensions and must be taken while the parts are still in hand.
     MaybeUpgrade(ws): MaybeUpgrade,
@@ -1004,6 +1015,7 @@ async fn dispatch(
     body: Body,
 ) -> Response {
     let resolved = resolve_app(&state, &headers, &jar);
+    let client_ip = request_client_ip(&state, peer.map(|p| p.0.0), &headers);
     // An upload slot's tus route (§2.3), before anything reads the body: a
     // chunk is streamed into the store, under the slot's own limit rather than
     // `--max-request-body`.
@@ -1028,7 +1040,7 @@ async fn dispatch(
             let csrf = csrf.map(|axum::Extension(token)| token.0);
             let anonymous = anonymous.is_some();
             return dispatch_app(
-                &state, &app, method, &uri, &headers, jar, csrf, anonymous, ws, &body,
+                &state, &app, method, &uri, &headers, jar, csrf, anonymous, client_ip, ws, &body,
             )
             .await;
         }
@@ -1057,7 +1069,9 @@ async fn dispatch(
                 return json_error(StatusCode::METHOD_NOT_ALLOWED, "unsupported method");
             };
             match endpoints.iter().find(|e| e.method == api_method) {
-                Some(ep) => handle_api(&state, ep, params, &uri, &headers, jar, &body).await,
+                Some(ep) => {
+                    handle_api(&state, ep, params, &uri, &headers, jar, client_ip, &body).await
+                }
                 None => json_error(
                     StatusCode::METHOD_NOT_ALLOWED,
                     "method not allowed for this route",
@@ -1312,6 +1326,22 @@ fn code_request_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)
         .collect()
 }
 
+/// The address a request came from (TODO F4.2): its socket's peer, or the
+/// client a trusted proxy names in `X-Forwarded-For`. `None` for a request
+/// with no socket, which no per-IP limit then counts.
+fn request_client_ip(
+    state: &AppState,
+    peer: Option<std::net::SocketAddr>,
+    headers: &axum::http::HeaderMap,
+) -> Option<std::net::IpAddr> {
+    let forwarded: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    sc_ratelimit::client_ip(peer.map(|p| p.ip()), &forwarded, &state.trusted_proxies)
+}
+
 /// What a request's `Host` resolves to.
 enum Resolved {
     /// An application, or a run's preview of one.
@@ -1338,6 +1368,7 @@ async fn dispatch_app(
     jar: CookieJar,
     csrf: Option<String>,
     anonymous: bool,
+    client_ip: Option<std::net::IpAddr>,
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
     body: &Bytes,
 ) -> Response {
@@ -1429,6 +1460,8 @@ async fn dispatch_app(
             links: Some(sc_api::AppLinks(Arc::new(RequestLinks::new(
                 state, headers,
             )))),
+            client_ip,
+            preview: app.is_preview(),
         };
 
         // The provider enforces the endpoint's auth itself (§7), so unlike the
@@ -1529,8 +1562,10 @@ async fn dispatch_app(
         && (path == "/api" || path.starts_with("/api/"))
     {
         return with_csp(
-            dispatch_analytics_api(state, app, api_method, uri, headers, jar, anonymous, body)
-                .await,
+            dispatch_analytics_api(
+                state, app, api_method, uri, headers, jar, anonymous, client_ip, body,
+            )
+            .await,
             &csp,
         );
     }
@@ -1649,6 +1684,7 @@ async fn dispatch_analytics_api(
     headers: &axum::http::HeaderMap,
     jar: CookieJar,
     anonymous: bool,
+    client_ip: Option<std::net::IpAddr>,
     body: &Bytes,
 ) -> Response {
     use crate::analytics_app::{APP_AUTH_ENDPOINTS, APP_ENDPOINTS};
@@ -1751,6 +1787,7 @@ async fn dispatch_analytics_api(
         locale,
         raw_body: None,
         analytics_app: Some(Arc::new(scope)),
+        client_ip,
     };
     let out = match handler(ctx).await {
         Ok(resp) => {
@@ -2248,6 +2285,7 @@ pub(crate) fn with_csp(mut resp: Response, csp: &str) -> Response {
 
 /// Enforce auth, parse the request, run the handler, and apply its session
 /// action — the full API request lifecycle for one matched endpoint.
+#[allow(clippy::too_many_arguments)]
 async fn handle_api(
     state: &AppState,
     ep: &Endpoint,
@@ -2255,6 +2293,7 @@ async fn handle_api(
     uri: &Uri,
     headers: &axum::http::HeaderMap,
     jar: CookieJar,
+    client_ip: Option<std::net::IpAddr>,
     body: &Bytes,
 ) -> Response {
     // Recover the authenticated user (if any) from the session cookie.
@@ -2314,6 +2353,7 @@ async fn handle_api(
     let ctx = HandlerCtx {
         raw_body: None,
         analytics_app: None,
+        client_ip,
         path_params,
         query: parse_query(uri),
         body: parsed_body,
@@ -2407,7 +2447,17 @@ async fn apply_response(
         }
         return out;
     }
-    (status, jar, stale, Json(resp.body)).into_response()
+    // A throttled answer (TODO F4.4) says when to come back in the header a
+    // client reads, as well as in the body.
+    let retry_after = (status == StatusCode::TOO_MANY_REQUESTS)
+        .then(|| resp.body.get("retry_after").and_then(Value::as_u64))
+        .flatten();
+    let mut out = (status, jar, stale, Json(resp.body)).into_response();
+    if let Some(secs) = retry_after {
+        out.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
+    }
+    out
 }
 
 /// Apply a [`SessionAction`] to the cookie jar and the session store: the half of

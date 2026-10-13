@@ -260,6 +260,43 @@ pub struct CustomQuery {
     /// which types its client method as a `Blob` (TODO F2.9/F2.10).
     #[serde(default, skip_serializing_if = "ResponseType::is_json")]
     pub response_type: ResponseType,
+    /// What a code query's JSON answer looks like, in the small type language
+    /// of [`super::returns`] (TODO F4.1) — kept as written, so the editor shows
+    /// it back. `None` types the client method's answer as `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns: Option<Json>,
+    /// How often one caller may call it (TODO F4.3). `None` is the default:
+    /// [`DEFAULT_PUBLIC_RATE`] per IP for a public code query, nothing for
+    /// any other. A stated limit replaces the default, so `{}` turns it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<QueryRateLimit>,
+}
+
+/// A custom query's own rate limit (TODO F4.3): rates such as `"20/min"`,
+/// counted per caller address and per signed-in user. Over either, the answer
+/// is a `429` with `Retry-After`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRateLimit {
+    /// Calls per client IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_ip: Option<String>,
+    /// Calls per signed-in user. An anonymous call is counted per IP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_user: Option<String>,
+}
+
+/// The per-IP limit a public code query has when it states none (TODO F4.3):
+/// code costs more than a row read, and a public endpoint is anybody's.
+pub const DEFAULT_PUBLIC_RATE: &str = "60/min";
+
+/// The limits a call is counted against, parsed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EffectiveRateLimit {
+    /// Per client IP.
+    pub per_ip: Option<sc_ratelimit::Rate>,
+    /// Per signed-in user.
+    pub per_user: Option<sc_ratelimit::Rate>,
 }
 
 fn admin_role() -> u8 {
@@ -286,6 +323,8 @@ impl CustomQuery {
             columns: Vec::new(),
             body_type: BodyType::Json,
             response_type: ResponseType::Json,
+            returns: None,
+            rate_limit: None,
         }
     }
 
@@ -323,6 +362,45 @@ impl CustomQuery {
     pub fn response_type(mut self, response_type: ResponseType) -> CustomQuery {
         self.response_type = response_type;
         self
+    }
+
+    /// Declare what a code query returns (TODO F4.1).
+    pub fn returns(mut self, returns: Json) -> CustomQuery {
+        self.returns = Some(returns);
+        self
+    }
+
+    /// The declared response type, lowered — `None` when nothing is declared
+    /// or the declaration does not parse (which a save refuses).
+    pub fn returns_schema(&self) -> Option<TypeSchema> {
+        self.returns
+            .as_ref()
+            .and_then(|t| super::returns::parse_returns(t).ok())
+    }
+
+    /// State the query's rate limit (TODO F4.3).
+    pub fn rate_limit(mut self, rate_limit: QueryRateLimit) -> CustomQuery {
+        self.rate_limit = Some(rate_limit);
+        self
+    }
+
+    /// The limits that apply to a call: the stated ones, or the public code
+    /// query default. A rate that does not parse (which a save refuses) is no
+    /// limit.
+    pub fn effective_rate_limit(&self) -> EffectiveRateLimit {
+        let parse =
+            |r: &Option<String>| r.as_deref().and_then(|r| sc_ratelimit::Rate::parse(r).ok());
+        match &self.rate_limit {
+            Some(stated) => EffectiveRateLimit {
+                per_ip: parse(&stated.per_ip),
+                per_user: parse(&stated.per_user),
+            },
+            None if self.is_code() && self.min_role == sc_auth::ROLE_PUBLIC => EffectiveRateLimit {
+                per_ip: sc_ratelimit::Rate::parse(DEFAULT_PUBLIC_RATE).ok(),
+                per_user: None,
+            },
+            None => EffectiveRateLimit::default(),
+        }
     }
 
     /// Whether this is a JavaScript or Python body rather than SQL.
@@ -542,6 +620,37 @@ fn validate_custom_query(q: &CustomQuery, tables: &[String]) -> Result<()> {
         )));
     }
 
+    if let Some(limit) = &q.rate_limit {
+        for (what, rate) in [("per_ip", &limit.per_ip), ("per_user", &limit.per_user)] {
+            if let Some(rate) = rate {
+                sc_ratelimit::Rate::parse(rate).map_err(|e| {
+                    Error::invalid(format!(
+                        "custom query `{}`: `rate_limit.{what}`: {e}",
+                        q.name
+                    ))
+                })?;
+            }
+        }
+    }
+    if let Some(returns) = &q.returns {
+        if !q.is_code() {
+            return Err(Error::invalid(format!(
+                "custom query `{}` declares `returns`, but a SQL query is typed by the \
+                 columns the database describes; remove it",
+                q.name
+            )));
+        }
+        if q.response_type == ResponseType::Bytes {
+            return Err(Error::invalid(format!(
+                "custom query `{}` answers with bytes, so it has no JSON response to \
+                 declare; remove `returns`",
+                q.name
+            )));
+        }
+        super::returns::parse_returns(returns)
+            .map_err(|e| Error::invalid(format!("custom query `{}`: {e}", q.name)))?;
+    }
+
     if q.is_code() {
         check_code(q)
     } else {
@@ -680,8 +789,9 @@ pub fn custom_endpoint(mount: &str, query: &CustomQuery) -> Endpoint {
     path = path.lit(&query.path);
 
     let output = if query.is_code() {
-        // A body returns what it returns: an object, a list, a number.
-        TypeSchema::json()
+        // A body returns what it returns: an object, a list, a number — unless
+        // its author declared which (TODO F4.1).
+        query.returns_schema().unwrap_or_else(TypeSchema::json)
     } else if query.columns.is_empty() {
         // Not described (yet): opaque JSON is honest, an invented shape is not.
         TypeSchema::array(TypeSchema::json())
@@ -1288,5 +1398,92 @@ mod tests {
             !custom_endpoint("api", &query()).open_args,
             "SQL declares what it reads"
         );
+    }
+
+    #[test]
+    fn a_declared_return_type_types_the_endpoint_and_is_validated() {
+        let typed = js_query().returns(json!({ "object": { "greeting": "string" } }));
+        validate_custom_queries(std::slice::from_ref(&typed), &[]).unwrap();
+        assert_eq!(
+            custom_endpoint("api", &typed).output,
+            TypeSchema::struct_of([StructField::new("greeting", TypeSchema::text())])
+        );
+        // Without one, a code query answers opaque JSON, as before.
+        assert_eq!(
+            custom_endpoint("api", &js_query()).output,
+            TypeSchema::json()
+        );
+
+        let cases = [
+            (
+                query().returns(json!("int")),
+                "SQL query is typed by the columns",
+            ),
+            (
+                js_query()
+                    .returns(json!("int"))
+                    .response_type(ResponseType::Bytes),
+                "answers with bytes",
+            ),
+            (
+                js_query().returns(json!({ "array": "integer" })),
+                "returns.array: `integer`",
+            ),
+        ];
+        for (q, expected) in cases {
+            let msg = validate_custom_queries(&[q], &[]).unwrap_err().to_string();
+            assert!(msg.contains(expected), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_public_code_query_is_rate_limited_by_default_and_a_stated_limit_replaces_it() {
+        use sc_ratelimit::Rate;
+        let public = js_query().min_role(sc_auth::ROLE_PUBLIC);
+        assert_eq!(
+            public.effective_rate_limit().per_ip,
+            Some(Rate::per_minute(60))
+        );
+        assert_eq!(public.effective_rate_limit().per_user, None);
+        // Not public, or not code: no default.
+        assert_eq!(
+            js_query().effective_rate_limit(),
+            EffectiveRateLimit::default()
+        );
+        assert_eq!(
+            query()
+                .min_role(sc_auth::ROLE_PUBLIC)
+                .effective_rate_limit(),
+            EffectiveRateLimit::default()
+        );
+        // A stated limit is the whole limit; `{}` is none.
+        let stated = public.clone().rate_limit(QueryRateLimit {
+            per_ip: Some("20/min".into()),
+            per_user: Some("5/15m".into()),
+        });
+        validate_custom_queries(std::slice::from_ref(&stated), &[]).unwrap();
+        assert_eq!(
+            stated.effective_rate_limit().per_ip,
+            Some(Rate::per_minute(20))
+        );
+        assert_eq!(
+            stated.effective_rate_limit().per_user,
+            Some(Rate::new(5, std::time::Duration::from_secs(900)))
+        );
+        let off = public.clone().rate_limit(QueryRateLimit::default());
+        assert_eq!(off.effective_rate_limit(), EffectiveRateLimit::default());
+
+        let bad = public.rate_limit(QueryRateLimit {
+            per_ip: Some("lots".into()),
+            per_user: None,
+        });
+        let msg = validate_custom_queries(&[bad], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("rate_limit.per_ip"), "{msg}");
+        // It survives a round trip through the stored form.
+        let stored: CustomQuery =
+            serde_json::from_value(serde_json::to_value(&stated).unwrap()).unwrap();
+        assert_eq!(stored, stated);
     }
 }

@@ -505,6 +505,8 @@ async fn a_file_field_cannot_be_written_outside_its_store() -> Result<()> {
         store: FileStoreId("uploads".to_owned()),
         folder: Some("covers".to_owned()),
         mime_allow: vec!["image/png".to_owned()],
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     });
     save_field_meta(&cat, &meta).await?;
     let api = provider(&cat)?;

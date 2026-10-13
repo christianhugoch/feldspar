@@ -915,5 +915,8 @@
   "Nobody has this stream open.": "没有人打开此流。",
   "User": "用户",
   "Shown fields": "显示的字段",
-  "anonymous": "匿名"
+  "anonymous": "匿名",
+  "Default value": "默认值",
+  "A JavaScript expression used when a new row leaves this field empty. It can use": "当新行将此字段留空时使用的 JavaScript 表达式。它可以使用",
+  "(the user writing the row) and the row's other fields.": "（写入该行的用户）以及该行的其他字段。"
 }

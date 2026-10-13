@@ -711,6 +711,9 @@ pub async fn insert_row_as(
     executor: &rows::Executor,
 ) -> Result<Json> {
     let caller = caller_context_at(role, user).chained(chain.to_vec());
+    // The defaults first, so the check below sees the row that would be
+    // written — an `owner` defaulted to `user.id` is what grants it.
+    let body = &rows::fill_defaults(cat, table, body, caller.user.as_ref()).await?;
     // The database enforces this table's ownership: the policies decide, and a
     // `WITH CHECK` they refuse surfaces from `run_in_context`.
     if table.rls_enabled {

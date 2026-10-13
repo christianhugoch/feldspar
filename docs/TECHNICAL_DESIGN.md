@@ -2433,6 +2433,15 @@ base64, UTF-8 or SHA again:
   hash comes back — otherwise its continuation would run with the watchdog disarmed.
   `verify` against something that is not a PHC hash throws rather than answering `false`.
 
+- `ratelimit.hit(key, { max, window })` / `ratelimit.check(…)` (TODO F4.5) — a token bucket per
+  key in the process's limiter (§13.4, "Rate limits"). Unlike the globals above it is a **per-run
+  handle**, passed after `console` (`__scMakeRatelimit(token)`) and so also to a library the run
+  imports: the run token is how the op (`op_sc_ratelimit`, synchronous) finds the run's
+  namespace — `app:<id>` for a custom query, `instance` for a trigger — so two applications'
+  `"share:abc"` are two counts. `hit` answers whether the call was under the limit; `check`
+  throws `httpError(429, …)` with `{ error, retry_after }`. `window` is `"30s"`, `"15m"`, `"1h"`,
+  `"1d"` or milliseconds (default a minute). A body that binds `ratelimit` keeps its own.
+
 We do not pull in `deno_web` or `deno_crypto`: without a snapshot their JavaScript is read from
 build-machine paths.
 
@@ -6648,13 +6657,47 @@ query string. A custom query is a request handler, so it is given the request's 
 their own names.
 
 What does not carry over: a code query is not prepared, so it has no described columns and its
-client method returns opaque JSON; there is no one-statement rule and no `:name` rule; and
+client method returns opaque JSON unless it declares `returns` (below); there is no one-statement rule and no `:name` rule; and
 **`GET` is not read-only** — a body writes through the row layer one statement at a time, as a
 trigger's does, and those writes raise table events. A body's syntax is checked when it runs,
 not on save (the save path has no engine, §10.1). Python is offered by the admin editor only
 where `getPythonStatus` says the server can run it, and `describeCustomQuery` refuses a Python
 query on one that cannot. `save_api_query` takes a `language`; `feldspar api add-query` adds SQL
 queries only.
+
+**A declared answer (TODO F4.1).** A JSON-answering code query may carry `returns`: a small
+JSON type language (`sc_api::rest::returns`) — a scalar name (`"string"`, `"int"`, `"float"`,
+`"bool"`, `"json"`, and the other wire names such as `"uuid"` and `"timestamp"`), or
+`{object: {name: T, …}}`, `{array: T}`, `{optional: T}`, `{union: [T, …]}` — stored as written
+and lowered to a `TypeSchema` (which gained `Union` for it). The projected endpoint's output is
+that schema, so the generator emits `XResponse` from it; an `optional` property is `name?: T |
+null`. `returns` on a SQL query (typed by its columns) or a `bytes` response is refused on save,
+as is a declaration that does not parse, naming where (`returns.object.tags.array: …`).
+**It is not enforced on live calls**: a mismatch would turn an answer the client could have used
+into an error. A request that reached a run's **preview** (`MountedApp::is_preview`, carried as
+`ApiRequest::preview`) has a successful JSON answer checked (`check_returns`), and a mismatch is
+logged as a warning naming the query and the first place the value strays
+(`$.items[2].name: expected text, got 3`); the response goes out unchanged. `describe_applications`
+reports the declaration as `returns` and a SQL query's described columns as `columns`.
+
+**Rate limits (TODO F4.2–F4.4).** One in-memory token-bucket limiter per process
+(`sc-ratelimit`, `sc_ratelimit::global()`), keyed by string; a rate `max/window` is a bucket of
+`max` that refills at `max/window`, so `20/min` allows a burst of 20 and then one every three
+seconds. Counts are not persisted or shared between nodes: a limit is a brake, not an account.
+The client address is `ApiRequest::client_ip`: the socket's peer, or — only when that peer is in
+`--trusted-proxies` (addresses and CIDR blocks) — the rightmost `X-Forwarded-For` entry that is
+not itself a trusted proxy; a request with no socket (in-process) has none, and no per-IP limit
+counts it. A custom query's `rate_limit: { per_ip, per_user }` (rates such as `"20/min"`,
+`"5/15m"`) is checked before it runs, SQL or code; over either is a **429** `{ error,
+retry_after }` with `Retry-After`. A **public code query with no `rate_limit`** gets
+`DEFAULT_PUBLIC_RATE` (60/min) per IP; a stated limit replaces the default, so `{}` is none.
+Keys are `query:<app>:<mount>:<name>:ip:<addr>` / `:user:<id>`. Sign-in — an application's
+`login`, the admin's and an Analytics application's — and an application's `forgot-password` are
+throttled in `sc_api::throttle`: login 20/min per IP (every attempt) and 10 **failures** per 15
+min per email; reset 10/hour per IP and 5/hour per email. The email is normalised and counted
+before the account is looked up, and an unknown address fails exactly as a wrong password does,
+so the 429 says nothing about which addresses have accounts. A code body's own limiter is
+`ratelimit` (§10.1). The admin editor and `save_api_query` set `returns` and `rate_limit`.
 
 The tutorial for both halves of this provider is
 [tutorial-rest-queries.md](./tutorial-rest-queries.md).

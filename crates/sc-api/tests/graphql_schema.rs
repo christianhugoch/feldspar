@@ -79,6 +79,8 @@ fn file(name: &str) -> DataField {
         store: FileStoreId("uploads".to_owned()),
         folder: None,
         mime_allow: Vec::new(),
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     };
     field
 }

@@ -619,3 +619,124 @@ async fn an_upload_into_a_private_folder_is_its_uploaders_alone() -> sc_error::R
 
     Ok(())
 }
+
+/// A File field set up in the admin to keep what is there (`on_conflict:
+/// suffix`) and to take its file with the row (`on_delete: remove_file`): a
+/// second upload of the same name lands beside the first, and deleting a row
+/// removes its file — unless another row still references it.
+#[tokio::test]
+async fn a_file_field_can_suffix_taken_names_and_remove_files_with_their_rows()
+-> sc_error::Result<()> {
+    let tmp = TempDir::new("options");
+    let (router, catalog, uploads, _db) = setup(&tmp).await?;
+    create_user(&catalog, "admin@example.com", "admin-pw", ROLE_ADMIN).await?;
+    let mut admin = Client::new(router.clone(), BASE_DOMAIN);
+    assert_eq!(
+        admin.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
+
+    // The field editor is offered both options, as pick-lists.
+    let (status, types) = admin.send("GET", "/api/field-types", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let file = types
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "file")
+        .expect("the file kind");
+    let spec = file["config_spec"].to_string();
+    assert!(
+        spec.contains("remove_file") && spec.contains("suffix"),
+        "{spec}"
+    );
+
+    let (status, body) = admin
+        .send(
+            "POST",
+            "/api/tables/posts/fields",
+            Some(json!({
+                "name": "attachment", "type": "text",
+                "kind": { "type": "file", "store": "uploads", "folder": "docs",
+                          "on_delete": "remove_file", "on_conflict": "suffix" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, fields) = admin.send("GET", "/api/tables/posts/fields", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let attachment = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "attachment")
+        .expect("the field");
+    assert_eq!(attachment["kind"]["on_delete"], json!("remove_file"));
+    assert_eq!(attachment["kind"]["on_conflict"], json!("suffix"));
+
+    let mut app = Client::new(router.clone(), APP_HOST);
+    assert_eq!(
+        app.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
+    // Three rows; the same filename uploaded into two of them.
+    let mut ids = Vec::new();
+    for title in ["one", "two", "three"] {
+        let (status, created) = app
+            .send("POST", "/api/posts", Some(json!({ "title": title })))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        ids.push(created["id"].as_i64().unwrap());
+    }
+    let (status, first) = app
+        .upload(
+            &format!("/api/posts/{}/attachment/notes.txt", ids[0]),
+            "text/plain",
+            b"first",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["attachment"], json!("docs/notes.txt"));
+    let (status, second) = app
+        .upload(
+            &format!("/api/posts/{}/attachment/notes.txt", ids[1]),
+            "text/plain",
+            b"second",
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_eq!(second["attachment"], json!("docs/notes_1.txt"));
+    assert_eq!(&uploads.read("docs/notes.txt").await?[..], b"first");
+    assert_eq!(&uploads.read("docs/notes_1.txt").await?[..], b"second");
+
+    // The third row shares the second's file.
+    let (status, body) = app
+        .send(
+            "PUT",
+            &format!("/api/posts/{}", ids[2]),
+            Some(json!({ "attachment": "docs/notes_1.txt" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Deleting the first row takes its file with it.
+    let (status, _) = app
+        .send("DELETE", &format!("/api/posts/{}", ids[0]), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(uploads.stat("docs/notes.txt").await?.is_none());
+
+    // The second row's file is still the third's, so it stays…
+    let (status, _) = app
+        .send("DELETE", &format!("/api/posts/{}", ids[1]), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(uploads.stat("docs/notes_1.txt").await?.is_some());
+    // …until the last row referencing it goes.
+    let (status, _) = app
+        .send("DELETE", &format!("/api/posts/{}", ids[2]), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(uploads.stat("docs/notes_1.txt").await?.is_none());
+    Ok(())
+}

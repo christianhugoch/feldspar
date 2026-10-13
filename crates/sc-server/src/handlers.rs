@@ -46,13 +46,13 @@ use sc_auth::{
 };
 use sc_catalog::{
     ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind,
-    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileStoreId,
-    SchemaProjection, Table, TableConstraint, TableId, check_db_connection_saveable,
-    check_file_store_saveable, connect_db_connection, connect_file_store_def, delete_db_connection,
-    delete_file_store, file_kind_config_spec, key_kind_config_spec, list_db_connections,
-    list_field_meta_for_table, list_file_stores, load_db_connection, load_db_connection_by_name,
-    load_file_store, load_file_store_by_name, orphan_table_meta, resolve_options,
-    save_db_connection, save_file_store,
+    DbConnectionDef, DbConnectionId, FIELD_META_TABLE, FieldId, FieldMeta, FileOnConflict,
+    FileOnDelete, FileStoreId, SchemaProjection, Table, TableConstraint, TableId,
+    check_db_connection_saveable, check_file_store_saveable, connect_db_connection,
+    connect_file_store_def, delete_db_connection, delete_file_store, file_kind_config_spec,
+    key_kind_config_spec, list_db_connections, list_field_meta_for_table, list_file_stores,
+    load_db_connection, load_db_connection_by_name, load_file_store, load_file_store_by_name,
+    orphan_table_meta, resolve_options, save_db_connection, save_file_store,
 };
 use sc_catalog::{
     NEW_LOCAL_FILE_STORE, choosable_file_stores, file_store_settings, unique_file_store_name,
@@ -189,12 +189,27 @@ pub fn admin_handlers_with(
         }
     });
 
+    /// A throttled sign-in (TODO F4.4): `429 {error, retry_after}`, which the
+    /// router also sends as `Retry-After`.
+    fn too_many_requests(limited: sc_ratelimit::Limited) -> HandlerResponse {
+        HandlerResponse::ok(json!({
+            "error": "too many requests",
+            "retry_after": limited.retry_after_secs(),
+        }))
+        .with_status(429)
+    }
+
     reg.register("login", {
         let catalog = catalog.clone();
         move |ctx| {
             let catalog = catalog.clone();
             async move {
                 let (email, password) = credentials(&ctx.body)?;
+                // Throttled per IP and per email, as an application's login
+                // is (TODO F4.4), before the account is looked up.
+                if let Err(limited) = sc_api::throttle::login_attempt(ctx.client_ip, &email) {
+                    return Ok(too_many_requests(limited));
+                }
                 // The admin host signs in admins. An Analytics application
                 // (analytics TODO A9.3) signs in anybody whose password is
                 // right, on its own host: its role floor is what decides what
@@ -208,7 +223,10 @@ pub fn admin_handlers_with(
                         let body = user_summary_json(&user);
                         Ok(HandlerResponse::start_session(user, body))
                     }
-                    None => Err(Error::auth(t!(ctx.locale, "invalid credentials"))),
+                    None => {
+                        sc_api::throttle::login_failed(&email);
+                        Err(Error::auth(t!(ctx.locale, "invalid credentials")))
+                    }
                 }
             }
         }
@@ -756,6 +774,8 @@ pub fn admin_handlers_with(
                         .get("required")
                         .filter(|v| !v.is_null())
                         .and_then(Json::as_bool),
+                    // Back to the whole-object reading: omitted clears it.
+                    default_expression: Some(optional_str(obj, "default_expression")),
                 };
                 schema_edit::apply(
                     &catalog,
@@ -6364,6 +6384,8 @@ pub fn admin_handlers_with(
                     // The admin's GraphQL explorer builds no emailed links.
                     headers: Vec::new(),
                     links: None,
+                    client_ip: None,
+                    preview: false,
                 };
                 let resp = provider.handle(req, &catalog, ctx.user.as_ref()).await?;
                 Ok(HandlerResponse::ok(resp.body).with_status(resp.status))
@@ -6857,6 +6879,9 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
         // row form needs it to leave a blank one out of the insert instead of
         // sending a null the `NOT NULL` would refuse.
         "generated": field.generated.is_some(),
+        // The expression an insert that leaves the field out takes its value
+        // from (empty for none) — so the row form can leave a blank one out too.
+        "default_expression": field.default_expression.as_deref().unwrap_or(""),
         "kind": field_kind_json(&field.kind),
         "attributes": Json::Object(field.base.attributes.clone()),
     })
@@ -6977,11 +7002,15 @@ fn field_kind_json(kind: &DataFieldKind) -> Json {
             store,
             folder,
             mime_allow,
+            on_delete,
+            on_conflict,
         } => json!({
             "type": "file",
             "store": store.0,
             "folder": folder,
             "mime_allow": mime_allow,
+            "on_delete": on_delete.as_str(),
+            "on_conflict": on_conflict.as_str(),
         }),
         DataFieldKind::Calc { expression } => json!({
             "type": "calc",
@@ -7015,6 +7044,8 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
             store: FileStoreId(non_empty_str_field(kind, "store")?.to_owned()),
             folder: optional_present_str(kind, "folder"),
             mime_allow: string_array_field(kind, "mime_allow")?,
+            on_delete: file_option(kind, "on_delete", FileOnDelete::parse)?,
+            on_conflict: file_option(kind, "on_conflict", FileOnConflict::parse)?,
         }),
         "key" => Ok(DataFieldKind::Key {
             target_table: TableId(non_empty_str_field(kind, "target_table")?.to_owned()),
@@ -7027,6 +7058,23 @@ fn parse_field_kind(obj: &Map<String, Json>) -> Result<DataFieldKind> {
             expression: non_empty_str_field(kind, "expression")?.to_owned(),
         }),
         other => Err(Error::invalid(format!("unknown field kind `{other}`"))),
+    }
+}
+
+/// A File kind's enumerated option: its default when absent, null or empty.
+fn file_option<T: Default>(
+    kind: &Map<String, Json>,
+    key: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T> {
+    match kind.get(key) {
+        None | Some(Json::Null) => Ok(T::default()),
+        Some(Json::String(s)) => {
+            parse(s).ok_or_else(|| Error::invalid(format!("`{key}` does not take `{s}`")))
+        }
+        Some(other) => Err(Error::invalid(format!(
+            "`{key}` should be a string, got {other}"
+        ))),
     }
 }
 
@@ -7046,6 +7094,7 @@ pub(crate) fn field_spec_from_body(obj: &Map<String, Json>) -> Result<schema_edi
         primary_key: optional_bool(obj, "primary_key")?,
         kind: parse_field_kind(obj)?,
         attributes: attributes_field(obj)?,
+        default_expression: Some(optional_str(obj, "default_expression")),
     })
 }
 

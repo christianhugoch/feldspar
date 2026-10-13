@@ -4620,6 +4620,9 @@ fn field_schema() -> TypeSchema {
         // the column read back by introspection, not a wish recorded when it was
         // created, so it stays true however the field came to be a key.
         StructField::new("generated", TypeSchema::bool()),
+        // The JavaScript expression an insert that leaves the field out takes
+        // its value from, with `user` and the row in scope; empty for none.
+        StructField::new("default_expression", TypeSchema::text()),
         // `kind` and `attributes` are opaque JSON: their shape depends on the
         // field's kind and type, which the API cannot know statically any more
         // than it can a framework's settings.
@@ -4647,6 +4650,11 @@ fn create_field_schema() -> TypeSchema {
         // primary key at all, and gets one when a field says it is one. More
         // than one field may, and then the key is composite in field order.
         StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
+        // Only on a required field (`schema_edit::FieldSpec::default_expression`).
+        StructField::new(
+            "default_expression",
+            TypeSchema::optional(TypeSchema::text()),
+        ),
     ])
 }
 
@@ -4720,6 +4728,11 @@ fn field_settings_schema() -> TypeSchema {
         StructField::new("description", TypeSchema::optional(TypeSchema::text())),
         StructField::new("primary_key", TypeSchema::optional(TypeSchema::bool())),
         StructField::new("required", TypeSchema::optional(TypeSchema::bool())),
+        // Whole-object like the rest: omitted or empty clears it.
+        StructField::new(
+            "default_expression",
+            TypeSchema::optional(TypeSchema::text()),
+        ),
     ])
 }
 
@@ -6273,6 +6286,16 @@ fn custom_query_input_schema() -> TypeSchema {
         // `json` when absent (TODO F2.9/F2.10).
         StructField::new("body_type", TypeSchema::optional(TypeSchema::text())),
         StructField::new("response_type", TypeSchema::optional(TypeSchema::text())),
+        // A code query's declared answer, in the `returns` type language
+        // (TODO F4.1), and its rate limit (TODO F4.3).
+        StructField::new("returns", TypeSchema::optional(TypeSchema::json())),
+        StructField::new(
+            "rate_limit",
+            TypeSchema::optional(TypeSchema::struct_of([
+                StructField::new("per_ip", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("per_user", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
         StructField::new(
             "tables",
             TypeSchema::optional(TypeSchema::array(TypeSchema::text())),

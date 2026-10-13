@@ -210,6 +210,7 @@ mod tests {
             unique: false,
             primary_key: false,
             generated: None,
+            default_expression: None,
             kind: DataFieldKind::Calc {
                 expression: expr.into(),
             },

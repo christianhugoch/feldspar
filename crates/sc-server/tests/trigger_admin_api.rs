@@ -900,6 +900,8 @@ async fn an_actions_settings_can_depend_on_the_triggers_table() -> sc_error::Res
             store: sc_catalog::FileStoreId("uploads".to_owned()),
             folder: None,
             mime_allow: Vec::new(),
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         }),
     )
     .await?;

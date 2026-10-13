@@ -211,6 +211,8 @@ async fn a_file_field_reference_is_caught_by_the_catalog_delete_check() -> Resul
         store: FileStoreId("uploads".to_owned()),
         folder: None,
         mime_allow: Vec::new(),
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     });
     save_field_meta(&cat, &meta).await?;
 

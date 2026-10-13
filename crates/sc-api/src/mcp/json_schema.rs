@@ -53,6 +53,9 @@ pub fn json_schema(schema: &TypeSchema) -> Json {
         }
         TypeSchema::Array(inner) => json!({ "type": "array", "items": json_schema(inner) }),
         TypeSchema::Optional(inner) => nullable(json_schema(inner)),
+        TypeSchema::Union(alternatives) => {
+            json!({ "anyOf": alternatives.iter().map(json_schema).collect::<Vec<_>>() })
+        }
     }
 }
 
@@ -118,6 +121,13 @@ fn nullable(schema: Json) -> Json {
         return json!({ "anyOf": [schema, { "type": "null" }] });
     };
     match map.get("type") {
+        // A union is made nullable by one more alternative.
+        None if map.get("anyOf").is_some_and(Json::is_array) => {
+            if let Some(Json::Array(alternatives)) = map.get_mut("anyOf") {
+                alternatives.push(json!({ "type": "null" }));
+            }
+            Json::Object(map)
+        }
         None => Json::Object(map),
         Some(Json::String(single)) => {
             let widened = json!([single, "null"]);

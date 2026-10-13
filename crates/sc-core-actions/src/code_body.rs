@@ -194,6 +194,9 @@ pub struct Hosts<'a> {
     console: Option<ConsoleSink>,
     /// The code libraries this run's `lib()` may import (TODO F3.2).
     libraries: Option<Arc<sc_expr::CodeLibraries>>,
+    /// Where this run's `ratelimit` counts (TODO F4.5): its application, or
+    /// the instance for a trigger.
+    ratelimit_scope: Option<String>,
 }
 
 impl<'a> Hosts<'a> {
@@ -279,6 +282,8 @@ impl<'a> Hosts<'a> {
             // over the instance's for a custom query, the instance's alone for
             // a trigger.
             libraries: ctx.catalog.code_libraries_for(ctx.application()),
+            // Keys a body counts with `ratelimit` are its application's own.
+            ratelimit_scope: ctx.application().map(|id| format!("app:{id}")),
         }
     }
 
@@ -324,6 +329,7 @@ impl<'a> Hosts<'a> {
             console: self.console.clone(),
             timeout,
             libraries: self.libraries.clone(),
+            ratelimit_scope: self.ratelimit_scope.clone(),
             ..CodeCall::default()
         }
     }

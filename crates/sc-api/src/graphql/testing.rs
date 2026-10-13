@@ -189,6 +189,8 @@ pub fn file_field(name: &str, store: &str) -> DataField {
         store: FileStoreId(store.to_owned()),
         folder: None,
         mime_allow: Vec::new(),
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     };
     field
 }

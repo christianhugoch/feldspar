@@ -190,8 +190,9 @@ impl StructField {
 /// The shape of an endpoint's input or output value (design §13.1).
 ///
 /// This is enough to describe arguments and results and to emit TypeScript
-/// types: a scalar, a record of named fields, a homogeneous array, or an
-/// optional (nullable) wrapper. Richer shapes (unions, maps) are added when a
+/// types: a scalar, a record of named fields, a homogeneous array, an
+/// optional (nullable) wrapper, or a union of alternatives (a code query's
+/// declared `returns`, TODO F4.1). Richer shapes (maps) are added when a
 /// concrete endpoint needs them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,6 +206,9 @@ pub enum TypeSchema {
     Array(Box<TypeSchema>),
     /// An optional value: present-or-`null`.
     Optional(Box<TypeSchema>),
+    /// One of several shapes — TS `A | B`. Only a code query's declared
+    /// `returns` makes one (TODO F4.1); nothing derived from a table does.
+    Union(Vec<TypeSchema>),
 }
 
 impl TypeSchema {
@@ -226,6 +230,11 @@ impl TypeSchema {
     /// An optional (nullable) `inner`.
     pub fn optional(inner: TypeSchema) -> TypeSchema {
         TypeSchema::Optional(Box::new(inner))
+    }
+
+    /// A union of `alternatives`.
+    pub fn union(alternatives: impl IntoIterator<Item = TypeSchema>) -> TypeSchema {
+        TypeSchema::Union(alternatives.into_iter().collect())
     }
 
     /// The canonical "no value" schema — an empty struct. Used for endpoints

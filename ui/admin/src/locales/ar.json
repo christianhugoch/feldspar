@@ -988,5 +988,8 @@
   "Nobody has this stream open.": "لا أحد يفتح هذا التدفق.",
   "User": "المستخدم",
   "Shown fields": "الحقول المعروضة",
-  "anonymous": "مجهول"
+  "anonymous": "مجهول",
+  "Default value": "القيمة الافتراضية",
+  "A JavaScript expression used when a new row leaves this field empty. It can use": "تعبير JavaScript يُستخدم عندما يترك صف جديد هذا الحقل فارغًا. يمكنه استخدام",
+  "(the user writing the row) and the row's other fields.": "(المستخدم الذي يكتب الصف) وحقول الصف الأخرى."
 }

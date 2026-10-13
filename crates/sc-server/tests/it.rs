@@ -161,6 +161,8 @@ mod provided_tables_api;
 mod public_datasets_api;
 #[path = "python_trigger.rs"]
 mod python_trigger;
+#[path = "query_contracts.rs"]
+mod query_contracts;
 #[path = "rls_enforcement.rs"]
 mod rls_enforcement;
 #[path = "router.rs"]

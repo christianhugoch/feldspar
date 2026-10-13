@@ -81,6 +81,8 @@ async fn a_rich_type_and_a_file_field_survive_reloads() -> Result<()> {
         store: FileStoreId("uploads".into()),
         folder: Some("covers".into()),
         mime_allow: vec!["image/png".into()],
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     });
     save_field_meta(&cat, &cover).await?;
 
@@ -108,6 +110,8 @@ fn assert_cover_and_title(cat: &Catalog) -> Result<()> {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec!["image/png".into()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         }
     );
     // `pages` — no overlay — stays a plain int.

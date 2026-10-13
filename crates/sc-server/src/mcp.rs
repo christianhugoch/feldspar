@@ -597,6 +597,7 @@ impl AdminTool for EndpointTool {
             // tier 3, and a JSON arguments object has no shape for them.
             raw_body: None,
             analytics_app: None,
+            client_ip: None,
             // An MCP call is a coding agent's, not a browser's: there is no
             // `Accept-Language` and no cookie to negotiate from, so it is served
             // in the installation's default language (§16.1).
@@ -721,6 +722,7 @@ impl sc_catalog::AdminHost for AdminHandlers {
             user,
             raw_body: None,
             analytics_app: None,
+            client_ip: None,
             locale: sc_i18n::active().default_locale().clone(),
         })
         .await?;

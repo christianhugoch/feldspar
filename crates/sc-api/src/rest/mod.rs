@@ -58,7 +58,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use sc_auth::{User, authenticate};
-use sc_catalog::{CallerContext, Catalog, DataFieldKind, Table, load_file_store_by_name};
+use sc_catalog::{
+    CallerContext, Catalog, DataFieldKind, FileOnConflict, Table, load_file_store_by_name,
+};
 use sc_error::{Error, Repr, Result};
 use sc_expr::{JsEvaluator, Operation};
 use sc_files::{
@@ -71,6 +73,7 @@ use serde_json::{Value as Json, json};
 pub mod custom;
 pub mod password;
 mod query;
+pub mod returns;
 
 use custom::CustomQuery;
 
@@ -759,6 +762,9 @@ impl RestProvider {
         cat: &Catalog,
         user: Option<&User>,
     ) -> Result<ApiResponse> {
+        if let Err(limited) = self.custom_rate_limit(query, req, user) {
+            return Ok(ApiResponse::too_many_requests(limited));
+        }
         if let Some(action) = query.language.action() {
             return self.run_custom_code(query, action, req, cat, user).await;
         }
@@ -770,6 +776,34 @@ impl RestProvider {
             sc_catalog::run_in_context(cat, &caller, &statement).await
         }?;
         Ok(ApiResponse::ok(custom::rows_to_json(&rows)))
+    }
+
+    /// Count one call of `query` against its rate limits (TODO F4.3): per
+    /// client IP when the transport knows it, and per signed-in user. Both are
+    /// hit, so a refused call still counts against the other — a caller over
+    /// either limit is turned away, and spending one does not refill the other.
+    fn custom_rate_limit(
+        &self,
+        query: &CustomQuery,
+        req: &ApiRequest,
+        user: Option<&User>,
+    ) -> std::result::Result<(), sc_ratelimit::Limited> {
+        let limits = query.effective_rate_limit();
+        let scope = format!(
+            "query:{}:{}:{}",
+            self.application.map(|a| a.to_string()).unwrap_or_default(),
+            self.mount,
+            query.name
+        );
+        let limiter = sc_ratelimit::global();
+        let mut outcome = Ok(());
+        if let (Some(rate), Some(ip)) = (limits.per_ip, req.client_ip) {
+            outcome = outcome.and(limiter.hit(&format!("{scope}:ip:{ip}"), rate));
+        }
+        if let (Some(rate), Some(user)) = (limits.per_user, user) {
+            outcome = outcome.and(limiter.hit(&format!("{scope}:user:{}", user.id), rate));
+        }
+        outcome
     }
 
     /// Run a JavaScript or Python custom query (§13.4): its body, on the
@@ -809,7 +843,13 @@ impl RestProvider {
                 self.file_urls.clone(),
             )
             .await;
-        code_answer(result, cat, user).await
+        let answer = code_answer(result, cat, user).await;
+        if req.preview
+            && let Ok(response) = &answer
+        {
+            check_preview_returns(query, response);
+        }
+        answer
     }
 
     /// Inject the JavaScript evaluator ownership formulas' reified path runs
@@ -909,15 +949,22 @@ impl RestProvider {
     /// Uses the same `authenticate` the admin login does, but for **any** role —
     /// an app's users are not admins. A bad password and an unknown user are the
     /// same `401` with the same message: distinguishing them would tell an
-    /// attacker which emails are registered.
-    async fn login(&self, body: &Json, cat: &Catalog) -> Result<ApiResponse> {
-        let (email, password) = credentials(body)?;
+    /// attacker which emails are registered. Throttled per IP and per email
+    /// (TODO F4.4, [`crate::throttle`]), with the same `429` for either.
+    async fn login(&self, req: &ApiRequest, cat: &Catalog) -> Result<ApiResponse> {
+        let (email, password) = credentials(&req.body)?;
+        if let Err(limited) = crate::throttle::login_attempt(req.client_ip, &email) {
+            return Ok(ApiResponse::too_many_requests(limited));
+        }
         match authenticate(cat, &email, &password).await? {
             Some(user) => {
                 let summary = user_summary_json(&user);
                 Ok(ApiResponse::start_session(user, summary))
             }
-            None => Ok(ApiResponse::error(401, "invalid credentials")),
+            None => {
+                crate::throttle::login_failed(&email);
+                Ok(ApiResponse::error(401, "invalid credentials"))
+            }
         }
     }
 
@@ -1022,6 +1069,9 @@ impl RestProvider {
                 Ok(_) => self.list(cat, &table, req, user).await?,
             },
             RestOp::Create => {
+                // The defaults first, so the ownership check sees the row that
+                // would be written (`rows::fill_defaults`).
+                let body = &rows::fill_defaults(cat, &table, body, caller.user.as_ref()).await?;
                 match formula(meets_write) {
                     Err(()) => return Ok(forbidden(user)),
                     Ok(None) => {}
@@ -1143,7 +1193,7 @@ impl RestProvider {
                         let existing = self
                             .owned_row(cat, &table, f, Operation::Update, user, id)
                             .await?;
-                        let (_, folder, _) = file_field(&table, field)?;
+                        let (_, folder, _, _) = file_field(&table, field)?;
                         let path = upload_path(folder, filename);
                         let mut changes = std::collections::BTreeMap::new();
                         changes.insert(field.clone(), Value::Text(path));
@@ -1404,6 +1454,26 @@ async fn code_answer(
     Ok(ApiResponse::with_status(status, body))
 }
 
+/// In a run's preview, check a code query's successful JSON answer against its
+/// declared `returns` (TODO F4.1) and log a warning naming the first mismatch.
+/// The response goes out unchanged either way: the contract is for the
+/// author to hear about, not for the caller to be refused over.
+fn check_preview_returns(query: &CustomQuery, response: &ApiResponse) {
+    if !(200..300).contains(&response.status) || response.raw.is_some() || response.file.is_some() {
+        return;
+    }
+    let Some(schema) = query.returns_schema() else {
+        return;
+    };
+    if let Some(mismatch) = returns::check_returns(&schema, &response.body) {
+        sc_log::log_warn!(
+            "warning: custom query `{}` returned a value that does not match its \
+             declared `returns`: {mismatch}",
+            query.name
+        );
+    }
+}
+
 /// A body's `response(...)`, as the transport serves it: JSON with a status
 /// and headers (TODO F1.4), raw bytes under their content type (TODO F2.9), or
 /// a store file through the shared file response builder (TODO F2.10).
@@ -1570,7 +1640,7 @@ async fn download_inner(
     caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
-    let (store_name, _, _) = file_field(table, field)?;
+    let (store_name, ..) = file_field(table, field)?;
     let path = match rows::read_field_ctx(cat, table, field, id, context).await? {
         Value::Text(path) if !path.is_empty() => path,
         // The row exists but references nothing: for the caller that is "no
@@ -1639,7 +1709,7 @@ async fn upload_inner(
     caller: &FileCaller,
     context: Option<&CallerContext>,
 ) -> Result<ApiResponse> {
-    let (store_name, folder, mime_allow) = file_field(table, field)?;
+    let (store_name, folder, mime_allow, on_conflict) = file_field(table, field)?;
     let Some(data) = data else {
         return Err(Error::invalid(
             "expected the request body to be the file's bytes, sent with its own \
@@ -1652,6 +1722,15 @@ async fn upload_inner(
 
     let store = cat.require_file_store(store_name)?;
     let floor = store_floor(cat, store_name).await?;
+    // A field that keeps what is there gives the upload the first free
+    // `name_n.ext` instead: nothing is replaced, so there is nothing to check
+    // write access to below. Only the name changes, never the folder, so the
+    // ownership pre-check's view of the row (taken on the unsuffixed path)
+    // still holds for any rule about where the file lives.
+    let path = match on_conflict {
+        FileOnConflict::Overwrite => path,
+        FileOnConflict::Suffix => sc_files::free_path(store.as_ref(), &path).await?,
+    };
     // The field's folder is where the admin said uploads land, and the table's
     // write rule already let this caller upload, so a **new** file needs nothing
     // more — that is what makes a min_role 1 folder a private drop box (§2.1).
@@ -1675,13 +1754,14 @@ async fn upload_inner(
     Ok(ApiResponse::with_status(201, updated))
 }
 
-/// The `File` kind parameters of `field` on `table`: its store name, folder and
-/// MIME allow-list. A field that is not (or is no longer) a `File` is a
-/// not-found — the endpoint's own existence is what claimed otherwise.
+/// The `File` kind parameters of `field` on `table`: its store name, folder,
+/// MIME allow-list and what an upload does with a name that is taken. A field
+/// that is not (or is no longer) a `File` is a not-found — the endpoint's own
+/// existence is what claimed otherwise.
 fn file_field<'t>(
     table: &'t Table,
     field: &str,
-) -> Result<(&'t str, Option<&'t str>, &'t [String])> {
+) -> Result<(&'t str, Option<&'t str>, &'t [String], FileOnConflict)> {
     let found = table
         .field(field)
         .ok_or_else(|| Error::not_found(format!("`{}` has no field `{field}`", table.name)))?;
@@ -1690,7 +1770,14 @@ fn file_field<'t>(
             store,
             folder,
             mime_allow,
-        } => Ok((store.0.as_str(), folder.as_deref(), mime_allow.as_slice())),
+            on_conflict,
+            ..
+        } => Ok((
+            store.0.as_str(),
+            folder.as_deref(),
+            mime_allow.as_slice(),
+            *on_conflict,
+        )),
         _ => Err(Error::not_found(format!(
             "`{}.{field}` is not a File field",
             table.name
@@ -1759,6 +1846,8 @@ impl ApiProvider for RestProvider {
             raw: None,
             headers: Vec::new(),
             links: None,
+            client_ip: None,
+            preview: false,
         };
         Some(self.run_custom_code(query, action, &req, cat, user).await)
     }
@@ -1784,7 +1873,7 @@ impl RestProvider {
         }
 
         match &endpoint.handler {
-            HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req, cat).await,
             HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req.body, cat).await,
             HandlerRef::Named(_) if endpoint.name == INVITE && self.invite_min_role.is_some() => {
                 password::invite(&req, cat, user, self.mailer.as_ref()).await
@@ -1884,7 +1973,7 @@ fn resource_model(table: &Table, exposed: &std::collections::HashSet<&str>) -> R
             .map_or(ValueType::Text, ValueType::from_basic);
         let mut rf = ResourceField::new(&field.base.name, ty);
         rf.required = field.required;
-        rf.has_default = field.generated.is_some();
+        rf.has_default = field.has_default();
         rf.primary_key = field.primary_key;
         // A calculated field is read on the way out and refused on the way in
         // (`rows::reject_calc_writes`), so it belongs in a row and in no write.
@@ -1962,6 +2051,8 @@ mod tests {
             store: FileStoreId("uploads".to_owned()),
             folder: Some("covers".to_owned()),
             mime_allow: vec!["image/png".to_owned()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         };
         t.fields.push(cover);
         t
@@ -2110,6 +2201,8 @@ mod tests {
             store: FileStoreId("uploads".to_owned()),
             folder: None,
             mime_allow: vec![],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         };
         t.fields.push(attachment);
         let p = RestProvider::project("/api", &[t]);

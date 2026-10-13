@@ -49,7 +49,9 @@ use serde_json::Value as Json;
 use uuid::Uuid;
 
 use crate::catalog::Catalog;
-use crate::field::{DataField, DataFieldKind, FieldId, FileStoreId, TableId};
+use crate::field::{
+    DataField, DataFieldKind, FieldId, FileOnConflict, FileOnDelete, FileStoreId, TableId,
+};
 use crate::file_stores::QUERY_FILE_STORES;
 use crate::table::Table;
 
@@ -90,7 +92,12 @@ const KEY_SUMMARY_FIELD: &str = "summary_field";
 const KEY_STORE: &str = "store";
 const KEY_FOLDER: &str = "folder";
 const KEY_MIME_ALLOW: &str = "mime_allow";
+const KEY_ON_DELETE: &str = "on_delete";
+const KEY_ON_CONFLICT: &str = "on_conflict";
 const KEY_EXPRESSION: &str = "expression";
+// Not a kind's parameter, but stored the same way: any kind but `calc` may have
+// one, and it is the overlay's, never the rich type's.
+const KEY_DEFAULT_EXPRESSION: &str = "default_expression";
 
 /// The settings a `File` field kind takes, as the same [`FormField`] vocabulary a
 /// rich type's attributes and a framework's config use (§6.2) — so the admin UI
@@ -109,6 +116,22 @@ pub fn file_kind_config_spec() -> Vec<FormField> {
             .server_query(QUERY_FILE_STORES),
         FormField::new(KEY_FOLDER, BasicType::Text).label("Folder (optional)"),
         FormField::new(KEY_MIME_ALLOW, BasicType::Json).label("Allowed MIME types (optional)"),
+        FormField::new(KEY_ON_DELETE, BasicType::Text)
+            .label("When the row is deleted")
+            .options([
+                FileOnDelete::Keep.as_str(),
+                FileOnDelete::RemoveFile.as_str(),
+            ])
+            .default_value(FileOnDelete::Keep.as_str())
+            .sublabel("remove_file deletes the stored file too, unless another row uses it"),
+        FormField::new(KEY_ON_CONFLICT, BasicType::Text)
+            .label("When an upload's name is taken")
+            .options([
+                FileOnConflict::Overwrite.as_str(),
+                FileOnConflict::Suffix.as_str(),
+            ])
+            .default_value(FileOnConflict::Overwrite.as_str())
+            .sublabel("suffix stores it as name_1.ext, name_2.ext, … instead of replacing"),
     ]
 }
 
@@ -185,6 +208,10 @@ pub struct FieldMeta {
     /// `Integer`'s `min`/`max`. The kind's parameters are stored beside these but
     /// are modelled in [`kind`](FieldMeta::kind), not here.
     pub attributes: Attrs,
+    /// A JavaScript expression supplying the value when an insert leaves the
+    /// field out — see [`DataField::default_expression`]. Stored in the
+    /// attributes bag under a reserved key, like a kind's parameters.
+    pub default_expression: Option<String>,
 }
 
 impl FieldMeta {
@@ -200,6 +227,7 @@ impl FieldMeta {
             type_name: None,
             kind: DataFieldKind::Plain,
             attributes: Attrs::new(),
+            default_expression: None,
         }
     }
 
@@ -224,6 +252,12 @@ impl FieldMeta {
     /// Set the field's kind (and its parameters).
     pub fn kind(mut self, kind: DataFieldKind) -> FieldMeta {
         self.kind = kind;
+        self
+    }
+
+    /// Give the field a default-value expression.
+    pub fn default_expression(mut self, expression: impl Into<String>) -> FieldMeta {
+        self.default_expression = Some(expression.into());
         self
     }
 
@@ -474,6 +508,12 @@ fn kind_discriminant(kind: &DataFieldKind) -> &'static str {
 /// omitted rather than stored as null, keeping the bag sparse (§9).
 fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
     let mut obj = meta.attributes.clone();
+    if let Some(expression) = &meta.default_expression {
+        obj.insert(
+            KEY_DEFAULT_EXPRESSION.to_owned(),
+            Json::String(expression.clone()),
+        );
+    }
     match &meta.kind {
         DataFieldKind::Plain => {}
         DataFieldKind::Key {
@@ -500,8 +540,16 @@ fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
             store,
             folder,
             mime_allow,
+            on_delete,
+            on_conflict,
         } => {
             obj.insert(KEY_STORE.to_owned(), Json::String(store.0.clone()));
+            if *on_delete != FileOnDelete::default() {
+                obj.insert(KEY_ON_DELETE.to_owned(), json_str(on_delete.as_str()));
+            }
+            if *on_conflict != FileOnConflict::default() {
+                obj.insert(KEY_ON_CONFLICT.to_owned(), json_str(on_conflict.as_str()));
+            }
             if let Some(folder) = folder {
                 obj.insert(KEY_FOLDER.to_owned(), Json::String(folder.clone()));
             }
@@ -527,7 +575,13 @@ fn field_meta_from_row(row: &Row) -> Result<FieldMeta> {
     let table_name = text(row, COL_TABLE)?;
     let field_name = text(row, COL_NAME)?;
     let discriminant = text(row, COL_KIND)?;
-    let stored_attributes = object(row, COL_ATTRIBUTES)?;
+    let mut stored_attributes = object(row, COL_ATTRIBUTES)?;
+    let default_expression = take_optional_text(
+        &mut stored_attributes,
+        KEY_DEFAULT_EXPRESSION,
+        &table_name,
+        &field_name,
+    )?;
     let (kind, attributes) =
         kind_and_attributes(&discriminant, stored_attributes, &table_name, &field_name)?;
 
@@ -538,6 +592,7 @@ fn field_meta_from_row(row: &Row) -> Result<FieldMeta> {
         type_name: nullable_text(row, COL_TYPE)?,
         kind,
         attributes,
+        default_expression,
         table_name,
         field_name,
     })
@@ -563,6 +618,14 @@ fn kind_and_attributes(
             store: FileStoreId(take_text(&mut attrs, KEY_STORE, table, field)?),
             folder: take_optional_text(&mut attrs, KEY_FOLDER, table, field)?,
             mime_allow: take_string_array(&mut attrs, KEY_MIME_ALLOW, table, field)?,
+            on_delete: take_choice(&mut attrs, KEY_ON_DELETE, table, field, FileOnDelete::parse)?,
+            on_conflict: take_choice(
+                &mut attrs,
+                KEY_ON_CONFLICT,
+                table,
+                field,
+                FileOnConflict::parse,
+            )?,
         },
         KIND_CALC => DataFieldKind::Calc {
             expression: take_text(&mut attrs, KEY_EXPRESSION, table, field)?,
@@ -585,6 +648,32 @@ fn take_text(attrs: &mut Attrs, key: &str, table: &str, field: &str) -> Result<S
         Some(other) => Err(bad_param(table, field, key, "a string", Some(&other))),
         None => Err(bad_param(table, field, key, "a string", None)),
     }
+}
+
+/// Remove an optional enumerated parameter, its default when absent.
+fn take_choice<T: Default>(
+    attrs: &mut Attrs,
+    key: &str,
+    table: &str,
+    field: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<T> {
+    match take_optional_text(attrs, key, table, field)? {
+        None => Ok(T::default()),
+        Some(text) => parse(&text).ok_or_else(|| {
+            bad_param(
+                table,
+                field,
+                key,
+                "a known option",
+                Some(&Json::String(text)),
+            )
+        }),
+    }
+}
+
+fn json_str(s: &str) -> Json {
+    Json::String(s.to_owned())
 }
 
 /// Remove an optional string parameter: `None` when absent or null, an error when
@@ -816,6 +905,8 @@ mod tests {
             store: FileStoreId("uploads".into()),
             folder: Some("covers".into()),
             mime_allow: vec!["image/png".into(), "image/jpeg".into()],
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         };
         let meta = FieldMeta::new("books", "cover").kind(file.clone());
 
@@ -829,6 +920,44 @@ mod tests {
             residual.is_empty(),
             "no attributes beyond the kind's params"
         );
+    }
+
+    #[test]
+    fn a_file_kinds_delete_and_conflict_options_round_trip_and_default_sparse() {
+        let file = DataFieldKind::File {
+            store: FileStoreId("uploads".into()),
+            folder: None,
+            mime_allow: Vec::new(),
+            on_delete: FileOnDelete::RemoveFile,
+            on_conflict: FileOnConflict::Suffix,
+        };
+        let stored = attributes_for_storage(&FieldMeta::new("books", "cover").kind(file.clone()));
+        assert_eq!(stored.get(KEY_ON_DELETE), Some(&json_str("remove_file")));
+        assert_eq!(stored.get(KEY_ON_CONFLICT), Some(&json_str("suffix")));
+        let (kind, residual) = kind_and_attributes(KIND_FILE, stored, "books", "cover").unwrap();
+        assert_eq!(kind, file);
+        assert!(residual.is_empty());
+
+        // The defaults are not stored at all, and an absent option reads back
+        // as its default.
+        let plain = DataFieldKind::File {
+            store: FileStoreId("uploads".into()),
+            folder: None,
+            mime_allow: Vec::new(),
+            on_delete: FileOnDelete::Keep,
+            on_conflict: FileOnConflict::Overwrite,
+        };
+        let stored = attributes_for_storage(&FieldMeta::new("books", "cover").kind(plain.clone()));
+        assert!(!stored.contains_key(KEY_ON_DELETE) && !stored.contains_key(KEY_ON_CONFLICT));
+        let (kind, _) = kind_and_attributes(KIND_FILE, stored, "books", "cover").unwrap();
+        assert_eq!(kind, plain);
+
+        // An unknown option is a named error, not a silent default.
+        let mut bad = Attrs::new();
+        bad.insert(KEY_STORE.into(), json_str("uploads"));
+        bad.insert(KEY_ON_DELETE.into(), json_str("shred"));
+        let err = kind_and_attributes(KIND_FILE, bad, "books", "cover").unwrap_err();
+        assert!(err.to_string().contains(KEY_ON_DELETE), "{err}");
     }
 
     #[test]

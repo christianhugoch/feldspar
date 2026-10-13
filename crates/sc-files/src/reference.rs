@@ -84,9 +84,53 @@ pub fn validate_file_path(path: &str, folder: Option<&str>, mime_allow: &[String
     Ok(())
 }
 
+/// How many suffixed names [`free_path`] tries before giving up.
+const MAX_SUFFIX: u32 = 10_000;
+
+/// `path` with `_n` before its extension: `docs/report.pdf` → `docs/report_2.pdf`,
+/// `notes` → `notes_2`. A leading dot (`.env`) is a name, not an extension, and
+/// only the last extension moves (`a.tar.gz` → `a.tar_2.gz`).
+pub fn suffixed_path(path: &str, n: u32) -> String {
+    let (dir, name) = match path.rfind('/') {
+        Some(at) => path.split_at(at + 1),
+        None => ("", path),
+    };
+    match name.rfind('.').filter(|&at| at > 0) {
+        Some(at) => format!("{dir}{}_{n}{}", &name[..at], &name[at..]),
+        None => format!("{dir}{name}_{n}"),
+    }
+}
+
+/// The first of `path`, `name_1.ext`, `name_2.ext`, … that nothing in `store`
+/// occupies — where an upload lands when its field keeps what is there rather
+/// than replacing it. Two uploads racing for the same name may still pick the
+/// same one; the window is the gap between this check and the write.
+pub async fn free_path(store: &dyn crate::FileStore, path: &str) -> Result<String> {
+    if store.stat(path).await?.is_none() {
+        return Ok(path.to_owned());
+    }
+    for n in 1..=MAX_SUFFIX {
+        let candidate = suffixed_path(path, n);
+        if store.stat(&candidate).await?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    Err(Error::invalid(format!(
+        "`{path}` and its first {MAX_SUFFIX} suffixed names are all taken"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suffix_goes_before_the_last_extension() {
+        assert_eq!(suffixed_path("docs/report.pdf", 1), "docs/report_1.pdf");
+        assert_eq!(suffixed_path("a.tar.gz", 2), "a.tar_2.gz");
+        assert_eq!(suffixed_path("notes", 3), "notes_3");
+        assert_eq!(suffixed_path("dir.d/.env", 1), "dir.d/.env_1");
+    }
 
     #[test]
     fn mime_is_inferred_from_the_extension() {

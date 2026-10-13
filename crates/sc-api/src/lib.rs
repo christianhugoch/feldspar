@@ -52,6 +52,7 @@ pub mod public_datasets;
 pub mod query_string;
 pub mod rows;
 pub mod schema_edit;
+pub mod throttle;
 
 mod admin;
 mod analytics;
@@ -87,14 +88,15 @@ pub use provider::{
 };
 pub use resource::{ResourceField, ResourceFile, ResourceModel, ResourceOps};
 pub use rest::custom::{
-    BodyType, CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, QueryColumn,
-    QueryLanguage, ResponseType, custom_queries, describe_custom_query, set_custom_queries,
-    undeclared_params_note, validate_custom_queries,
+    BodyType, CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, DEFAULT_PUBLIC_RATE,
+    EffectiveRateLimit, QueryColumn, QueryLanguage, QueryRateLimit, ResponseType, custom_queries,
+    describe_custom_query, set_custom_queries, undeclared_params_note, validate_custom_queries,
 };
 pub use rest::password::{
     CFG_ALLOW_INVITE as REST_CFG_ALLOW_INVITE, CFG_INVITE_MIN_ROLE as REST_CFG_INVITE_MIN_ROLE,
     SET_PASSWORD_PAGE, rest_invite_min_role,
 };
+pub use rest::returns::{check_returns, parse_returns};
 pub use rest::{
     AUTH_ENDPOINTS, CFG_ALLOW_SIGNUP as REST_CFG_ALLOW_SIGNUP,
     CFG_NEW_USER_ROLE as REST_CFG_NEW_USER_ROLE, DEFAULT_ROW_CAP as REST_DEFAULT_ROW_CAP,

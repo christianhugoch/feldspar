@@ -231,6 +231,50 @@ export async function exercise(file: File): Promise<void> {
 }
 "#;
 
+/// A usage module for code queries that declare what they return (TODO F4.1):
+/// an object, an array and a union, each a named `XResponse` the method
+/// resolves to — and a wrong use of each is a type error.
+const RETURNS_USAGE_TS: &str = r#"
+import {
+  createClient,
+  type ProfileResponse,
+  type RecentResponse,
+  type LookupResponse,
+} from "./client";
+
+export async function exercise(): Promise<void> {
+  const api = createClient({});
+
+  const profile: ProfileResponse = await api.profile();
+  const id: string = profile.id;
+  const visits: number = profile.visits;
+  const tags: string[] = profile.tags;
+  const nick: string | null | undefined = profile.nick;
+  // @ts-expect-error `visits` is a number
+  const wrong: string = profile.visits;
+  // @ts-expect-error there is no such property
+  void profile.nope;
+
+  const recent: RecentResponse = await api.recent();
+  const first: { title: string; at: string } | undefined = recent[0];
+  // @ts-expect-error an element has no `body`
+  void recent[0].body;
+
+  const found: LookupResponse = await api.lookup({ q: "x" });
+  if (typeof found === "number") {
+    const n: number = found;
+    void n;
+  } else {
+    const message: string = found.error;
+    void message;
+  }
+  // @ts-expect-error the union is not always an object
+  void found.error;
+
+  void id; void visits; void tags; void nick; void wrong; void first;
+}
+"#;
+
 /// A usage module for an application that exposes three streams — one of each
 /// [`ElementType`](sc_stream::ElementType) shape (TODO "Streams" §10; TODO.md
 /// "Live updates" L1.9).
@@ -575,6 +619,39 @@ fn generated_code_query_client_type_checks() -> std::io::Result<()> {
 }
 
 #[test]
+fn generated_returns_client_type_checks() -> std::io::Result<()> {
+    use sc_api::{CustomQuery, Method, QueryLanguage};
+    use serde_json::json;
+
+    let js = |name: &str, path: &str| {
+        CustomQuery::new(name, Method::Get, path, "return {};").language(QueryLanguage::Javascript)
+    };
+    let provider = RestProvider::project("/api", &[])
+        .with_queries(vec![
+            js("profile", "/profile").returns(json!({ "object": {
+                "id": "uuid",
+                "visits": "int",
+                "tags": { "array": "string" },
+                "nick": { "optional": "string" },
+            }})),
+            js("recent", "/recent").returns(json!({ "array": { "object": {
+                "title": "string",
+                "at": "timestamp",
+            }}})),
+            js("lookup", "/lookup")
+                .params([sc_api::CustomParam::new("q", sc_api::ValueType::Text)])
+                .returns(json!({ "union": ["int", { "object": { "error": "string" } }] })),
+        ])
+        .expect("valid queries");
+    let client_ts = sc_api::generate_client(ApiProvider::endpoints(&provider));
+    assert!(
+        client_ts.contains("export type LookupResponse = number | { error: string };"),
+        "{client_ts}"
+    );
+    type_check("returns", &client_ts, RETURNS_USAGE_TS)
+}
+
+#[test]
 fn generated_bytes_and_uploads_client_type_checks() -> std::io::Result<()> {
     use sc_api::{
         BodyType, CustomParam, CustomQuery, Method, QueryLanguage, ResponseType, UploadExport,
@@ -644,6 +721,8 @@ fn blog_tables() -> Vec<Table> {
         store: FileStoreId("uploads".to_owned()),
         folder: None,
         mime_allow: Vec::new(),
+        on_delete: Default::default(),
+        on_conflict: Default::default(),
     };
     let mut word_count = DataField::plain("word_count", TypeRef::Basic(BasicType::Int));
     word_count.kind = DataFieldKind::Calc {

@@ -1333,6 +1333,18 @@ returns a `Blob`, and a GET also gets `api.<name>Url(params)` for `<img src>`, \
 so this is how to write a **custom download rule** — a password-protected or \
 expiring share: look the share up, `crypto.password.verify` the password, \
 `throw httpError(403)` or return the file. The check runs on every request.\n\
+- **Type the answer:** save a JSON-answering code query with `returns` — \
+e.g. `{\"object\": {\"id\": \"uuid\", \"tags\": {\"array\": \"string\"}}}`, \
+with `{\"optional\": T}` and `{\"union\": [T, …]}` — and its client method \
+resolves to a typed `<Name>Response` instead of `unknown`. A preview logs a \
+warning when an answer does not match.\n\
+- **Rate limits:** a public code query is limited to 60 calls a minute per IP \
+unless its `rate_limit` (`{ per_ip: \"20/min\", per_user: \"1000/day\" }`, \
+`{}` for none) says otherwise; over it, the call is a 429 with `Retry-After`. \
+For a limit per something else — guesses per share, invitations per user — \
+`ratelimit.check(\"share:\" + token, { max: 5, window: \"15m\" })` throws \
+`httpError(429)` when over, and `ratelimit.hit(…)` answers true or false. \
+Sign-in and password reset are already throttled.\n\
 - **Large files in code:** `file.read({ offset, length })`, `append`, \
 `dir.file(\"out\").concat([part0, part1])`, `sha256()` and `url()` work \
 host-side; never read a big file whole.\n\
@@ -2849,7 +2861,7 @@ impl<'a> CreateForm<'a> {
                 continue;
             }
             if field.primary_key {
-                let optional = modelled.map_or(!field.required || field.generated.is_some(), |f| {
+                let optional = modelled.map_or(!field.required || field.has_default(), |f| {
                     f.optional_on_insert()
                 });
                 if optional {
@@ -4980,6 +4992,10 @@ export function Board({ id }: { id: number }) {
             "api.<name>Url(params)",
             "crypto.password.verify",
             "file.read({ offset, length })",
+            // TODO F4: typed answers and rate limits.
+            "`returns`",
+            "`rate_limit`",
+            "ratelimit.check(",
         ] {
             assert!(
                 agents.contains(needle),

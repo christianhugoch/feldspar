@@ -224,9 +224,15 @@ const ARG_BODY_TYPE: &str = "body_type";
 /// `json` (default) or `bytes`: what a code query answers with, which types
 /// its client method (TODO F2.9/F2.10).
 const ARG_RESPONSE_TYPE: &str = "response_type";
+/// A code query's declared JSON response type (TODO F4.1).
+const ARG_RETURNS: &str = "returns";
+/// `{ per_ip, per_user }` rates (TODO F4.3).
+const ARG_RATE_LIMIT: &str = "rate_limit";
 
 /// The arguments [`save`] accepts.
-const SAVE_ARGS: [&str; 13] = [
+const SAVE_ARGS: [&str; 15] = [
+    ARG_RETURNS,
+    ARG_RATE_LIMIT,
     ARG_PUBLIC,
     ARG_BODY_TYPE,
     ARG_RESPONSE_TYPE,
@@ -381,10 +387,27 @@ fn query_json(query: &CustomQuery) -> Json {
         // Server-written, never declared: the shape the database said this
         // statement produces when it was last saved. Empty means it has not been
         // described, which types the response as opaque rather than lying.
-        "returns": query.columns
+        "columns": query.columns
             .iter()
             .map(|c| json!({ "name": c.name, "type": c.ty.name() }))
             .collect::<Vec<_>>(),
+        // A code query's declared response type, as written (TODO F4.1).
+        "returns": query.returns.clone().unwrap_or(Json::Null),
+        // The stated limit, or null for the default; and what applies.
+        "rate_limit": query.rate_limit.as_ref().map(|r| json!({
+            "per_ip": r.per_ip,
+            "per_user": r.per_user,
+        })),
+        "effective_rate_limit": effective_rate_limit_json(query),
+    })
+}
+
+/// The limits a call to `query` is counted against, as rates.
+fn effective_rate_limit_json(query: &CustomQuery) -> Json {
+    let e = query.effective_rate_limit();
+    json!({
+        "per_ip": e.per_ip.map(|r| r.to_string()),
+        "per_user": e.per_user.map(|r| r.to_string()),
     })
 }
 
@@ -441,10 +464,15 @@ fn save_description(grants: &Grants) -> String {
          - **The statement is prepared against the database.** A query that will \
            not prepare comes back with the database's own message and nothing is \
            saved; one that will is stored with the columns the database says it \
-           returns, which come back in `returns`.\n\n\
+           returns, which come back in `columns`.\n\
+         - **A code query declares its answer in `{ARG_RETURNS}`**, so the client \
+           method is typed rather than `unknown`.\n\
+         - **A public code query is limited to {default_rate} per IP** unless \
+           `{ARG_RATE_LIMIT}` says otherwise.\n\n\
          {permitted} {access}\n\n\
          The saved query is served by the running application after its next \
-         build — say that rather than reporting a live endpoint."
+         build — say that rather than reporting a live endpoint.",
+        default_rate = sc_api::DEFAULT_PUBLIC_RATE,
     )
 }
 
@@ -552,6 +580,36 @@ fn save_parameters() -> Json {
                      size limit — this is how to write a custom download rule \
                      (password-protected or expiring shares).",
                 "enum": ["json", "bytes"],
+            },
+            ARG_RETURNS: {
+                "description":
+                    "`javascript`/`python` with a JSON answer only: what the body \
+                     returns, so the generated client's method resolves to a typed \
+                     `<Name>Response` instead of `unknown`. A type is a name — \
+                     \"string\", \"int\", \"float\", \"bool\", \"json\" (anything), \
+                     \"uuid\", \"date\", \"timestamp\" — or one of \
+                     {\"object\": {\"prop\": T, …}}, {\"array\": T}, \
+                     {\"optional\": T} (T or null; an optional property may be \
+                     left out) and {\"union\": [T, T, …]}. Example: \
+                     {\"object\": {\"id\": \"uuid\", \"tags\": {\"array\": \"string\"}}}. \
+                     Not enforced on live calls; a run's preview logs a warning when \
+                     a response does not match. Send null to remove it.",
+            },
+            ARG_RATE_LIMIT: {
+                "type": ["object", "null"],
+                "description":
+                    "How often one caller may call it: rates such as \"20/min\", \
+                     \"5/15m\" or \"1000/day\", counted per client IP and per \
+                     signed-in user. Over either, the call is a 429 with \
+                     Retry-After. Omitted (or null), a public code query gets 60/min \
+                     per IP and anything else none; `{}` states no limit at all. For \
+                     a limit per something else — per share, per email — use \
+                     `ratelimit.check(key, …)` inside the body.",
+                "properties": {
+                    "per_ip": { "type": "string" },
+                    "per_user": { "type": "string" },
+                },
+                "additionalProperties": false,
             },
             ARG_PARAMS: {
                 "type": "array",
@@ -759,6 +817,26 @@ fn build(
             })?
         }
         None => existing.map(|q| q.response_type).unwrap_or_default(),
+    };
+    query.returns = match args.get(ARG_RETURNS) {
+        Some(Json::Null) => None,
+        // A model may send the type as a JSON string of itself.
+        Some(Json::String(text)) if text.trim_start().starts_with('{') => Some(
+            serde_json::from_str(text)
+                .map_err(|e| Error::invalid(format!("`{ARG_RETURNS}` is not valid JSON: {e}")))?,
+        ),
+        Some(declared) => Some(declared.clone()),
+        None => existing.and_then(|q| q.returns.clone()),
+    };
+    query.rate_limit = match args.get(ARG_RATE_LIMIT) {
+        Some(Json::Null) => None,
+        Some(limit) => Some(serde_json::from_value(limit.clone()).map_err(|e| {
+            Error::invalid(format!(
+                "`{ARG_RATE_LIMIT}` should be an object with `per_ip` and/or \
+                 `per_user` rates such as \"20/min\": {e}"
+            ))
+        })?),
+        None => existing.and_then(|q| q.rate_limit.clone()),
     };
     query.description = match args.contains_key(ARG_DESCRIPTION) {
         true => optional_string(args, ARG_DESCRIPTION)?.unwrap_or_default(),
@@ -1082,6 +1160,69 @@ mod tests {
 
     /// TODO F2.9/F2.10: the body and response types are arguments, kept on
     /// an edit that does not name them, refused when misspelt, and reported.
+    #[test]
+    fn returns_and_rate_limit_are_set_kept_cleared_and_reported() {
+        let returns = json!({ "object": { "id": "uuid", "tags": { "array": "string" } } });
+        let query = build(
+            "tagged",
+            None,
+            &args(&[
+                (ARG_PATH, json!("/tagged")),
+                (ARG_LANGUAGE, json!("javascript")),
+                (
+                    ARG_CODE,
+                    json!("return { id: crypto.randomUUID(), tags: [] };"),
+                ),
+                (ARG_PUBLIC, json!(true)),
+                (ARG_RETURNS, returns.clone()),
+                (ARG_RATE_LIMIT, json!({ "per_ip": "20/min" })),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(query.returns, Some(returns.clone()));
+        assert_eq!(
+            query.rate_limit.as_ref().and_then(|r| r.per_ip.as_deref()),
+            Some("20/min")
+        );
+        let edited = build("tagged", Some(&query), &args(&[])).unwrap();
+        assert_eq!(edited.returns, Some(returns.clone()));
+        let reported = query_json(&edited);
+        assert_eq!(reported["returns"], returns);
+        assert_eq!(reported["rate_limit"]["per_ip"], json!("20/min"));
+        assert_eq!(reported["effective_rate_limit"]["per_ip"], json!("20/1m"));
+
+        // A type sent as a string of JSON is the type.
+        let as_text = build(
+            "tagged",
+            Some(&query),
+            &args(&[(ARG_RETURNS, json!(returns.to_string()))]),
+        )
+        .unwrap();
+        assert_eq!(as_text.returns, Some(returns));
+
+        // Null clears both: no declared type, and the public default limit.
+        let cleared = build(
+            "tagged",
+            Some(&query),
+            &args(&[(ARG_RETURNS, Json::Null), (ARG_RATE_LIMIT, Json::Null)]),
+        )
+        .unwrap();
+        assert_eq!(cleared.returns, None);
+        assert_eq!(cleared.rate_limit, None);
+        let reported = query_json(&cleared);
+        assert_eq!(reported["returns"], Json::Null);
+        assert_eq!(reported["effective_rate_limit"]["per_ip"], json!("60/1m"));
+
+        let err = build(
+            "tagged",
+            Some(&query),
+            &args(&[(ARG_RATE_LIMIT, json!({ "perIp": "20/min" }))]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(ARG_RATE_LIMIT), "{err}");
+    }
+
     #[test]
     fn body_and_response_types_are_set_kept_and_reported() {
         let query = build(

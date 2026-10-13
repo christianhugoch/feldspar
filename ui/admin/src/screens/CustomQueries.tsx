@@ -44,10 +44,14 @@ import {
   needsParamsNote,
   pythonAvailable,
   responseTypeApplies,
+  returnsApplies,
+  returnsError,
+  DEFAULT_PUBLIC_RATE,
   statusSummary,
   type CheckStatus,
   type PayloadType,
   type QueryLanguage,
+  type RateLimitMode,
   type QueryRow,
 } from "../customQueries";
 import { PublicBadge } from "../layout";
@@ -104,7 +108,9 @@ export function CustomQueries({
       setQuery(index, { ...queries[index], columns });
       setStatus((s) => ({
         ...s,
-        [index]: isCode(queries[index].language) ? { kind: "checked" } : { kind: "ok", columns },
+        [index]: isCode(queries[index].language)
+          ? { kind: "checked", typed: returnsApplies(queries[index]) && !!queries[index].returns.trim() }
+          : { kind: "ok", columns },
       }));
     } catch (err) {
       setStatus((s) => ({
@@ -296,6 +302,89 @@ export function CustomQueries({
                 </Col>
               </Row>
             )}
+
+            {returnsApplies(query) && (
+              <Form.Group className="mb-2">
+                <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-returns`}>
+                  <T text="Returns" />
+                </Form.Label>
+                <Form.Control
+                  as="textarea"
+                  rows={3}
+                  className="font-monospace small"
+                  id={`${idPrefix}-q${index}-returns`}
+                  value={query.returns}
+                  isInvalid={returnsError(query.returns) !== null}
+                  placeholder={'{"object": {"id": "uuid", "tags": {"array": "string"}}}'}
+                  onChange={(e) => setQuery(index, { ...query, returns: e.target.value })}
+                />
+                <Form.Control.Feedback type="invalid">
+                  {returnsError(query.returns)}
+                </Form.Control.Feedback>
+                <Form.Text muted>
+                  <T
+                    text="Optional. What the body returns, so the client method is typed instead of {unknown}: a type name ({names}) or {object}, {array}, {optional} and {union}. Checked in previews only."
+                    values={{
+                      unknown: <code>unknown</code>,
+                      names: <code>string, int, float, bool, json, uuid, date, timestamp</code>,
+                      object: <code>{'{"object": {…}}'}</code>,
+                      array: <code>{'{"array": T}'}</code>,
+                      optional: <code>{'{"optional": T}'}</code>,
+                      union: <code>{'{"union": [T, …]}'}</code>,
+                    }}
+                  />
+                </Form.Text>
+              </Form.Group>
+            )}
+
+            <Row className="g-2 mb-2 align-items-end">
+              <Col md={4}>
+                <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-rate`}>
+                  <T text="Rate limit" />
+                </Form.Label>
+                <Form.Select
+                  id={`${idPrefix}-q${index}-rate`}
+                  value={query.rateLimit}
+                  onChange={(e) =>
+                    setQuery(index, { ...query, rateLimit: e.target.value as RateLimitMode })
+                  }
+                >
+                  <option value="default">
+                    {isCode(query.language) && isPublic(query.minRole)
+                      ? t("Default ({rate} per IP)", { rate: DEFAULT_PUBLIC_RATE })
+                      : t("Default (none)")}
+                  </option>
+                  <option value="custom">{t("Custom")}</option>
+                  <option value="none">{t("No limit")}</option>
+                </Form.Select>
+              </Col>
+              {query.rateLimit === "custom" && (
+                <>
+                  <Col md={3}>
+                    <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-rate-ip`}>
+                      <T text="Per IP" />
+                    </Form.Label>
+                    <Form.Control
+                      id={`${idPrefix}-q${index}-rate-ip`}
+                      value={query.ratePerIp}
+                      placeholder="20/min"
+                      onChange={(e) => setQuery(index, { ...query, ratePerIp: e.target.value })}
+                    />
+                  </Col>
+                  <Col md={3}>
+                    <Form.Label className="small mb-1" htmlFor={`${idPrefix}-q${index}-rate-user`}>
+                      <T text="Per user" />
+                    </Form.Label>
+                    <Form.Control
+                      id={`${idPrefix}-q${index}-rate-user`}
+                      value={query.ratePerUser}
+                      placeholder="120/min"
+                      onChange={(e) => setQuery(index, { ...query, ratePerUser: e.target.value })}
+                    />
+                  </Col>
+                </>
+              )}
+            </Row>
 
             {isCode(query.language) ? (
               <Form.Group className="mb-2">

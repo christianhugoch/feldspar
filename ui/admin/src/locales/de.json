@@ -930,5 +930,8 @@
   "Nobody has this stream open.": "Niemand hat diesen Stream geöffnet.",
   "User": "Benutzer",
   "Shown fields": "Angezeigte Felder",
-  "anonymous": "anonym"
+  "anonymous": "anonym",
+  "Default value": "Standardwert",
+  "A JavaScript expression used when a new row leaves this field empty. It can use": "Ein JavaScript-Ausdruck, der verwendet wird, wenn eine neue Zeile dieses Feld leer lässt. Er kann",
+  "(the user writing the row) and the row's other fields.": "(den Benutzer, der die Zeile schreibt) und die anderen Felder der Zeile verwenden."
 }

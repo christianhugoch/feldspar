@@ -21,6 +21,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createFieldBody,
+  defaultEditable,
   fieldForm,
   fieldFormError,
   keyValueNote,
@@ -44,6 +45,7 @@ function field(over: Partial<FieldItem>): FieldItem {
     unique: false,
     primary_key: false,
     generated: false,
+    default_expression: "",
     kind: { type: "plain" },
     attributes: {},
     ...over,
@@ -210,6 +212,41 @@ describe("saving an edited field", () => {
         mime_allow: ["image/png"],
       },
     });
+  });
+
+  it("round-trips a File's delete and conflict options", () => {
+    const choice = (name: string, options: string[], def: string) => ({
+      ...FILE.config_spec[0],
+      name,
+      label: name,
+      required: false,
+      default: def,
+      options,
+    });
+    const withOptions: FieldTypeItem = {
+      ...FILE,
+      config_spec: [
+        ...FILE.config_spec,
+        choice("on_delete", ["keep", "remove_file"], "keep"),
+        choice("on_conflict", ["overwrite", "suffix"], "overwrite"),
+      ],
+    };
+    const stored = field({
+      name: "cover",
+      kind: {
+        type: "file",
+        store: "uploads",
+        folder: null,
+        mime_allow: [],
+        on_delete: "remove_file",
+        on_conflict: "suffix",
+      },
+    });
+    const form = fieldForm(stored);
+    expect(form.attrs.on_delete).toBe("remove_file");
+    expect(form.attrs.on_conflict).toBe("suffix");
+    const body = updateFieldBody(form, withOptions);
+    expect(body.kind).toMatchObject({ on_delete: "remove_file", on_conflict: "suffix" });
   });
 
   it("round-trips a Key unchanged, and still omits an empty summary", () => {
@@ -395,5 +432,36 @@ describe("what the key tick box says about filling the key in", () => {
     // its identity, so here the type does predict what happens.
     const notYet = fieldForm(field({ name: "code", type: "int", sql_type: "int8" }));
     expect(keyValueNote({ ...notYet, primaryKey: true })).toMatch(/numbers itself/);
+  });
+});
+
+describe("a default value", () => {
+  it("is offered only on a NOT NULL stored field", () => {
+    const base = newFieldForm("text");
+    expect(defaultEditable({ ...base, nullable: true })).toBe(false);
+    expect(defaultEditable({ ...base, nullable: false })).toBe(true);
+    // A key column is NOT NULL whatever the box says.
+    expect(defaultEditable({ ...base, nullable: true, primaryKey: true })).toBe(true);
+    expect(defaultEditable({ ...base, nullable: false, calculated: true })).toBe(false);
+  });
+
+  it("is sent trimmed when a new required field has one", () => {
+    const form = { ...newFieldForm("uuid"), name: "owner", nullable: false, defaultExpression: " user.id " };
+    expect(createFieldBody(form, { ...TEXT, name: "uuid" })).toMatchObject({
+      required: true,
+      default_expression: "user.id",
+    });
+  });
+
+  it("is dropped when the field becomes nullable, which on an edit clears it", () => {
+    const form = {
+      ...fieldForm(field({ nullable: false, required: true, default_expression: "user.id" })),
+      nullable: true,
+    };
+    expect(form.defaultExpression).toBe("user.id");
+    expect(updateFieldBody(form, TEXT)).not.toHaveProperty("default_expression");
+    expect(updateFieldBody({ ...form, nullable: false }, TEXT)).toMatchObject({
+      default_expression: "user.id",
+    });
   });
 });

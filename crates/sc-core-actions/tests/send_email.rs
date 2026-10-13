@@ -109,6 +109,8 @@ async fn shop(db: &TestDb, tag: &str) -> Result<Arc<Catalog>> {
             store: FileStoreId("uploads".to_owned()),
             folder: Some("invoices".to_owned()),
             mime_allow: Vec::new(),
+            on_delete: Default::default(),
+            on_conflict: Default::default(),
         }),
     )
     .await?;

@@ -2372,7 +2372,9 @@ fn print_usage() {
     --code-max-file-bytes N  the most one code-body file read or write may carry
                              (default 8M); larger files are read in pieces
     --code-max-copy-bytes N  the most one host-side copy or concat in a code body
-                             may move (default 256M)"
+                             may move (default 256M)
+    --trusted-proxies LIST   proxies (addresses or CIDR blocks, comma-separated) whose
+                             X-Forwarded-For names the client, for per-IP rate limits"
     );
     eprintln!(
         "    --file-store NAME=PATH   connect a local directory as a named file store (repeatable)"

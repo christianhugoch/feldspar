@@ -286,6 +286,8 @@ impl Projection {
                 raw: None,
                 headers: Vec::new(),
                 links: None,
+                client_ip: None,
+                preview: false,
             },
             path_params,
         })

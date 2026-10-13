@@ -234,6 +234,10 @@ pub struct FieldSpec {
     pub kind: DataFieldKind,
     /// Rich-type attributes.
     pub attributes: Attrs,
+    /// A JavaScript expression giving the value when an insert leaves the field
+    /// out, with `user` and the row's other values in scope
+    /// ([`DataField::default_expression`]). Only for a `required` field.
+    pub default_expression: Option<String>,
 }
 
 impl Default for FieldSpec {
@@ -248,6 +252,7 @@ impl Default for FieldSpec {
             primary_key: false,
             kind: DataFieldKind::Plain,
             attributes: Attrs::new(),
+            default_expression: None,
         }
     }
 }
@@ -339,6 +344,9 @@ pub struct FieldSettings {
     /// A key column is `NOT NULL` whatever this says, so asking for it to be
     /// optional is refused; a calculated field has no column to constrain.
     pub required: Option<bool>,
+    /// The default-value expression ([`FieldSpec::default_expression`]);
+    /// `Some("")` clears it.
+    pub default_expression: Option<String>,
 }
 
 /// One schema operation.
@@ -763,6 +771,10 @@ struct Plan {
     /// `(table, formula)` — deferred beside the calculated fields, because a
     /// constraint on a table this batch is building names its fields.
     deferred_constraints: Vec<(String, String)>,
+    /// Fields whose default expression was set, or whose `NOT NULL` was taken
+    /// away, as `(table, field)` — checked against the final schema, because
+    /// the expression may name a field the batch adds after it.
+    deferred_defaults: Vec<(String, String)>,
     /// Constraints to create or drop, in the order they were asked for. The DDL
     /// is generated in `steps` rather than here: a formula's expression must be
     /// built against the schema the batch ends with.
@@ -804,6 +816,7 @@ impl Plan {
             dropped: BTreeSet::new(),
             deferred_calc: Vec::new(),
             deferred_constraints: Vec::new(),
+            deferred_defaults: Vec::new(),
             constraints: Vec::new(),
             changes: Vec::new(),
             database: None,
@@ -982,6 +995,10 @@ impl Plan {
                     resolved.field.base.name.clone(),
                     expression.to_owned(),
                 ));
+            }
+            if resolved.field.default_expression.is_some() {
+                self.deferred_defaults
+                    .push((name.to_owned(), resolved.field.base.name.clone()));
             }
             table.fields.push(resolved.field);
             if let Some(meta) = resolved.meta {
@@ -1185,6 +1202,10 @@ impl Plan {
                 "table `{table}` already has a field `{name}`"
             )));
         }
+        if resolved.field.default_expression.is_some() {
+            self.deferred_defaults
+                .push((table.to_owned(), name.clone()));
+        }
         if let Some(expression) = resolved.field.calc_expression() {
             self.deferred_calc
                 .push((table.to_owned(), name.clone(), expression.to_owned()));
@@ -1265,6 +1286,7 @@ impl Plan {
             meta.type_name.clone_from(&row.type_name);
             meta.kind = row.kind.clone();
             meta.attributes = row.attributes.clone();
+            meta.default_expression.clone_from(&row.default_expression);
         } else {
             meta.kind = existing.kind.clone();
         }
@@ -1301,6 +1323,14 @@ impl Plan {
         if let Some(attributes) = &settings.attributes {
             meta.attributes = attributes.clone();
         }
+        if let Some(expression) = &settings.default_expression {
+            let expression = expression.trim();
+            meta.default_expression = (!expression.is_empty()).then(|| expression.to_owned());
+        }
+        if settings.default_expression.is_some() || settings.required == Some(false) {
+            self.deferred_defaults
+                .push((table.to_owned(), field.to_owned()));
+        }
         if let DataFieldKind::Calc { expression } = &meta.kind {
             self.deferred_calc
                 .push((table.to_owned(), field.to_owned(), expression.clone()));
@@ -1313,6 +1343,7 @@ impl Plan {
         let mut projected = projected;
         if let Some(slot) = projected.fields.iter_mut().find(|f| f.base.name == field) {
             slot.kind = meta.kind.clone();
+            slot.default_expression.clone_from(&meta.default_expression);
             if !meta.label.is_empty() {
                 slot.base.label.clone_from(&meta.label);
             }
@@ -1985,6 +2016,12 @@ impl Plan {
             field.base.label = spec.label.trim().to_owned();
         }
         field.base.attributes = spec.attributes.clone();
+        field.default_expression = spec
+            .default_expression
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned);
 
         let label = spec.label.trim().to_owned();
         let description = spec.description.trim().to_owned();
@@ -1992,7 +2029,8 @@ impl Plan {
             || !matches!(kind, DataFieldKind::Plain)
             || !label.is_empty()
             || !description.is_empty()
-            || !spec.attributes.is_empty();
+            || !spec.attributes.is_empty()
+            || field.default_expression.is_some();
         let meta = needs_overlay.then(|| {
             let mut meta = FieldMeta::new(table, name)
                 .label(&label)
@@ -2000,6 +2038,8 @@ impl Plan {
                 .kind(kind);
             meta.type_name = rich_name;
             meta.attributes = spec.attributes.clone();
+            meta.default_expression
+                .clone_from(&field.default_expression);
             meta
         });
         Ok(ResolvedField { field, meta })
@@ -2121,6 +2161,12 @@ impl Plan {
         }
         for (table, formula) in &self.deferred_constraints {
             validate_formula(&self.projection, table, formula)?;
+        }
+        for (table, field) in &self.deferred_defaults {
+            let Some(field) = self.projection.get(table).and_then(|t| t.field(field)) else {
+                continue;
+            };
+            validate_default_expression(&shape, table, field)?;
         }
         for name in &self.rls_dirty {
             let Some(table) = self.projection.get(name) else {
@@ -2321,6 +2367,39 @@ fn validate_ownership(
             )));
         }
     }
+    Ok(())
+}
+
+/// Validate a field's default-value expression against a projected schema: it
+/// must parse and validate over the insert scope (`user` and the row's fields),
+/// and it belongs on a stored `NOT NULL` field only — a nullable field is
+/// already allowed to be left out, and a calculated one is never written.
+fn validate_default_expression(
+    shape: &sc_expr::SchemaShape,
+    table: &str,
+    field: &DataField,
+) -> Result<()> {
+    let Some(expression) = &field.default_expression else {
+        return Ok(());
+    };
+    let name = &field.base.name;
+    if field.is_calc() {
+        return Err(Error::invalid(format!(
+            "field `{table}.{name}`: a calculated field is never written, so it cannot \
+             have a default value"
+        )));
+    }
+    if !field.required {
+        return Err(Error::invalid(format!(
+            "field `{table}.{name}`: only a required (NOT NULL) field can have a default \
+             value; make it required, or clear its default"
+        )));
+    }
+    let formula = sc_expr::Formula::parse(expression)
+        .map_err(|e| Error::invalid(format!("default value of `{table}.{name}`: {e}")))?;
+    formula
+        .validate(shape, table)
+        .map_err(|e| Error::invalid(format!("default value of `{table}.{name}`: {e}")))?;
     Ok(())
 }
 
