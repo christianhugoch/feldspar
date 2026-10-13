@@ -393,6 +393,13 @@ None of these needs a design beyond Part I. Each one deletes a workaround from t
 - [x] **F1.10** `describe_code_api` and `AGENTS.md` gain a short "choosing where logic goes"
   section (Part I §1, the cross-cutting lesson): tables with ownership formulas and File fields
   first, code queries for the rest, and never hand-written base64 or SHA again.
+- [x] **F1.11** (field report: stream configuration) MCP can configure streams. One new tool,
+  `edit_streams`, lists, creates, changes (only the keys given; `configuration` merged key by key)
+  and deletes the instance's streams. Creating needs `allow_create`, changing `allow_edit`,
+  deleting `allow_drop`, and `min_role` needs `allow_access_changes`. Saves go through
+  `saveStream`/`deleteStream`, so the supervisor reloads. `update_application` gets a `streams`
+  section (`add`/`remove`/`set`) for which streams an application exposes. Test:
+  `mcp_server::a_document_stream_is_created_exposed_and_deleted_over_mcp`.
 
 ### Try it
 1. Save a code query with no params that returns `{ id: crypto.randomUUID(), b: btoa("hi") }`

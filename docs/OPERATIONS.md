@@ -1113,7 +1113,8 @@ from tagged endpoints:
 | `describe_code_api` | the JavaScript API a `run_js_code` body or a `javascript` API query can call — `db`, `fetch`, `fs`, `trigger` |
 | `describe_applications`, `save_api_query`, `delete_api_query` | applications and their custom SQL |
 | `create_application`, `create_file_store` | a new application (React and a new local store by default; a git store on request) |
-| `update_application` | an application's connected tables, the store folders it serves as files, and its CSP (the `csp` section needs `allow_access_changes`) |
+| `update_application` | an application's connected tables, the store folders it serves as files, its CSP (the `csp` section needs `allow_access_changes`), its locales and the streams it exposes |
+| `edit_streams` | list, create, change and delete the instance's streams (live row changes, collaborative documents with presence, toasts); `min_role` needs `allow_access_changes` |
 
 Or start from nothing — the tools create the application and hand back its scaffolded
 `project_dir`, and the agent builds it there:

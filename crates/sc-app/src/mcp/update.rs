@@ -14,6 +14,10 @@
 //! - **`csp`**: single directives of the app's Content-Security-Policy.
 //! - **`locales`**: the languages the app is served in (§16.1). The
 //!   translations themselves are written by `save_translations`.
+//! - **`streams`**: the streams its pages may subscribe to over the live
+//!   socket. The streams themselves are instance-wide and written by
+//!   `edit_streams`; exposing one is an edit, like connecting a table, since
+//!   the stream's own `min_role` and row checks still decide who receives it.
 //!
 //! ## A grant per section, checked before anything changes
 //!
@@ -47,9 +51,10 @@ use sc_catalog::{AdminCall, Catalog, FileStoreId, TableId};
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
 
-use super::{TOOL_DESCRIBE_APPS, load_app, required_str};
+use super::{TOOL_DESCRIBE_APPS, TOOL_EDIT_STREAMS, load_app, required_str};
 use crate::{
-    Application, CspPolicy, StaticDir, UploadSlot, app_default_locale, app_locales, set_app_locales,
+    Application, CspPolicy, StaticDir, StreamRef, UploadSlot, app_default_locale, app_locales,
+    set_app_locales,
 };
 
 /// Changes an application's connected tables, static directories, CSP or locales.
@@ -73,6 +78,7 @@ const ARG_STORE: &str = "file_store";
 const ARG_PATH: &str = "path";
 const ARG_LOCALES: &str = "locales";
 const ARG_DEFAULT_LOCALE: &str = "default_locale";
+const ARG_STREAMS: &str = "streams";
 
 struct UpdateApp;
 
@@ -103,8 +109,8 @@ fn update_description(grants: &Grants) -> String {
     let edit = match grants.edit {
         true => "",
         false => {
-            " You may **not** change `tables`, `static_dirs`, `uploads` or `locales`: they \
-             need `allow_edit`."
+            " You may **not** change `tables`, `static_dirs`, `uploads`, `locales` or \
+             `streams`: they need `allow_edit`."
         }
     };
     let csp = match grants.access_changes {
@@ -119,7 +125,8 @@ fn update_description(grants: &Grants) -> String {
     };
     format!(
         "Change an application: the tables it serves, the store folders it serves \
-         as files, its Content-Security-Policy, or the languages it is served in. \
+         as files, its Content-Security-Policy, the languages it is served in, or \
+         the live streams it exposes. \
          Give only the sections you are \
          changing; one call may change several, and is saved as one, so a refused \
          section changes nothing.\n\n\
@@ -164,7 +171,12 @@ fn update_description(grants: &Grants) -> String {
          Enable a locale before `save_translations` writes into it. English is \
          the source language and needs no translations, but list `en` if \
          visitors should be able to pick it. Removing a locale keeps its \
-         translations.\n\n\
+         translations.\n\
+         - `{ARG_STREAMS}` — the **streams** its pages may subscribe to over the \
+         app's live socket (`live.<stream>` in the generated client). `{ARG_ADD}`, \
+         `{ARG_REMOVE}` and `{ARG_SET}` as for tables; create or change the streams \
+         themselves with `{TOOL_EDIT_STREAMS}`. A `table_changes` or `document` \
+         stream needs its table connected too.\n\n\
          `{TOOL_DESCRIBE_APPS}` shows what each application has now. The running \
          app serves the change at once; a bundle written against tables it did \
          not have still needs a rebuild.{edit}{csp}"
@@ -277,6 +289,16 @@ fn update_parameters() -> Json {
                     "items": { "type": "string" },
                 },
             },
+            ARG_STREAMS: {
+                "type": "object",
+                "description": "Change the streams it exposes.",
+                "properties": {
+                    ARG_ADD: names.clone(),
+                    ARG_REMOVE: names.clone(),
+                    ARG_SET: names.clone(),
+                },
+                "additionalProperties": false,
+            },
             ARG_LOCALES: {
                 "type": "object",
                 "description": "Change the languages it is served in.",
@@ -306,8 +328,10 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
             ARG_UPLOADS,
             ARG_CSP,
             ARG_LOCALES,
+            ARG_STREAMS,
         ],
     )?;
+    let streams = section(&args, ARG_STREAMS, &[ARG_ADD, ARG_REMOVE, ARG_SET])?;
     let uploads = section(&args, ARG_UPLOADS, &[ARG_ADD, ARG_REMOVE])?;
     let tables = section(&args, ARG_TABLES, &[ARG_ADD, ARG_REMOVE, ARG_SET])?;
     let static_dirs = section(&args, ARG_STATIC_DIRS, &[ARG_ADD, ARG_REMOVE])?;
@@ -325,10 +349,11 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         && uploads.is_none()
         && csp.is_none()
         && locales.is_none()
+        && streams.is_none()
     {
         return Err(Error::invalid(format!(
             "name at least one of `{ARG_TABLES}`, `{ARG_STATIC_DIRS}`, `{ARG_UPLOADS}`, \
-             `{ARG_CSP}` and `{ARG_LOCALES}`; nothing was changed"
+             `{ARG_CSP}`, `{ARG_LOCALES}` and `{ARG_STREAMS}`; nothing was changed"
         )));
     }
     // Every grant before any change: a refused section refuses the call.
@@ -357,6 +382,13 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         require_grant(
             grants.edit,
             "change which languages an application is served in",
+            GRANT_EDIT,
+        )?;
+    }
+    if streams.is_some() {
+        require_grant(
+            grants.edit,
+            "change which streams an application exposes",
             GRANT_EDIT,
         )?;
     }
@@ -410,6 +442,11 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         change_locales(&mut app, locales)?;
     }
 
+    if let Some(streams) = &streams {
+        was.insert(ARG_STREAMS.to_owned(), streams_json(&app));
+        change_streams(ctx.catalog, &mut app, streams).await?;
+    }
+
     let saved = save(ctx, &app, &mut out).await?;
     if tables.is_some() {
         out[ARG_TABLES] = tables_json(&saved);
@@ -426,6 +463,10 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
     }
     if locales.is_some() {
         out[ARG_LOCALES] = locales_json(&saved)?;
+    }
+    if streams.is_some() {
+        out[ARG_STREAMS] = streams_json(&saved);
+        out["live_socket"] = json!(crate::live_socket_path(&saved));
     }
     out["was"] = Json::Object(was);
     Ok(out)
@@ -537,6 +578,48 @@ fn change_tables(
 
 fn tables_json(app: &Application) -> Json {
     json!(app.tables.iter().map(|t| t.0.clone()).collect::<Vec<_>>())
+}
+
+// --- streams ------------------------------------------------------------------
+
+async fn change_streams(
+    catalog: &Catalog,
+    app: &mut Application,
+    section: &Map<String, Json>,
+) -> Result<()> {
+    let mut streams: Vec<String> = match section.contains_key(ARG_SET) {
+        true => names(section, ARG_SET)?,
+        false => app.streams.iter().map(|s| s.0.clone()).collect(),
+    };
+    for add in names(section, ARG_ADD)? {
+        if !streams.contains(&add) {
+            streams.push(add);
+        }
+    }
+    let remove = names(section, ARG_REMOVE)?;
+    streams.retain(|s| !remove.contains(s));
+    let has_table = catalog.get(sc_stream::STREAMS_TABLE)?.is_some();
+    for stream in &streams {
+        if app.streams.iter().any(|s| &s.0 == stream) {
+            continue;
+        }
+        let exists = has_table
+            && sc_stream::load_stream_by_name(catalog, stream)
+                .await?
+                .is_some();
+        if !exists {
+            return Err(Error::invalid(format!(
+                "there is no stream `{stream}`; create it with `{TOOL_EDIT_STREAMS}` first. \
+                 Nothing was changed."
+            )));
+        }
+    }
+    app.streams = streams.into_iter().map(StreamRef).collect();
+    Ok(())
+}
+
+fn streams_json(app: &Application) -> Json {
+    json!(app.streams.iter().map(|s| s.0.clone()).collect::<Vec<_>>())
 }
 
 // --- static_dirs --------------------------------------------------------------
@@ -816,6 +899,7 @@ async fn save(ctx: &ToolContext<'_>, app: &Application, out: &mut Json) -> Resul
     );
     body["uploads"] = crate::upload_slots_json(&app.uploads);
     body["csp"] = csp_json(&app.csp);
+    body["streams"] = streams_json(app);
     // Where the locales live (§9's column-vs-attributes rule).
     body["attributes"] = Json::Object(app.attributes.clone());
     let updated = host
@@ -940,8 +1024,8 @@ mod tests {
         let none = update_description(&Grants::none());
         assert!(
             none.contains(
-                "**not** change `tables`, `static_dirs`, `uploads` or `locales`: they \
-                 need `allow_edit`"
+                "**not** change `tables`, `static_dirs`, `uploads`, `locales` or \
+                 `streams`: they need `allow_edit`"
             ),
             "{none}"
         );

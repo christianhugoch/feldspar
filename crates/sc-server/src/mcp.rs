@@ -401,6 +401,12 @@ subdomain; fix whatever the diagnostics report and build again until it succeeds
 To change an existing application, `describe_applications` gives its `project_dir`: work \
 there, connect any new table with `update_application`, and rebuild.
 
+Live updates (pages that update when rows change, collaborative editing, presence, toasts). \
+`edit_streams` creates the stream: `table_changes` for row changes, `document` on a \
+`collab_doc` field for a shared document (presence is built in), `internal` for messages that \
+code publishes. Then `update_application` with `streams: { add: [...] }` exposes it, and the \
+generated client gets a typed `live.<stream>` accessor.
+
 Translating an application (\"translate this app to German\", \"the German for 'Save' should \
 be …\"). You are the translator; the tools hold the strings and check your work. \
 (1) `describe_translations` lists every string the source wraps in `t()`, the locales the app \

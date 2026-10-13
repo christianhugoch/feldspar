@@ -239,11 +239,17 @@ async fn setup() -> sc_error::Result<Harness> {
     )
     .await?;
 
+    // The built-in stream providers, so `edit_streams` saves through a
+    // supervisor that reloads, as on a running server.
+    let streams =
+        sc_server::install_streams(&catalog, &triggers, sc_stream::StreamConfig::default()).await?;
+
     let sessions = Arc::new(SessionStore::default());
     let apps = Arc::new(
         AppMounts::new(catalog.clone())
             .with_agents(agents)
-            .with_triggers(triggers),
+            .with_triggers(triggers)
+            .with_streams(streams),
     );
     // `build_router_with_apps` rather than `build_router`, because the MCP route
     // reaches the catalog through the same `AppMounts` the app subdomains do —
@@ -1435,6 +1441,187 @@ async fn roles_and_accounts_are_tools_behind_the_access_and_drop_grants() -> sc_
         sc_auth::authenticate(&catalog, "admin@example.com", "hunter2pass")
             .await?
             .is_some()
+    );
+    Ok(())
+}
+
+/// The live-sync loop an external agent needs: a `collab_doc` field made with
+/// `edit_schema`, a `document` stream on it made with `edit_streams` — flowing
+/// at once, because the save goes through the admin's own `saveStream` — and
+/// the stream exposed on the app with `update_application`. Setting who may
+/// observe it needs `allow_access_changes`; deleting it needs `allow_drop` and
+/// is refused while an application still exposes it.
+#[tokio::test]
+async fn a_document_stream_is_created_exposed_and_deleted_over_mcp() -> sc_error::Result<()> {
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        apps,
+        _db,
+    } = setup().await?;
+    enable_mcp(&catalog, true).await?;
+    let dir = TempDir::new("streams");
+    catalog.connect_file_store(Arc::new(LocalFileStore::new("apps", &dir.0)?))?;
+    let builder = mint(&mut client, "builder", json!({})).await;
+    let admin = mint(
+        &mut client,
+        "admin",
+        json!({ "allow_access_changes": true, "allow_drop": true }),
+    )
+    .await;
+
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (_, listed) = McpRequest::new(&builder, list).send(&router).await;
+    assert!(tool_names(&listed).contains(&"edit_streams".to_owned()));
+
+    edit_schema(
+        &router,
+        &builder,
+        json!([{
+            "op": "create_table",
+            "table": "notes",
+            "fields": [
+                { "name": "id", "type": "int", "primary_key": true },
+                { "name": "body", "type": "collab_doc" },
+            ],
+        }]),
+    )
+    .await;
+    mount_shop(&catalog, &apps, &[]).await?;
+
+    // No arguments: the listing, with each provider's settings.
+    let (error, listing) = call_tool(&router, &builder, "edit_streams", json!({})).await;
+    assert!(!error, "{listing}");
+    assert_eq!(listing["streams"], json!([]), "{listing}");
+    let document = listing["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == json!("document"))
+        .expect("the document provider");
+    assert!(
+        document["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["name"] == json!("field")),
+        "{document}"
+    );
+
+    let note_body = json!({ "save": [{
+        "name": "note_body",
+        "provider": "document",
+        "configuration": { "table": "notes", "field": "body" },
+        "min_role": 80,
+    }] });
+    // `min_role` is an access rule: refused whole without the grant.
+    let (error, refused) = call_tool(&router, &builder, "edit_streams", note_body.clone()).await;
+    assert!(error, "{refused}");
+    assert!(
+        refused.to_string().contains("allow_access_changes"),
+        "{refused}"
+    );
+    assert!(
+        sc_stream::load_stream_by_name(&catalog, "note_body")
+            .await?
+            .is_none()
+    );
+
+    let (error, created) = call_tool(&router, &admin, "edit_streams", note_body).await;
+    assert!(!error, "{created}");
+    assert_eq!(created["created"], json!(["note_body"]), "{created}");
+    assert_eq!(created["streams"][0]["min_role"], json!(80), "{created}");
+    assert_eq!(
+        created["streams"][0]["topics"],
+        json!({ "kind": "row", "table": "notes" }),
+        "{created}"
+    );
+    // Flowing already: the save reloaded the supervisor.
+    let stored = sc_stream::require_stream(&catalog, "note_body").await?;
+    assert!(
+        apps.streams()
+            .unwrap()
+            .supervisor()
+            .get(stored.id)
+            .is_some()
+    );
+
+    // Exposing a document stream needs its table connected.
+    let (error, refused) = call_tool(
+        &router,
+        &builder,
+        "update_application",
+        json!({ "application": "shop", "streams": { "add": ["note_body"] } }),
+    )
+    .await;
+    assert!(error, "{refused}");
+    assert!(refused.to_string().contains("notes"), "{refused}");
+    let (error, exposed) = call_tool(
+        &router,
+        &builder,
+        "update_application",
+        json!({
+            "application": "shop",
+            "tables": { "add": ["notes"] },
+            "streams": { "add": ["note_body"] },
+        }),
+    )
+    .await;
+    assert!(!error, "{exposed}");
+    assert_eq!(exposed["streams"], json!(["note_body"]), "{exposed}");
+    assert_eq!(exposed["live_socket"], json!("/api/live"), "{exposed}");
+
+    // A change names only what changes; the rest is kept.
+    let (error, changed) = call_tool(
+        &router,
+        &builder,
+        "edit_streams",
+        json!({ "save": [{ "name": "note_body", "configuration": { "root_kind": "text" } }] }),
+    )
+    .await;
+    assert!(!error, "{changed}");
+    assert_eq!(changed["changed"], json!(["note_body"]), "{changed}");
+    let stream = &changed["streams"][0];
+    assert_eq!(
+        stream["configuration"]["root_kind"],
+        json!("text"),
+        "{changed}"
+    );
+    assert_eq!(stream["configuration"]["field"], json!("body"), "{changed}");
+    assert_eq!(stream["min_role"], json!(80), "{changed}");
+    assert_eq!(stream["exposed_by"], json!(["shop"]), "{changed}");
+
+    // Deleting: needs `allow_drop`, and refused while the app exposes it.
+    let delete = json!({ "delete": ["note_body"] });
+    let (error, refused) = call_tool(&router, &builder, "edit_streams", delete.clone()).await;
+    assert!(
+        error && refused.to_string().contains("allow_drop"),
+        "{refused}"
+    );
+    let (error, refused) = call_tool(&router, &admin, "edit_streams", delete.clone()).await;
+    assert!(
+        error && refused.to_string().contains("application `shop`"),
+        "{refused}"
+    );
+    let (error, removed) = call_tool(
+        &router,
+        &builder,
+        "update_application",
+        json!({ "application": "shop", "streams": { "remove": ["note_body"] } }),
+    )
+    .await;
+    assert!(!error, "{removed}");
+    let (error, deleted) = call_tool(&router, &admin, "edit_streams", delete).await;
+    assert!(!error, "{deleted}");
+    assert_eq!(deleted["deleted"], json!(["note_body"]), "{deleted}");
+    assert_eq!(deleted["streams"], json!([]), "{deleted}");
+    assert!(
+        apps.streams()
+            .unwrap()
+            .supervisor()
+            .get(stored.id)
+            .is_none()
     );
     Ok(())
 }

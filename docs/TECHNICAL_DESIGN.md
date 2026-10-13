@@ -7326,6 +7326,17 @@ leave its static directories and CSP for a person, so the line drawn above moved
   and `-`. A source must be one printable word with no `;` or `,`, because the policy goes into
   a header verbatim.
 
+- **`streams`** (`add`, `remove`, `set`): the streams the app exposes on its live socket. Needs
+  `allow_edit`; the stream's own `min_role` and topic checks still decide who receives what.
+
+**Streams: `edit_streams`** (`sc_app::mcp::streams`). The streams themselves are instance-wide,
+so they get their own tool rather than an `update_application` section: no arguments lists them
+(with each provider's settings), `save` creates or changes by name (only the keys given, with
+`configuration` merged key by key), and `delete` removes, refused while a trigger listens or an
+application exposes the stream. Creating needs `allow_create`, changing `allow_edit`, deleting
+`allow_drop`, and `min_role` needs `allow_access_changes`. Writes go through `saveStream` and
+`deleteStream` over the `AdminHost`, so the supervisor reloads and the stream flows at once.
+
 As `edit_schema` checks a grant per operation, this checks one per section, all before anything
 changes. A call with several sections is saved as one, and a refused section changes nothing.
 

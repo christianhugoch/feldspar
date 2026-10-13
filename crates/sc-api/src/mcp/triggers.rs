@@ -452,7 +452,7 @@ async fn describe_action(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
 /// [`describe_action`], so a setting whose choices are a server-side query (the
 /// file stores, say) arrives as a concrete list rather than as a query name the
 /// model cannot answer — the same resolution the admin UI's form gets.
-fn setting_json(field: &FormField) -> Json {
+pub fn setting_json(field: &FormField) -> Json {
     let mut out = Map::new();
     out.insert("name".to_owned(), json!(field.base.name));
     // The label is the sentence the admin's own form shows above the input, and

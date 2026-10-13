@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## Streams over MCP: `edit_streams` and `update_application.streams`
+
+Field report: an external coding agent building a live-sync app could add a `collab_doc` field
+with `edit_schema`, but could only set up the stream on top of it (document/collab,
+table changes, presence) in the admin UI. That blocked live sync. TODO.md F1.11.
+
+- **`edit_streams`** (`sc_app::mcp::streams`, applications area). One tool instead of a
+  describe/save/delete trio, to keep the tool count down. Called with no arguments, it returns
+  the stored streams (configuration with secrets redacted, `min_role`, `enabled`, `topics`,
+  `exposed_by`) plus every provider's settings. `save` lists streams by name: an existing
+  stream changes only the keys given, and its `configuration` is merged key by key (null
+  removes a key; changing `provider` starts the settings afresh). A new stream needs
+  `provider`. `delete` lists names, and is refused while a trigger listens to the stream or an
+  application exposes it. Every call answers with the listing as it is afterwards.
+- **Grants.** Creating needs `allow_create`, changing `allow_edit`, deleting `allow_drop`.
+  Setting `min_role` (who may subscribe) needs `allow_access_changes`, as a query's `min_role`
+  does. All grants and all items are checked, and validated with `validate_stream`, before
+  anything is written.
+- **Through the server.** With a running server the writes go through the admin API's
+  `saveStream`/`deleteStream` (via `AdminHost`), which reload the supervisor, so a saved stream
+  is flowing when the tool answers. Without one, the row is written directly and runs from the
+  next start. Applications exposing a changed stream have their generated client rewritten,
+  because its element type may have changed.
+- **`update_application.streams`** (`add`/`remove`/`set`, needs `allow_edit`) sets which
+  streams an application exposes. Like the connected tables, it is a subset of instance-wide
+  configuration. Unknown streams are refused. A `table_changes` or `document` stream whose
+  table isn't connected is refused by the existing save validation. The answer includes the
+  app's `live_socket` path.
+- `sc_api::mcp::setting_json` (how `describe_action` renders a setting) is now public, so stream
+  provider settings are described the same way.
+- **Tests.** `mcp_server::a_document_stream_is_created_exposed_and_deleted_over_mcp` runs the
+  loop end to end over MCP. It creates a `collab_doc` field, then a `document` stream (refused
+  without `allow_access_changes` because of `min_role`), and checks the supervisor is running
+  it. It exposes the stream (refused until `notes` is connected), makes a partial
+  configuration change, and deletes the stream (refused without `allow_drop`, then while
+  exposed). The admin_copilot tool-list tests now expect 21 tools.
+
 ## Fix: an application's subdomain edit takes effect without a restart
 
 Bug report: after moving the admin UI to its own subdomain and setting an application's
