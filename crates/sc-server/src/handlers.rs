@@ -755,6 +755,8 @@ pub fn admin_handlers_with(
                         .get("required")
                         .filter(|v| !v.is_null())
                         .and_then(Json::as_bool),
+                    // Back to the whole-object reading: omitted clears it.
+                    default_expression: Some(optional_str(obj, "default_expression")),
                 };
                 schema_edit::apply(
                     &catalog,
@@ -6856,6 +6858,9 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
         // row form needs it to leave a blank one out of the insert instead of
         // sending a null the `NOT NULL` would refuse.
         "generated": field.generated.is_some(),
+        // The expression an insert that leaves the field out takes its value
+        // from (empty for none) — so the row form can leave a blank one out too.
+        "default_expression": field.default_expression.as_deref().unwrap_or(""),
         "kind": field_kind_json(&field.kind),
         "attributes": Json::Object(field.base.attributes.clone()),
     })
@@ -7045,6 +7050,7 @@ pub(crate) fn field_spec_from_body(obj: &Map<String, Json>) -> Result<schema_edi
         primary_key: optional_bool(obj, "primary_key")?,
         kind: parse_field_kind(obj)?,
         attributes: attributes_field(obj)?,
+        default_expression: Some(optional_str(obj, "default_expression")),
     })
 }
 

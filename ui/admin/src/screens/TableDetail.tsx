@@ -67,6 +67,7 @@ import {
 } from "../constraintForm";
 import {
   createFieldBody,
+  defaultEditable,
   fieldForm,
   fieldFormError,
   keyValueNote,
@@ -1843,6 +1844,21 @@ function Fields({
                     <Form.Text muted className="d-block">
                       <T text="Saving fails if any row has no value in this field." />
                     </Form.Text>
+                  )}
+
+                  {defaultEditable(form) && (
+                    <Form.Group className="mt-2 mb-1" controlId="fieldDefault">
+                      <Form.Label><T text="Default value" /></Form.Label>
+                      <Form.Control
+                        className="font-monospace"
+                        value={form.defaultExpression}
+                        placeholder={t("user.id")}
+                        onChange={(e) => update({ defaultExpression: e.target.value })}
+                      />
+                      <Form.Text muted>
+                        <T text="A JavaScript expression used when a new row leaves this field empty. It can use" /> <code>user</code> <T text="(the user writing the row) and the row's other fields." />
+                      </Form.Text>
+                    </Form.Group>
                   )}
 
                   {/* The key is a field like any other (GOALS): nothing invents

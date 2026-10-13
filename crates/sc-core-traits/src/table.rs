@@ -194,6 +194,9 @@ pub fn field_note(field: &DataField) -> String {
     if field.required && !field.primary_key {
         note.push_str(", required");
     }
+    if let Some(expression) = &field.default_expression {
+        note.push_str(&format!(", defaults to `{expression}` when left out"));
+    }
     match &field.kind {
         DataFieldKind::Key { target_table, .. } => {
             note.push_str(&format!(", references {}", target_table.0));

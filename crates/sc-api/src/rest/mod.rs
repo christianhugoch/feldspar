@@ -1022,6 +1022,9 @@ impl RestProvider {
                 Ok(_) => self.list(cat, &table, req, user).await?,
             },
             RestOp::Create => {
+                // The defaults first, so the ownership check sees the row that
+                // would be written (`rows::fill_defaults`).
+                let body = &rows::fill_defaults(cat, &table, body, caller.user.as_ref()).await?;
                 match formula(meets_write) {
                     Err(()) => return Ok(forbidden(user)),
                     Ok(None) => {}
@@ -1884,7 +1887,7 @@ fn resource_model(table: &Table, exposed: &std::collections::HashSet<&str>) -> R
             .map_or(ValueType::Text, ValueType::from_basic);
         let mut rf = ResourceField::new(&field.base.name, ty);
         rf.required = field.required;
-        rf.has_default = field.generated.is_some();
+        rf.has_default = field.has_default();
         rf.primary_key = field.primary_key;
         // A calculated field is read on the way out and refused on the way in
         // (`rows::reject_calc_writes`), so it belongs in a row and in no write.

@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## Default values for required fields
+
+A `NOT NULL` field can now have a **default value**: a JavaScript expression evaluated when an
+insert leaves the field out or sends `null`. It sees `user` (the user writing the row, `null`
+for none) and the row's other values, e.g. `user.id` for an owner field or
+`title.toLowerCase()`. It may follow a Key with Ⱶ and call a module function, which are fetched
+first, as for a calculated field.
+
+- **Model.** `DataField::default_expression` and `FieldMeta::default_expression`, stored in
+  `_fd_fields.attributes` under the reserved key `default_expression` (no migration). The merge
+  copies it onto the field and reports one that no longer parses. `DataField::has_default()`
+  is true for a column generator or a default expression.
+- **Inserts.** `rows::fill_defaults` fills the defaults in field order, so a later default sees
+  an earlier one. It runs in `create_row_in`, which every insert path goes through, and also
+  **before the ownership check** in `insert_row_as` and the REST create. That means an `owner`
+  defaulted to `user.id` is what grants the write. It is idempotent. An expression that throws,
+  or gives nothing (`user.email` with no user), fails the insert naming the field instead of
+  surfacing the database's raw `NOT NULL` error. Backup restore still writes rows as stored.
+- **Validation** (`schema_edit`, after the batch): a default must parse and validate against the
+  final schema, and is refused on a nullable or calculated field. Making a defaulted field
+  nullable is refused until the default is cleared.
+- **Generated types.** The REST resource model, the TypeScript `Insert` types and the scaffold
+  treat a field with a default as optional on insert. The agent table tools mention it in the
+  field note.
+- **Editing.** MCP `edit_schema` takes `default` on `add_field`, `alter_field` (where `""`
+  clears it) and `create_table` fields. `describe_schema` reports it. The admin API's
+  `createField`/`updateField` take `default_expression`, and `listFields` returns it; the
+  clients were regenerated. The admin field editor shows a "Default value" box for a non-null,
+  non-calculated field; translations were added.
+- **Tests.** `sc-api/tests/default_values.rs` (Postgres + V8) checks that a left-out owner
+  defaults to the writer and passes the ownership formula, that a slug is computed from the
+  title, that an explicit value is kept and `null` is filled, and that a missing user gives a
+  named error. It also checks the save-time refusals (nullable field, unknown field, making a
+  defaulted field nullable), that the default survives other edits, and that `""` clears it.
+  `ui/admin/src/fieldForm.test.ts` covers when the box is offered and what the requests send.
+
 ## Streams over MCP: `edit_streams` and `update_application.streams`
 
 Field report: an external coding agent building a live-sync app could add a `collab_doc` field

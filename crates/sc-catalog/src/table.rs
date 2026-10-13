@@ -447,6 +447,20 @@ impl Table {
         }
         self.fields[idx].base.attributes = meta.attributes.clone();
 
+        // A default-value expression, if it parses. Validating it against the
+        // schema is the save's job (`schema_edit`); one that no longer parses is
+        // reported and dropped, so an insert fails on the column rather than on
+        // a formula nobody can fix from the row.
+        self.fields[idx].default_expression = None;
+        if let Some(expression) = &meta.default_expression {
+            match sc_expr::Formula::parse(expression) {
+                Ok(_) => self.fields[idx].default_expression = Some(expression.clone()),
+                Err(e) => issues.push(
+                    self.field_issue(meta, &format!("has a default expression that fails: {e}")),
+                ),
+            }
+        }
+
         // A rich type, if it fits the column's SQL type.
         if let Some(type_name) = &meta.type_name {
             let column_sql = self.fields[idx].base.type_.sql_type().to_owned();
@@ -598,6 +612,7 @@ fn virtual_calc_field(meta: &FieldMeta) -> DataField {
         // No column, so nothing fills it in: a calculated field is computed on
         // read.
         generated: None,
+        default_expression: None,
         kind: meta.kind.clone(),
     }
 }

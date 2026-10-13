@@ -242,6 +242,9 @@ fn describe_field(field: &sc_catalog::DataField) -> Json {
         json!(field.base.type_.sql_type()),
     );
     out.insert("required".to_owned(), json!(field.required));
+    if let Some(expression) = &field.default_expression {
+        out.insert("default".to_owned(), json!(expression));
+    }
     out.insert("unique".to_owned(), json!(field.unique));
     out.insert("primary_key".to_owned(), json!(field.primary_key));
     match &field.kind {
@@ -517,7 +520,25 @@ fn edit_parameters() -> Json {
         "additionalProperties": false,
     });
     add_file_properties(&mut parameters);
+    add_default_property(&mut parameters);
     parameters
+}
+
+/// The `default` property, on an operation and on a `create_table` field alike —
+/// added after the fact for the reason [`add_file_properties`] is.
+fn add_default_property(parameters: &mut Json) {
+    let schema = json!({
+        "type": "string",
+        "description":
+            "A default value for a required field: a JavaScript expression evaluated \
+             when an insert leaves the field out or sends null. It sees `user` (the \
+             user writing the row, null for none) and the row's other fields, e.g. \
+             `user.id` for an owner field or `title.toUpperCase()`. An empty string \
+             clears it on `alter_field`.",
+    });
+    let item = &mut parameters["properties"][ARG_OPERATIONS]["items"];
+    item["properties"]["default"] = schema.clone();
+    item["properties"]["fields"]["items"]["properties"]["default"] = schema;
 }
 
 /// The three properties that make a field a file field, on an operation and on
@@ -804,6 +825,7 @@ fn parse_field_settings(obj: &Map<String, Json>) -> Result<FieldSettings> {
         attributes: None,
         primary_key: optional_bool(obj, "primary_key")?,
         required: optional_bool(obj, "required")?,
+        default_expression: optional_string(obj, "default")?,
     })
 }
 
@@ -828,6 +850,7 @@ fn parse_field_spec(item: &Json) -> Result<FieldSpec> {
         primary_key: optional_bool(obj, "primary_key")?.unwrap_or(false),
         kind: field_kind(obj)?.unwrap_or(DataFieldKind::Plain),
         attributes: Attrs::new(),
+        default_expression: optional_string(obj, "default")?,
     })
 }
 

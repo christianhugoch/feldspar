@@ -33,6 +33,8 @@ mod collab_doc;
 mod constraints;
 #[path = "custom_queries.rs"]
 mod custom_queries;
+#[path = "default_values.rs"]
+mod default_values;
 #[path = "file_field_write.rs"]
 mod file_field_write;
 #[path = "generated_client_csrf.rs"]

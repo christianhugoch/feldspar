@@ -79,6 +79,14 @@ pub struct DataField {
     /// admin UI says about a key ("this one numbers itself") is what the column
     /// actually does rather than what creating it was supposed to do.
     pub generated: Option<ColumnGenerator>,
+    /// A JavaScript expression that supplies the value when an insert leaves
+    /// this field out (or sends `null`), if one is set.
+    ///
+    /// An overlay fact, unlike [`generated`](DataField::generated): the database
+    /// knows nothing of it, and the row layer evaluates it before the `INSERT`,
+    /// with `user` (the writing user) and the row's other values in scope. Only
+    /// a `NOT NULL` field may carry one (`schema_edit` refuses it elsewhere).
+    pub default_expression: Option<String>,
     /// What the field references, if anything.
     pub kind: DataFieldKind,
 }
@@ -138,6 +146,7 @@ impl DataField {
             unique: false,
             primary_key: false,
             generated: None,
+            default_expression: None,
             kind: DataFieldKind::Plain,
         }
     }
@@ -170,6 +179,19 @@ impl DataField {
     pub fn generated(mut self, generator: ColumnGenerator) -> DataField {
         self.generated = Some(generator);
         self
+    }
+
+    /// Give the field a default-value expression — see
+    /// [`DataField::default_expression`].
+    pub fn default_expression(mut self, expression: impl Into<String>) -> DataField {
+        self.default_expression = Some(expression.into());
+        self
+    }
+
+    /// Whether an insert may leave this field out and still get a value: the
+    /// column fills itself in, or a default expression supplies one.
+    pub fn has_default(&self) -> bool {
+        self.generated.is_some() || self.default_expression.is_some()
     }
 
     /// This field's calculated-field expression, if it is one (Phase 8).
@@ -241,6 +263,7 @@ impl DataField {
             unique: false,
             primary_key,
             generated: col.generated.clone(),
+            default_expression: None,
             kind,
         }
     }

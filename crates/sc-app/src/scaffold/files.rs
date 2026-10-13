@@ -2849,7 +2849,7 @@ impl<'a> CreateForm<'a> {
                 continue;
             }
             if field.primary_key {
-                let optional = modelled.map_or(!field.required || field.generated.is_some(), |f| {
+                let optional = modelled.map_or(!field.required || field.has_default(), |f| {
                     f.optional_on_insert()
                 });
                 if optional {

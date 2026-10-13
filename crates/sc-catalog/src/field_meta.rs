@@ -91,6 +91,9 @@ const KEY_STORE: &str = "store";
 const KEY_FOLDER: &str = "folder";
 const KEY_MIME_ALLOW: &str = "mime_allow";
 const KEY_EXPRESSION: &str = "expression";
+// Not a kind's parameter, but stored the same way: any kind but `calc` may have
+// one, and it is the overlay's, never the rich type's.
+const KEY_DEFAULT_EXPRESSION: &str = "default_expression";
 
 /// The settings a `File` field kind takes, as the same [`FormField`] vocabulary a
 /// rich type's attributes and a framework's config use (§6.2) — so the admin UI
@@ -185,6 +188,10 @@ pub struct FieldMeta {
     /// `Integer`'s `min`/`max`. The kind's parameters are stored beside these but
     /// are modelled in [`kind`](FieldMeta::kind), not here.
     pub attributes: Attrs,
+    /// A JavaScript expression supplying the value when an insert leaves the
+    /// field out — see [`DataField::default_expression`]. Stored in the
+    /// attributes bag under a reserved key, like a kind's parameters.
+    pub default_expression: Option<String>,
 }
 
 impl FieldMeta {
@@ -200,6 +207,7 @@ impl FieldMeta {
             type_name: None,
             kind: DataFieldKind::Plain,
             attributes: Attrs::new(),
+            default_expression: None,
         }
     }
 
@@ -224,6 +232,12 @@ impl FieldMeta {
     /// Set the field's kind (and its parameters).
     pub fn kind(mut self, kind: DataFieldKind) -> FieldMeta {
         self.kind = kind;
+        self
+    }
+
+    /// Give the field a default-value expression.
+    pub fn default_expression(mut self, expression: impl Into<String>) -> FieldMeta {
+        self.default_expression = Some(expression.into());
         self
     }
 
@@ -474,6 +488,12 @@ fn kind_discriminant(kind: &DataFieldKind) -> &'static str {
 /// omitted rather than stored as null, keeping the bag sparse (§9).
 fn attributes_for_storage(meta: &FieldMeta) -> Attrs {
     let mut obj = meta.attributes.clone();
+    if let Some(expression) = &meta.default_expression {
+        obj.insert(
+            KEY_DEFAULT_EXPRESSION.to_owned(),
+            Json::String(expression.clone()),
+        );
+    }
     match &meta.kind {
         DataFieldKind::Plain => {}
         DataFieldKind::Key {
@@ -527,7 +547,13 @@ fn field_meta_from_row(row: &Row) -> Result<FieldMeta> {
     let table_name = text(row, COL_TABLE)?;
     let field_name = text(row, COL_NAME)?;
     let discriminant = text(row, COL_KIND)?;
-    let stored_attributes = object(row, COL_ATTRIBUTES)?;
+    let mut stored_attributes = object(row, COL_ATTRIBUTES)?;
+    let default_expression = take_optional_text(
+        &mut stored_attributes,
+        KEY_DEFAULT_EXPRESSION,
+        &table_name,
+        &field_name,
+    )?;
     let (kind, attributes) =
         kind_and_attributes(&discriminant, stored_attributes, &table_name, &field_name)?;
 
@@ -538,6 +564,7 @@ fn field_meta_from_row(row: &Row) -> Result<FieldMeta> {
         type_name: nullable_text(row, COL_TYPE)?,
         kind,
         attributes,
+        default_expression,
         table_name,
         field_name,
     })

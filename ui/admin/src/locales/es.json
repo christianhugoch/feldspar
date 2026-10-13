@@ -961,5 +961,8 @@
   "Nobody has this stream open.": "Nadie tiene abierto este flujo.",
   "User": "Usuario",
   "Shown fields": "Campos mostrados",
-  "anonymous": "anónimo"
+  "anonymous": "anónimo",
+  "Default value": "Valor predeterminado",
+  "A JavaScript expression used when a new row leaves this field empty. It can use": "Una expresión JavaScript que se usa cuando una fila nueva deja este campo vacío. Puede usar",
+  "(the user writing the row) and the row's other fields.": "(el usuario que escribe la fila) y los demás campos de la fila."
 }

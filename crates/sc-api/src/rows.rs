@@ -654,6 +654,7 @@ pub async fn create_row_in(
     context: Option<&CallerContext>,
     executor: &Executor,
 ) -> Result<Json> {
+    let body = &fill_defaults(catalog, table, body, context.and_then(|c| c.user.as_ref())).await?;
     let obj = require_object(body)?;
     reject_calc_writes(table, obj)?;
     reject_document_writes(table, obj)?;
@@ -691,6 +692,102 @@ pub async fn create_row_in(
     )
     .await;
     Ok(row)
+}
+
+/// The insert `body` with every field that has a
+/// [default expression](DataField::default_expression) and is left out, or sent
+/// as `null`, filled in from it.
+///
+/// Each expression is evaluated with `user` (the writing user's object, or
+/// `null` for none) and the row's other values in scope — the values the body
+/// gives, then the defaults already filled, in field order — under the
+/// `_insert` flag. It may follow a Key with Ⱶ and call a module function, which
+/// are fetched first, exactly as a calculated field's are.
+///
+/// Idempotent: a body whose defaulted fields are all given is returned as it
+/// is. That is what lets an ownership check fill the defaults before deciding
+/// (an `owner` defaulted to `user.id` is what the formula then grants on) and
+/// [`create_row_in`] fill them again for the callers that check nothing.
+///
+/// An expression that throws, yields a value the field's type refuses, or yields
+/// nothing (`null` or `undefined` — `user.email` with no user) for a `NOT NULL`
+/// field fails the insert naming the field, rather than leaving the database to
+/// report a null it cannot say the origin of.
+pub async fn fill_defaults(
+    catalog: &Catalog,
+    table: &Table,
+    body: &Json,
+    user: Option<&Json>,
+) -> Result<Json> {
+    let obj = require_object(body)?;
+    let missing = |f: &&DataField| {
+        f.default_expression.is_some()
+            && obj.get(&f.base.name).is_none_or(Json::is_null)
+    };
+    if !table.fields.iter().any(|f| missing(&f)) {
+        return Ok(body.clone());
+    }
+    let failed = |field: &str, e: &dyn std::fmt::Display| {
+        Error::invalid(format!(
+            "the default value of `{}.{field}` could not be computed: {e}",
+            table.name
+        ))
+    };
+    let evaluator = catalog.formula_evaluator();
+    let shape = catalog.schema_shape()?;
+    let user: Option<std::collections::BTreeMap<String, Value>> = user.and_then(Json::as_object).map(|u| {
+        u.iter()
+            .map(|(k, v)| (k.clone(), sc_expr::value_from_json(v)))
+            .collect()
+    });
+    // The row the expressions see: what the body gives, coerced as the insert
+    // will coerce it. A key that is not a stored field is left for the insert
+    // to refuse by name.
+    let mut row = std::collections::BTreeMap::new();
+    for (key, json) in obj {
+        if table.field(key).is_some_and(|f| !f.is_calc() && !f.is_collab_doc()) {
+            row.insert(key.clone(), column_value(table, key, json)?);
+        }
+    }
+    let mut filled = obj.clone();
+    for field in table.fields.iter().filter(missing) {
+        let name = &field.base.name;
+        let Some(source) = &field.default_expression else {
+            continue;
+        };
+        let Some(evaluator) = &evaluator else {
+            return Err(failed(name, &"no formula evaluator is running"));
+        };
+        let formula = sc_expr::Formula::parse(source).map_err(|e| failed(name, &e))?;
+        let analysis = formula
+            .validate(&shape, &table.name)
+            .map_err(|e| failed(name, &e))?;
+        let mut bound = row.clone();
+        sc_catalog::prefetch_bindings(catalog, table, &analysis, &shape, &mut bound)
+            .await
+            .map_err(|e| failed(name, &e))?;
+        let call = sc_expr::FormulaCall {
+            formula,
+            op: sc_expr::Operation::Insert,
+            row: bound,
+            user: user.clone(),
+            ambient: sc_expr::AmbientValues::new(),
+        };
+        let json = evaluator
+            .eval_value(call)
+            .await
+            .map_err(|e| failed(name, &e))?;
+        if json.is_null() {
+            if field.required {
+                return Err(failed(name, &"it gave no value, and the field is required"));
+            }
+            continue;
+        }
+        let value = column_value(table, name, &json)?;
+        row.insert(name.clone(), value);
+        filled.insert(name.clone(), json);
+    }
+    Ok(Json::Object(filled))
 }
 
 /// Update the row of `table` whose primary key is `id`, returning the updated

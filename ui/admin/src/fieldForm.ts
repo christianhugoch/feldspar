@@ -83,6 +83,12 @@ export type FieldForm = {
   /** Computed on read, with no stored column (§7.3). */
   calculated: boolean;
   expression: string;
+  /**
+   * The JavaScript expression an insert that leaves a NOT NULL field out takes
+   * its value from, with `user` and the row's other fields in scope. Empty for
+   * none; only sent for a field that is not nullable.
+   */
+  defaultExpression: string;
   /** The attribute form's values, keyed by spec-field name. */
   attrs: Record<string, string>;
   /** A Key's parameters, which the generic attribute form cannot render. */
@@ -102,6 +108,7 @@ export const EMPTY_FIELD_FORM: FieldForm = {
   wasPrimaryKey: false,
   calculated: false,
   expression: "",
+  defaultExpression: "",
   attrs: {},
   key: EMPTY_KEY,
 };
@@ -134,6 +141,7 @@ export function fieldForm(field: FieldItem): FieldForm {
     primaryKey: field.primary_key,
     generated: field.generated,
     wasPrimaryKey: field.primary_key,
+    defaultExpression: field.default_expression,
     attrs: readConfig(field.attributes),
   };
   if (kind?.type === "calc") {
@@ -252,6 +260,25 @@ function fieldTypeBody(
   return { type: selected.name };
 }
 
+/**
+ * Whether the form offers a default value: only a NOT NULL stored field has one,
+ * because a nullable field may already be left out, and a calculated one is
+ * never written. A key column counts as NOT NULL.
+ */
+export function defaultEditable(form: FieldForm): boolean {
+  return !form.calculated && (!form.nullable || form.primaryKey);
+}
+
+/**
+ * The default expression to send: the box's, or nothing where none applies.
+ * Both endpoints read an omitted one as "none", so on an edit leaving it out is
+ * how it is cleared.
+ */
+function defaultBody(form: FieldForm): { default_expression?: string } {
+  const expression = defaultEditable(form) ? form.defaultExpression.trim() : "";
+  return expression ? { default_expression: expression } : {};
+}
+
 /** The `createField` request the form describes. */
 export function createFieldBody(form: FieldForm, selected: FieldTypeItem): CreateFieldRequest {
   return {
@@ -263,6 +290,7 @@ export function createFieldBody(form: FieldForm, selected: FieldTypeItem): Creat
     // Nothing invents a key, so this is the only way a table gets one: the box
     // on the field being added (GOALS).
     primary_key: form.primaryKey,
+    ...defaultBody(form),
     ...fieldTypeBody(form, selected),
   };
 }
@@ -299,6 +327,8 @@ export function updateFieldBody(form: FieldForm, selected: FieldTypeItem): Updat
     // the endpoint.
     primary_key: form.primaryKey,
     ...(nullableChanged ? { required: !form.nullable } : {}),
+    // Whole-object: an omitted one clears it.
+    ...defaultBody(form),
     ...fieldTypeBody(form, selected),
   };
 }
