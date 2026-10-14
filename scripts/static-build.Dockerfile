@@ -18,11 +18,24 @@
 # The export stage carries no image, only files: the script drives this with
 # `--target export --output type=local`, so the result is a directory on the
 # host and no image is left behind.
+#
+# Two variants come out of this one file, chosen by `VARIANT`:
+#
+#   static           `+crt-static` on Debian 12: one file, no shared libraries,
+#                    runs on any glibc or musl distribution. No Python.
+#   debian13-python  dynamically linked on Debian 13 (`DEBIAN_SUITE=trixie`),
+#                    with `--features python`: it links `libpython3.13`, so it
+#                    runs on Debian 13 with that package installed and nowhere
+#                    else. A static binary cannot embed CPython at all (see
+#                    `scripts/build-static.sh`), which is why it is a second
+#                    artifact and not a flag on the first.
 
 ARG RUST_VERSION=1.97
 ARG DEBIAN_SUITE=bookworm
+ARG VARIANT=static
 
 FROM rust:${RUST_VERSION}-${DEBIAN_SUITE} AS builder
+ARG VARIANT
 
 # The C-side build requirements, in the order the crates that need them appear
 # in the dependency graph. `zlib1g-dev` is the one that is easy to miss: a
@@ -40,6 +53,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# The Python variant links the distribution's CPython (`python3-dev` is
+# `libpython3.13-dev` on trixie). PyO3 builds against `abi3-py311`, so this only
+# decides the soname the binary asks for at run time.
+RUN if [ "${VARIANT}" = debian13-python ]; then \
+        apt-get update && apt-get install -y --no-install-recommends python3-dev \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Node from nodejs.org rather than the distribution: the UI bundles are built by
 # Vite 5, whose floor is Node 18, and a Debian stable's Node is whatever that
@@ -71,9 +92,10 @@ ARG SC_BUILD_ADMIN=1
 ARG JOBS=
 ENV SC_BUNDLE_PREFIX=${PREFIX}
 
-# `+crt-static` is what makes this artifact one file that runs on both a glibc
-# distribution and a musl one — see the header of `scripts/build-static.sh` for
-# why that, and not a musl target, is the way there.
+# `+crt-static` is what makes the static artifact one file that runs on both a
+# glibc distribution and a musl one — see the header of `scripts/build-static.sh`
+# for why that, and not a musl target, is the way there. The Python variant is
+# linked dynamically instead, and built with the `python` feature.
 #
 # The two cache mounts make a second build of a changed tree minutes rather than
 # an hour. `target` is `sharing=locked` because two concurrent builds writing one
@@ -81,16 +103,27 @@ ENV SC_BUNDLE_PREFIX=${PREFIX}
 # `CARGO_TARGET_DIR` is a fixed path rather than `${PREFIX}/target` so the cache
 # mount's target is a literal: build-arg expansion inside a `--mount` flag is not
 # something to rely on, and a cache mount that silently does not apply is a
-# forty-minute rebuild that looks like a cache miss.
-ENV CARGO_TARGET_DIR=/build/target
+# forty-minute rebuild that looks like a cache miss. Each variant builds in its
+# own subdirectory of it: they differ in RUSTFLAGS, features and base image, and
+# sharing one target directory would rebuild everything on every switch — or
+# worse, link objects compiled against one Debian's headers into the other.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     set -eu; \
     export SC_BUILD_ADMIN="${SC_BUILD_ADMIN}"; \
-    export RUSTFLAGS="-C target-feature=+crt-static${RUSTFLAGS:+ ${RUSTFLAGS}}"; \
-    cargo build --release --target "${TARGET}" -p sc-cli ${JOBS:+--jobs "${JOBS}"}; \
+    export CARGO_TARGET_DIR="/build/target/${VARIANT}"; \
+    case "${VARIANT}" in \
+        static) \
+            export RUSTFLAGS="-C target-feature=+crt-static${RUSTFLAGS:+ ${RUSTFLAGS}}"; \
+            features="" ;; \
+        debian13-python) \
+            export PYO3_PYTHON=python3; \
+            features="--features python" ;; \
+        *) echo "unknown VARIANT ${VARIANT}" >&2; exit 1 ;; \
+    esac; \
+    cargo build --release --target "${TARGET}" -p sc-cli ${features} ${JOBS:+--jobs "${JOBS}"}; \
     mkdir -p /out/bin; \
-    cp "/build/target/${TARGET}/release/feldspar" /out/bin/feldspar
+    cp "${CARGO_TARGET_DIR}/${TARGET}/release/feldspar" /out/bin/feldspar
 
 # Staged separately from the build so the cache mount above is not held open
 # while the (large) copies happen.

@@ -846,3 +846,68 @@ async fn a_python_model_provider_declares_itself_and_then_fits_and_predicts() ->
 fn attrs_of(value: Json) -> sc_types::Attrs {
     value.as_object().expect("an object").clone()
 }
+
+/// The plain distribution `tests/fixtures/sc_fixture_pkg`: no entry point and
+/// no `saltcorn` decorators — a library, as `requests` or `pandas` is.
+fn library_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sc_fixture_pkg")
+}
+
+/// A **library** installed as a module — what `installModule` with source
+/// `pypi` does for `requests` — loads with no issues and supplies nothing, a
+/// code body can import it, and a reload leaves the import alone rather than
+/// importing it a second time (which a compiled library would not survive).
+#[tokio::test]
+async fn a_plain_library_installs_as_a_module_that_code_bodies_can_import() -> Result<()> {
+    let _guard = ONE_AT_A_TIME.lock().await;
+    skip_without!(
+        have_toolchain().await,
+        "python3 with pip is not on the PATH"
+    );
+    skip_without!(
+        cfg!(feature = "python-host"),
+        "built without an interpreter"
+    );
+    let dir = shared_environment().await;
+    let installed = environment_at(dir)
+        .install(PythonSource::Local, &library_dir().display().to_string())
+        .await?;
+    assert_eq!(installed.name.replace('_', "-"), "sc-fixture");
+
+    let db = TestDb::new().await?;
+    let catalog = catalog_of(&db).await?;
+    bootstrap_modules(&catalog).await?;
+    let mut module = Module::new(
+        &installed.name,
+        ModuleSource::Local,
+        library_dir().display().to_string(),
+    )
+    .in_language(ModuleLanguage::Python);
+    module.version = Some(installed.version.clone());
+    save_module(&catalog, &module).await?;
+
+    let host = host(dir);
+    for load in ["install", "reload"] {
+        let mut registry = builtin_actions()?;
+        let loaded = load_set(&catalog, &host, &mut registry).await?;
+        assert_eq!(loaded.len(), 1);
+        let library = &loaded[0];
+        // A library is not a plugin that forgot its decorators: no issue.
+        assert!(library.issues.is_empty(), "{load}: {:?}", library.issues);
+        assert!(library.is_loaded(), "{load}");
+        let manifest = library.manifest.as_ref().expect("loaded");
+        assert!(manifest.actions.is_empty() && manifest.functions.is_empty());
+        assert!(manifest.table_providers.is_empty());
+
+        // And what it is for: a code body imports it.
+        let value = host
+            .python()
+            .run(sc_expr::CodeCall {
+                code: "import sc_fixture\nreturn sc_fixture.VALUE\n".to_owned(),
+                ..sc_expr::CodeCall::default()
+            })
+            .await?;
+        assert_eq!(value, json!(7), "{load}");
+    }
+    Ok(())
+}

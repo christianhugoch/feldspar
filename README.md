@@ -103,7 +103,9 @@ the first admin user and TLS.
 Those URLs carry no version: they are always the *latest* build, which is also how a
 host is upgraded (§2.8). Two things the artifact does not have: **Python triggers**,
 which need a dynamically linked build (§3), and support for native Node addons in
-modules (§4.1). Everything else in this README applies to it unchanged.
+modules (§4.1). Everything else in this README applies to it unchanged. On
+**Debian 13**, `feldspar-debian13-python.tar.gz` from the same place is that
+dynamically linked build, with Python (docs/OPERATIONS.md §2.1).
 
 **Or run it as a script.** `scripts/setup-host.sh` is this section — packages, the
 service account, the role and database, `feldspar.toml`, the unit — and it can be
@@ -624,9 +626,12 @@ cargo build --release -p sc-cli --features python  # the only way to get Python 
 The reason is linkage rather than policy. Python is *embedded*: the build links
 `libpython3.x.so` into the binary, so a binary built with the feature **will not start
 at all** on a host that has no matching library — a dynamic-linker error before the
-server prints anything — and **the packaged artifact of §4.1 cannot carry it**, being a
-static binary with no shared-library dependencies by design. So the shipped tarball has
-no Python, and a Python-capable server is a separate, dynamically-linked build. One such
+server prints anything — and **the static artifact of §4.1 cannot carry it**, being a
+static binary with no shared-library dependencies by design. So a Python-capable server
+is a separate, dynamically-linked build: either this one, or the prebuilt
+**Debian 13 + Python artifact** (`feldspar-debian13-python.tar.gz`, built by the same
+`scripts/build-static.sh` and published beside the static one), which links Debian 13's
+`libpython3.13` and runs on Debian 13 only. Installing it: docs/OPERATIONS.md §2.1. One such
 build serves every CPython from **3.11** up (`abi3`), as long as the matching
 `libpython` is present on the host.
 
@@ -694,8 +699,9 @@ The binary inside is statically linked (`+crt-static`), so it has no shared-libr
 dependencies and no interpreter: the same tarball runs on Debian, Ubuntu, RHEL and
 on Alpine. **That is also why it has no Python** — embedding CPython means linking
 `libpython`, which a static binary cannot do (and could not `dlopen` a C-extension wheel
-even if it did), so a Python-capable server is the separate dynamically-linked build of
-§3 rather than this artifact. It carries the admin SPA and the IDE beside it, an `install.sh` that
+even if it did), so a Python-capable server is a separate dynamically-linked build: the
+one of §3, or the Debian 13 + Python artifact this script also builds (`--variant`;
+docs/OPERATIONS.md §2.3). It carries the admin SPA and the IDE beside it, an `install.sh` that
 puts the tree at `/opt/feldspar` — the prefix compiled into the binary, which
 `--prefix` changes at build time — and a copy of `setup-host.sh`, installed at
 `/opt/feldspar/setup-host.sh`. So a machine with nothing on it takes three commands

@@ -90,6 +90,7 @@ impl<'e> Session<'e> {
             previews: None,
             browser: None,
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };

@@ -14,7 +14,7 @@ one is the order things are done in.
 
 Contents:
 
-1. [The two artifacts](#1-the-two-artifacts)
+1. [The artifacts](#1-the-artifacts)
 2. [Installing](#2-installing)
 3. [Updating](#3-updating)
 4. [The configuration file](#4-the-configuration-file)
@@ -27,30 +27,40 @@ Contents:
 
 ---
 
-## 1. The two artifacts
+## 1. The artifacts
 
-There is one binary, `feldspar`, and two ways to get it. Everything else in this
-document is the same for both.
+There is one binary, `feldspar`, and three ways to get it: two prebuilt tarballs,
+and a build from source. Everything else in this document is the same for all
+three.
 
-| | **Static artifact** | **From source** |
-|---|---|---|
-| Where it comes from | `https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz`, or `scripts/build-static.sh` in a checkout | `cargo build --release -p sc-cli` |
-| Linkage | statically linked glibc (`+crt-static`), a static-PIE: no shared libraries, no interpreter | dynamic, against this machine's glibc |
-| Runs on | Debian, Ubuntu, RHEL **and** Alpine, from the same tarball | the machine it was built on, and machines like it |
-| Toolchain on the host | none | Rust, a C toolchain, `libclang`, Node, a few GB of RAM |
-| Installed at | `/opt/feldspar` (the prefix is compiled in) | `/usr/local/bin/feldspar`, with the checkout kept where it was built |
-| **Python triggers** | **no** — embedding CPython means linking `libpython`, which a static binary cannot do | yes, with `--features python` |
-| Native Node addons in modules | no — a static binary cannot `dlopen` | yes |
-| **Built-in model providers** | yes — five smartcore providers plus two hypothesis tests | the same, unless built `--no-default-features` |
-| Name resolution | in-process (`sc-dns`), **not** glibc NSS | glibc |
+| | **Static artifact** | **Debian 13 + Python artifact** | **From source** |
+|---|---|---|---|
+| Where it comes from | `https://feldspar-latest-static.saltcorn.com/feldspar.tar.gz`, or `scripts/build-static.sh` in a checkout | `https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz`, or the same script | `cargo build --release -p sc-cli` |
+| Linkage | statically linked glibc (`+crt-static`), a static-PIE: no shared libraries, no interpreter | dynamic, against Debian 13's glibc and `libpython3.13.so.1.0`; V8 and every Rust crate still linked in | dynamic, against this machine's glibc |
+| Runs on | Debian, Ubuntu, RHEL **and** Alpine, from the same tarball | **Debian 13 (trixie) only** | the machine it was built on, and machines like it |
+| Packages on the host | none | `libpython3.13` to start at all (`install.sh` adds it), `python3` and `python3-venv` to install Python modules (`setup-host.sh` adds them) | — |
+| Toolchain on the host | none | none | Rust, a C toolchain, `libclang`, Node, a few GB of RAM |
+| Installed at | `/opt/feldspar` (the prefix is compiled in) | `/opt/feldspar`, the same | `/usr/local/bin/feldspar`, with the checkout kept where it was built |
+| **Python triggers and modules** | **no** — embedding CPython means linking `libpython`, which a static binary cannot do | **yes** | yes, with `--features python` |
+| Native Node addons in modules | no — a static binary cannot `dlopen` | yes | yes |
+| **Built-in model providers** | yes — five smartcore providers plus two hypothesis tests | the same | the same, unless built `--no-default-features` |
+| Name resolution | in-process (`sc-dns`), **not** glibc NSS | in-process (`sc-dns`), the same | in-process (`sc-dns`) |
 
-Two consequences of the static build are worth knowing before you choose it:
+`/opt/feldspar/VARIANT` says which of the two tarballs a host is running: `static`
+or `debian13-python`.
 
-- **A Python-capable server is the from-source build.** There is no flag that adds
-  Python to a binary that was not built with `--features python`, and the shipped
-  tarball is not one. A trigger with a Python body on such a server fails at fire
-  time with a message saying so, rather than at configuration time — so a
-  trigger's configuration keeps its meaning across deployments.
+Consequences worth knowing before you choose:
+
+- **Python needs the Debian 13 artifact or a source build.** A static binary cannot
+  embed CPython. The link against `libpython` fails under `+crt-static`, and even a
+  binary that linked could not `dlopen` CPython's own extension modules or any
+  compiled wheel (numpy, scikit-learn). So the Python-capable tarball is a second,
+  dynamically linked build. It is made on Debian 13 and links Debian 13's
+  `libpython3.13`, which is why it runs there and nowhere else. There is no flag
+  that adds Python to the static binary. A trigger with a Python body on a server
+  without Python fails at fire time with a message saying so, rather than at
+  configuration time, so a trigger's configuration keeps its meaning across
+  deployments.
 - **The machine-learning built-ins are a default-on cargo feature.** `sc-model`'s
   `smartcore` feature carries `linear_regression`, `logistic_regression`,
   `random_forest`, `kmeans` and `pca`; a build with `--no-default-features` leaves
@@ -59,7 +69,7 @@ Two consequences of the static build are worth knowing before you choose it:
   machine-learning built-ins were compiled out, and a module can still supply
   providers. Like `--features python`, it is decided at build time and no run-time flag
   substitutes for it.
-- **`/etc/nsswitch.conf` does not apply to the static binary.** It resolves names
+- **`/etc/nsswitch.conf` does not apply to either artifact.** It resolves names
   itself, reading `/etc/resolv.conf` and `/etc/hosts` and nothing else. mDNS
   (`.local`), `myhostname`'s synthesis of the local hostname, and LDAP/sssd hosts
   are invisible to it. A name it must reach — your database host, your SMTP
@@ -142,6 +152,45 @@ install anywhere but `/opt/feldspar`, rebuild with `scripts/build-static.sh
 --prefix <path>` — an artifact built for one prefix and installed at another
 serves a blank page.
 
+#### With Python: the Debian 13 artifact
+
+On a **Debian 13** host that is to run Python trigger bodies or install Python
+modules, download the other tarball. The commands are the same apart from the
+name:
+
+```bash
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz.sha256
+sha256sum -c feldspar-debian13-python.tar.gz.sha256
+tar -xzf feldspar-debian13-python.tar.gz
+sudo feldspar-*/install.sh                              # also installs libpython3.13
+sudo /opt/feldspar/setup-host.sh --domain example.com   # also python3, python3-venv
+```
+
+The differences from the static install:
+
+- **`install.sh` installs `libpython3.13` with apt if it is missing.** The binary
+  is linked against it and does not start without it: the dynamic linker fails
+  with `error while loading shared libraries: libpython3.13.so.1.0` before the
+  server prints anything. `install.sh` installs it rather than leaving it to
+  `setup-host.sh`, because an upgrade runs only `install.sh`.
+- **`setup-host.sh` adds `python3` and `python3-venv`.** It knows to because
+  `install.sh` wrote `/opt/feldspar/VARIANT`. Installing a Python module creates a
+  virtual environment and runs `pip` in it, using the `python3` on `PATH`
+  (`--python-bin`). That interpreter has to be the same minor version as the
+  library the binary links, and on Debian 13 both are 3.13.
+- **Nothing else changes.** The prefix, the tree, the unit and `feldspar.toml` are
+  the same as for the static artifact. To switch a host from one artifact to the
+  other, install the other tarball over it as in §3.2.
+
+The interpreter is not started until the first Python body or module needs it, and
+`--python off` keeps it off. Settings → Development shows which state the server
+is in (README §3).
+
+On any other distribution (Debian 12, Ubuntu, RHEL, Alpine), this tarball does not
+run. Use the static artifact, or build from source with `--features python`
+(Mode B).
+
 ### 2.2 Mode B — compiled from source, on the host
 
 The host does the building. One command, and it wants a C toolchain, `libclang`,
@@ -179,10 +228,23 @@ This is the mode for a fleet: one machine has the toolchain, the rest have the
 binary.
 
 ```bash
-scripts/build-static.sh                          # dist/feldspar-<version>-<target>.tar.gz
-scripts/build-static.sh --deploy root@vm         # ...and install it there
+scripts/build-static.sh                          # both artifacts, into dist/
+scripts/build-static.sh --deploy root@vm         # ...and install the static one there
+scripts/build-static.sh --deploy vm --deploy-variant python   # ...or the Debian 13 + Python one
+scripts/build-static.sh --variant python --deploy vm          # build only that one, and install it
 scripts/build-static.sh --deploy vm --ssh-opt -p2222
 ```
+
+By default the script builds **both** artifacts, one after the other:
+
+```
+dist/feldspar-<version>-<target>.tar.gz                   static, no Python
+dist/feldspar-<version>-<target>-debian13-python.tar.gz   Debian 13, with Python
+```
+
+`--variant static` or `--variant python` builds only one, which halves the build
+time. `--deploy` installs one of them: the static one unless `--deploy-variant
+python` is given (or `--variant python` built nothing else).
 
 Then, on a host that has never run feldspar, the other half of the two-step
 install:
@@ -208,13 +270,14 @@ Build-environment options worth knowing:
 
 | Flag | Effect |
 |---|---|
-| `--docker` | build in a container with a pinned Rust and Node. The default when docker with buildx is present, because it does not depend on what this machine has installed |
-| `--native` | build with this machine's toolchain. Needs the target added to rustup, clang/libclang, cmake, a C compiler, `libz.a` (`zlib1g-dev`) and, unless `--no-ui`, node and npm |
+| `--variant static\|python\|both` | which artifacts to build (default `both`) |
+| `--docker` | build in a container with a pinned Rust and Node. The default when docker with buildx is present, because it does not depend on what this machine has installed. The static artifact is built on Debian 12 and the Python one on Debian 13 (`rust:<version>-trixie` plus `python3-dev`), each with its own cargo cache |
+| `--native` | build with this machine's toolchain. Needs the target added to rustup, clang/libclang, cmake, a C compiler, `libz.a` (`zlib1g-dev`) and, unless `--no-ui`, node and npm. The Python artifact also needs `python3-dev`, and a `python3` that is 3.13 (the script refuses otherwise). Build it natively only on Debian 13, because it links this machine's glibc; it uses its own target directory, `target/debian13-python`, so expect a second full build tree on disk |
 | `--target aarch64-unknown-linux-gnu` | the other supported target. The **musl** targets are refused by name: V8 reaches this build as `rusty_v8`'s prebuilt static archive, which upstream publishes for gnu, darwin and Windows only |
 | `--prefix PATH` | the absolute directory the artifact will be installed to, compiled into the binary |
 | `--no-ui` | skip the five front-end bundles (`SC_BUILD_ADMIN=0`), so no Node toolchain is needed — and the artifact has no admin UI, no IDE, **no Saltcorn UI**, no builder and no Analytics UI (§5.3) |
 | `-j N` | lower cargo's parallelism if the linker runs the machine out of memory. This workspace links V8 |
-| `--no-verify` | skip the post-build checks — static linkage, and a smoke run in Debian and Alpine containers |
+| `--no-verify` | skip the post-build checks. For the static artifact: static linkage, and a smoke run in Debian 12 and Alpine containers. For the Python artifact: the binary asks for `libpython3.13.so.1.0`, and it runs in a `debian:13-slim` container once `libpython3.13` is installed there (this check needs network access for apt) |
 
 ### 2.4 What `setup-host.sh` writes
 
@@ -368,6 +431,25 @@ sudo feldspar-*/install.sh
 sudo systemctl start feldspar
 ```
 
+A host running the Debian 13 + Python artifact updates the same way from its own
+URL. `cat /opt/feldspar/VARIANT` shows which artifact a host has.
+
+```bash
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz
+curl -fLO https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz.sha256
+sha256sum -c feldspar-debian13-python.tar.gz.sha256
+tar -xzf feldspar-debian13-python.tar.gz
+sudo systemctl stop feldspar
+sudo feldspar-*/install.sh
+sudo systemctl start feldspar
+```
+
+**Switching a static host to Python** is the same update with the other tarball,
+followed by `sudo apt install python3 python3-venv` (or a re-run of
+`setup-host.sh`, which keeps the existing config and unit) so that Python modules
+can be installed. **Switching back** loses Python. Triggers with Python bodies then
+fail at fire time.
+
 **Stop the service first.** `install.sh` copies over `/opt/feldspar/bin/feldspar`,
 and the kernel refuses to write the executable of a live process — that is what
 `ETXTBSY` / `Text file busy` means if you try it while the server is up. Nothing
@@ -419,11 +501,17 @@ for h in app1 app2 app3; do
 done
 ```
 
-**Publishing, rather than deploying.** `--release` uploads the tarball and its
-`.sha256` to the Cloudflare R2 bucket `feldspar-latest-static` as
-`feldspar.tar.gz` and `feldspar.tar.gz.sha256` — the object names carry no
-version, so each release overwrites the last and the download URL of §2.1 never
-changes:
+**Publishing, rather than deploying.** `--release` uploads each tarball it built,
+with its `.sha256`, to the Cloudflare R2 bucket `feldspar-latest-static`:
+
+| Object | Artifact |
+|---|---|
+| `feldspar.tar.gz`, `feldspar.tar.gz.sha256` | static |
+| `feldspar-debian13-python.tar.gz`, `feldspar-debian13-python.tar.gz.sha256` | Debian 13 + Python |
+
+The object names carry no version, so each release overwrites the last and the
+download URLs of §2.1 never change. A `--variant` release publishes only the
+artifact it built and leaves the other object as it was:
 
 ```bash
 scripts/build-static.sh --release
@@ -973,7 +1061,7 @@ about proxies first — behind a reverse proxy every peer looks local.
 
 ### 7.2 Minting a token
 
-The panel below those switches. A label, an expiry in days, and six grants:
+The panel below those switches. A label, an expiry in days, and seven grants:
 
 | Grant | What it allows |
 |---|---|
@@ -983,9 +1071,12 @@ The panel below those switches. A label, an expiry in days, and six grants:
 | `allow_access_changes` | change role floors, ownership formulae and row-level security |
 | `allow_triggers` | work on triggers at all |
 | `allow_applications` | work on applications' custom SQL queries |
+| `allow_modules` | list and install modules: npm packages and Python distributions (default **off**; §7.7) |
 
 `allow_access_changes` is the one to think hardest about: it changes what *every*
 user of the deployment can reach. `allow_drop` at least announces itself.
+`allow_modules` is the other one: an installed package runs its own code with the
+server's privileges, and a Python one has no sandbox at all.
 
 The token is shown **once**, prefixed `fspk_` — which is what makes it
 recognisable in a paste and greppable by a secret scanner — with the registration
@@ -993,7 +1084,7 @@ line built around it. The server keeps only a SHA-256 hash, so a lost token is
 revoked and replaced rather than recovered.
 
 **Two sentences to read before minting one.** *This token is an administrator*: it
-runs with the full authority of the admin who minted it, bounded only by those six
+runs with the full authority of the admin who minted it, bounded only by those seven
 boxes, and every call is authorized exactly as that person's own session would be.
 *Revoking it is the only way to take it back*: there is no session to expire and
 no browser to close.
@@ -1022,6 +1113,7 @@ feldspar mcp-token create --label "claude-code on my laptop" --admin \
 | `--allow-access-changes` / `--no-allow-access-changes` | role floors, ownership, row-level security (default **off**) |
 | `--allow-triggers` / `--no-allow-triggers` | the trigger tools at all (default **on**) |
 | `--allow-applications` / `--no-allow-applications` | applications' custom SQL (default **on**) |
+| `--allow-modules` / `--no-allow-modules` | list and install modules (default **off**) |
 | `--url ORIGIN` | the origin the printed `claude mcp add` line points at (default `http://localhost:<bind port>`) |
 | `--name NAME` | what the server is called in that line (default `feldspar`) |
 
@@ -1268,6 +1360,37 @@ is a thing that happened and that list is where it is seen to have happened. The
 next call the agent makes fails. The same is true if the token expires, if the
 user who minted it is deleted, or if they stop being an administrator — the
 credential names a **user**, and it is checked against that user on every call.
+
+### 7.7 Installing modules over MCP
+
+A token minted with `allow_modules` (off by default, on the panel and as `--allow-modules`) is
+offered two more tools:
+
+| Tool | What it does |
+|---|---|
+| `listModules` | what is installed and what each module supplies; whether npm, `python3` and pip are there; where the Python environment is; the bundled catalog |
+| `installModule` | `pip install` / `npm install` one package and reload, exactly as **Settings → Modules → Install** does. Needs `allow_create` as well |
+
+The usual reason is Python: a code body imports what is in the server's environment and nothing
+else, so an agent writing a `run_python_code` trigger or a Python API query that needs `requests`
+asks for it with
+
+```json
+{ "language": "python", "source": "pypi", "location": "requests" }
+```
+
+Any distribution can be installed, not only Saltcorn plugins; a plain library shows on the Modules
+tab as a module that supplies nothing, and is removed there like any other. On a static
+artifact (no Python, §1) the install itself works but nothing can import it.
+
+**What you are granting.** An installed package runs its own code with the server's privileges —
+npm's install scripts, a Python distribution's import, and no sandbox for Python afterwards (README
+§3). That is why the area is off unless ticked and why it is separate from `allow_create`. The
+`MCP [label] installModule …` log line (§7.6) names every install; the Modules tab lists the
+result.
+
+The built-in coding agent has the same two tools behind its own checkbox, *May list and install
+modules* on its `coding` trait, offered only when the run's caller is an administrator.
 
 ---
 

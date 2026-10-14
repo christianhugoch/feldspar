@@ -38,7 +38,7 @@ use crate::machine::{AgentLoop, Conclusion, Step, StepMeta, ToolOutcome, trait_s
 use crate::registry::AgentRegistry;
 use crate::run::{Run, RunId, RunMode};
 use crate::run_store::{load_run, save_run};
-use crate::view::{AppPreviewer, AppRequester, BrowserDriver};
+use crate::view::{AppPreviewer, AppRequester, BrowserDriver, ModuleManager};
 
 /// What a caller watching a run wants to see while it happens.
 ///
@@ -889,6 +889,13 @@ impl<'a> Runner<'a> {
                             previews: self.previews().map(|p| p.as_ref() as &dyn AppPreviewer),
                             browser: self.browser().map(|b| b.as_ref() as &dyn BrowserDriver),
                             requests: self.requests().map(|r| r.as_ref() as &dyn AppRequester),
+                            // From the registry alone: unlike a preview, nothing
+                            // about a run would want a different installer.
+                            modules: self
+                                .registry
+                                .view_services()
+                                .modules()
+                                .map(|m| m.as_ref() as &dyn ModuleManager),
                             signals: Vec::new(),
                             images: Vec::new(),
                         };

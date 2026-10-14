@@ -655,6 +655,7 @@ async fn list_assets_returns_the_urls_the_router_serves() -> sc_error::Result<()
             previews: None,
             browser: None,
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -757,6 +758,7 @@ async fn list_assets_returns_the_urls_the_router_serves() -> sc_error::Result<()
         previews: None,
         browser: None,
         requests: None,
+        modules: None,
         signals: Vec::new(),
         images: Vec::new(),
     };

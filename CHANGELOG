@@ -2,6 +2,81 @@
 
 Changes in reverse chronological order.
 
+## Installing modules (Python libraries) from MCP and the coding agent
+
+User request: let MCP clients and the internal coding agent install pip packages that Python code
+bodies can import. Before this, only the admin UI's Settings → Modules → Install could.
+
+- **New MCP area `allow_modules`, off by default.** `Area::Modules` sits beside triggers and
+  applications. It is the one area that defaults off, so no existing token gains it by upgrading.
+  `FLAG_KEYS` now has seven entries. The flag appears on the token panel (fallback label,
+  unticked), in `feldspar mcp-token create --allow-modules`, and in `areas_from_attrs` /
+  `flags_to_attrs`.
+- **`listModules` and `installModule` are MCP tools** (tagged endpoints, area `modules`).
+  `installModule` also needs `allow_create`. Their descriptions say how to install a PyPI library
+  and that any distribution may be installed.
+- **Coding agent:** a new `may_install_modules` checkbox on the `coding` trait, off by default and
+  offered only to admin callers (as the shell is). It adds `list_modules_<scope>` and
+  `install_module_<scope>`. Installing is refused in plan mode, without the grant, for a non-admin,
+  or where the server has no installer.
+- **One install path.** `sc_agent::ModuleManager` (in `ViewServices`, on `TraitContext.modules`)
+  is implemented by `AppMounts`. The `listModules` / `installModule` handler bodies moved into
+  `handlers::list_modules_json` / `install_module_json`, which the handlers, the MCP tools and the
+  agent all call. `feldspar serve` installs the manager at boot.
+- **Plain Python libraries are first-class modules.** A distribution with no `saltcorn.plugins`
+  entry point that registers nothing now loads as a *library*: no "declared nothing" issue, and
+  it is imported once rather than forgotten and re-imported on every reload. A re-import is what a
+  compiled library like numpy does not survive. A distribution that advertises the entry point
+  but declares nothing still gets the issue.
+- Docs: tutorial-python.md "Third-party libraries: installing one"; OPERATIONS.md §7.2 (seventh
+  grant) and new §7.7; TECHNICAL_DESIGN §13.6 (third area).
+- Tests:
+  - `sc-api`: the census and area tests; modules off by default.
+  - `sc-cli`: `allow_modules` false by default.
+  - `ui/admin` `mcpTokens.test.ts`: seven flags.
+  - `sc-core-traits` `coding_modules`: offered only under the grant to an admin; an install reaches
+    the installer; refusals.
+  - `sc-server` `mcp_server`: `the_module_tools_are_offered_only_to_a_token_given_allow_modules`.
+  - `sc-python` `python_modules`: `a_plain_library_installs_as_a_module_that_code_bodies_can_import`.
+  - Pinned tool and setting lists updated.
+- Not fixed here, and failing before this change: `admin_copilot` test
+  `the_configured_set_and_the_own_tools_are_the_names_this_trait_publishes` (missing
+  `edit_streams`).
+
+## A Debian 13 artifact with Python, built and published beside the static one
+
+User request: Python on servers deployed from the prebuilt tarballs (Debian 13). The static
+binary cannot have Python: under `+crt-static` the `libpython` link fails, and a static binary
+cannot `dlopen` CPython's extension modules or compiled wheels. So a second, dynamically linked
+artifact is built for Debian 13 only.
+
+- **`scripts/build-static.sh --variant static|python|both`**, default `both`. `python` builds
+  `feldspar-<version>-<target>-debian13-python.tar.gz`: no `+crt-static`, `--features python`,
+  built in `rust:<v>-trixie` with `python3-dev` (`static-build.Dockerfile` takes `VARIANT`, and
+  each variant has its own target directory in the cargo cache mount). A native python build
+  refuses a `python3` other than 3.13, warns off Debian 13, and uses `target/debian13-python`.
+- Verify: the python binary must be dynamic and `NEEDED` must include `libpython3.13.so.1.0`.
+  The smoke test runs it in `debian:13-slim` after `apt-get install libpython3.13`.
+- Package: each tarball carries `VARIANT` (`static` / `debian13-python`), which `install.sh`
+  copies to the prefix. The python `install.sh` installs `libpython3.13` with apt if it is
+  missing, since the binary does not start without it and an upgrade runs only `install.sh`.
+  The in-tarball README is variant-specific.
+- `--release` uploads each built variant: `feldspar.tar.gz` and
+  `feldspar-debian13-python.tar.gz` (each with a `.sha256`) in the same bucket.
+  `--deploy-variant static|python` picks what `--deploy` installs (default static).
+- **`setup-host.sh`** adds `libpython3.13 python3 python3-venv` to its packages when
+  `${PREFIX}/VARIANT` is `debian13-python`.
+- Docs: docs/OPERATIONS.md §1 (a three-column comparison), §2.1 "With Python: the Debian 13
+  artifact", §2.3 (`--variant`, `--deploy-variant`), §3.2 (updating and switching), §3.4
+  (published objects). README and TECHNICAL_DESIGN point at it.
+- Tests: `the_default_release_builds_and_publishes_the_static_and_the_python_artifact`,
+  `a_native_python_build_against_the_wrong_python_is_refused_before_the_build`,
+  `a_python_artifact_gets_the_python_packages`. The `--deploy-variant` refusal was added to
+  `unusable_deploy_options_are_refused_up_front`. The existing release and deploy fixtures pass
+  `--variant static`.
+- Not run here: a real `scripts/build-static.sh` build of either artifact (V8 link, about an
+  hour per variant).
+
 ## GET custom queries accept `?flag=true` for a `bool` parameter
 
 User report: a GET query's `bool` parameter refused `true` and `1` from the query string

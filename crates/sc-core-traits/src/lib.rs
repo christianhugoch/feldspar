@@ -134,8 +134,8 @@ pub use admin_copilot::{
 pub use build_application::{BuildApplication, CFG_APPLICATION};
 pub use coding::{
     Baseline, CFG_CHECKS, CFG_DIAGNOSE, CFG_EDIT_FORMAT, CFG_MAX_LINES, CFG_MAX_RESULTS,
-    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_RUN_SCRIPTS, CFG_MAY_USE_SHELL, CFG_MAY_VIEW_APP,
-    CFG_REPO_MAP_TOKENS, CFG_SHELL_IMAGE, CFG_SHELL_NETWORK, CFG_SHELL_RUNTIME, CFG_SHELL_SANDBOX,
+    CFG_MAY_CHECK, CFG_MAY_EDIT, CFG_MAY_INSTALL_MODULES, CFG_MAY_RUN_SCRIPTS, CFG_MAY_USE_SHELL,
+    CFG_MAY_VIEW_APP, CFG_REPO_MAP_TOKENS, CFG_SHELL_IMAGE, CFG_SHELL_NETWORK, CFG_SHELL_RUNTIME, CFG_SHELL_SANDBOX,
     CFG_SHELL_TIMEOUT, CFG_SHELL_TIMEOUT_MAX, CFG_TIMEOUT, CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER,
     ChangeStatus, Coding, CodingState, DEFAULT_DIAGNOSE, DEFAULT_MAX_LINES,
     DEFAULT_REPO_MAP_TOKENS, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX,
@@ -179,7 +179,9 @@ pub mod tool_names {
         apply_patch_tool_name as apply_patch, call_api_tool_name as call_api,
         check_checks_tool_name as check, edit_file_tool_name as edit_file,
         explore_tool_name as explore, find_files_tool_name as find_files,
-        implement_feature_tool_name as implement_feature, list_assets_tool_name as list_assets,
+        implement_feature_tool_name as implement_feature,
+        install_module_tool_name as install_module, list_assets_tool_name as list_assets,
+        list_modules_tool_name as list_modules,
         process_tool_name as process, read_file_tool_name as read_file,
         repo_map_tool_name as repo_map, run_script_tool_name as run_project_script,
         save_plan_tool_name as save_plan, search_files_tool_name as search_files,
@@ -362,6 +364,8 @@ mod tests {
                 CFG_MAY_VIEW_APP,
                 CFG_VIEW_APP_USER,
                 CFG_VIEW_APP_TIMEOUT,
+                // Installing modules: admins only, like the shell after it.
+                CFG_MAY_INSTALL_MODULES,
                 // Last: the shell is every grant above at once (TODO §7a).
                 CFG_MAY_USE_SHELL,
                 CFG_SHELL_TIMEOUT,
@@ -491,6 +495,8 @@ mod tests {
                 tool_names::call_api(&scope),
                 tool_names::shell(&scope),
                 tool_names::process(&scope),
+                tool_names::list_modules(&scope),
+                tool_names::install_module(&scope),
             ]
         );
         // `admin_copilot`'s names are fixed rather than derived, and say the

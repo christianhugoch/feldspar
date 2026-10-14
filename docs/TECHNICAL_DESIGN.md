@@ -4202,6 +4202,16 @@ discovering it is not the trigger editor. The two are independent, and each comp
 grants rather than replacing them: the applications area on with `allow_drop` off is an agent that
 can write an SQL endpoint and cannot remove one.
 
+**A third area, `allow_modules`, is the exception to "on by default".** It offers the tagged
+`listModules` and `installModule` endpoints — so an agent writing a Python body can install the
+library it imports — and it is **off** unless a token or agent ticks it, because installing a
+package runs a third party's code with the server's privileges and a Python one has no sandbox at
+all. No existing credential gains it by upgrading. `installModule` also needs `allow_create`. The
+built-in `coding` trait offers the same two acts as `list_modules_<scope>` / `install_module_<scope>`
+behind its own `may_install_modules` checkbox, admin callers only (like the shell), through
+`sc_agent::ModuleManager` — which `sc-server` answers with the same functions the two endpoints
+call, so all three paths are one install.
+
 **Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
 thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
 bounded task, the sub-agent runs a whole loop of its own — its own system prompt, its own tools,
@@ -11389,8 +11399,13 @@ from in-process: a binary linked against `libpython3.x.so` fails at the **dynami
 `+crt-static` static-PIE binary, under which the Python link does not succeed at all (rustc
 selects a static `libpython` archive that is not PIC, and a `+crt-static` binary could not
 `dlopen` the `lib-dynload` extensions or any C-extension wheel even if it linked). Default-on
-would not degrade the release build, it would break it. **So the shipped tarball has no Python,
-and a Python-capable server is a separate dynamically-linked build.** The floor is CPython
+would not degrade the release build, it would break it. **So the static tarball has no Python,
+and a Python-capable server is a separate dynamically-linked build.** `scripts/build-static.sh`
+ships one such build beside the static artifact: `--variant python` (built by default along with
+the static one) produces `feldspar-debian13-python.tar.gz`. It is built on Debian 13 with no
+`+crt-static`, links `libpython3.13.so.1.0`, and runs on Debian 13 only. Its `install.sh` installs
+`libpython3.13`, and `setup-host.sh` adds `python3` and `python3-venv` when `/opt/feldspar/VARIANT`
+says `debian13-python` (docs/OPERATIONS.md §2.1). The floor is CPython
 **3.11**, `abi3`, and `abi3` delivers what it promises: one build serves every CPython from 3.11
 up, the only obstacle being the version-specific soname in `DT_NEEDED`, which an operator
 satisfies by having the matching `libpython` present. The cost of the dependency is small — 7

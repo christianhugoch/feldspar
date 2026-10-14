@@ -214,6 +214,7 @@ impl Env {
             previews: None,
             browser: None,
             requests: Some(requests),
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -405,6 +406,7 @@ async fn call_api_needs_someone_to_send_as_and_a_served_application() -> Result<
         previews: None,
         browser: None,
         requests: Some(requests),
+        modules: None,
         signals: Vec::new(),
         images: Vec::new(),
     };

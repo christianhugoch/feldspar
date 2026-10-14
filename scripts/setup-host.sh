@@ -347,6 +347,14 @@ if [ "${MODE}" = "source" ]; then
     # reaches bindgen through rusqlite); the binary it produces does not use it.
     PACKAGES="${PACKAGES} build-essential pkg-config git libclang-dev"
 fi
+# The Debian 13 + Python artifact (build-static.sh --variant python) says so in
+# ${PREFIX}/VARIANT. Its binary links libpython3.13, and installing a Python
+# module wants an interpreter of the same version with the venv module, which
+# Debian packages separately. install.sh already added the library, so a host it
+# ran on has it; listing it again is what makes this order-independent.
+if [ "${MODE}" = "static" ] && [ "$(cat "${PREFIX}/VARIANT" 2>/dev/null || true)" = "debian13-python" ]; then
+    PACKAGES="${PACKAGES} libpython3.13 python3 python3-venv"
+fi
 
 log "installing packages: ${PACKAGES}"
 run_root apt-get update

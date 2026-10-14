@@ -244,6 +244,8 @@ mod tests {
         assert_eq!(stored["allow_edit"], Json::Bool(true));
         assert_eq!(stored["allow_access_changes"], Json::Bool(false));
         assert_eq!(stored["allow_applications"], Json::Bool(true));
+        // Modules are the one area that is off unless asked for.
+        assert_eq!(stored["allow_modules"], Json::Bool(false));
         assert_eq!(
             describe_grants(&stored),
             "allow_create allow_edit allow_drop allow_applications"

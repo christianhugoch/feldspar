@@ -42,6 +42,8 @@ mod coding_check;
 mod coding_edits;
 #[path = "coding_images.rs"]
 mod coding_images;
+#[path = "coding_modules.rs"]
+mod coding_modules;
 #[path = "coding_plan.rs"]
 mod coding_plan;
 #[path = "coding_prompt.rs"]

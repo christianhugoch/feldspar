@@ -592,3 +592,31 @@ mod tests {
         assert_eq!(host.root(), std::path::Path::new("/srv/modules"));
     }
 }
+
+/// Listing and installing modules for an **agent** (`sc_agent::ModuleManager`):
+/// the admin API's own two answers, `listModules`'s and `installModule`'s, so a
+/// coding agent's `install_module` is the same act as the Modules tab's Install
+/// button and the MCP tool — one row, one reload, listed and removable on the
+/// tab. In the source language, because an agent reads it and no admin's
+/// locale applies.
+#[async_trait::async_trait]
+impl sc_agent::ModuleManager for crate::AppMounts {
+    async fn list(&self) -> Result<serde_json::Value> {
+        let services = crate::handlers::modules_of(self)?;
+        Ok(crate::handlers::list_modules_json(&services, &sc_i18n::Locale::source()).await)
+    }
+
+    async fn install(&self, request: sc_agent::ModuleInstall) -> Result<serde_json::Value> {
+        let services = crate::handlers::modules_of(self)?;
+        let catalog = self
+            .catalog()
+            .ok_or_else(|| Error::config("this server has no catalog to record a module in"))?;
+        let body = serde_json::json!({
+            "language": request.language,
+            "source": request.source,
+            "location": request.location,
+        });
+        crate::handlers::install_module_json(catalog, &services, &body, &sc_i18n::Locale::source())
+            .await
+    }
+}

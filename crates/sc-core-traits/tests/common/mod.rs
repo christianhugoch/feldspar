@@ -180,6 +180,7 @@ impl Env {
             previews: None,
             browser: None,
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -217,6 +218,7 @@ impl Env {
             previews: None,
             browser: None,
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };
@@ -331,6 +333,7 @@ impl Env {
             previews: None,
             browser: None,
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };

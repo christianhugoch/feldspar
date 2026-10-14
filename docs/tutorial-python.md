@@ -374,6 +374,45 @@ refuses new Python runs, and the remedy is a restart. **There is no memory bound
 no equivalent of a heap limit, and a process-wide one would take the server down instead of the
 body.
 
+### Third-party libraries: installing one
+
+A body can import anything installed in this server's Python environment, and a library gets
+there the same way a plugin does: **Settings → Modules → Install**, type **Python — PyPI
+distribution**, and the specifier — `requests`, `pandas>=2.2`, `httpx[http2]`. pip installs it
+and its dependencies into the environment the server owns, and the next run of any body can
+`import` it:
+
+```python
+import requests                        # after installing `requests` on the Modules tab
+r = requests.get("https://api.example.com/rates", timeout=5)
+return r.json()["EUR"]
+```
+
+It does not have to be a Saltcorn plugin. A distribution with no `saltcorn.plugins` entry point that
+registers nothing is a **library**: it appears on the Modules tab as a module that supplies
+nothing, with no warning, and removing it there uninstalls it. Two differences from a plugin:
+
+- **A library is imported once.** Every install reloads the modules, and a reload re-imports a
+  plugin to read its declarations again; a library has none, and re-importing `numpy` in a running
+  process is exactly what a compiled extension does not survive. So it is left alone, and a new
+  *version* of a library takes effect at the next restart.
+- **The network rule is the import gate's, not the library's.** `urllib.request` and `http` are
+  refused to a body, but a third-party HTTP client is not on that list: installing `requests` gives
+  bodies the network. Prefer `fetch` (Step 3) where it will do, and install what you mean to allow.
+
+**An agent can install one too**, so that the body it is writing can import what it needs — but
+only where an admin said so:
+
+- **The coding agent**: tick *May list and install modules* on its `coding` trait. It is off by
+  default, offered only when the run's caller is an administrator (like the shell), and the agent
+  gets `list_modules_<scope>` and `install_module_<scope>`.
+- **An MCP client** (Claude Code over `/mcp`): mint the token with `allow_modules` (off by
+  default). It gets `listModules` and `installModule`; installing also needs `allow_create`.
+  [OPERATIONS.md §7.7](OPERATIONS.md#77-installing-modules-over-mcp).
+
+Both install exactly as the Install button does — one row on the Modules tab, one reload — so what
+an agent installed is listed, and removable, beside what you installed.
+
 ---
 
 ## Step 7 — A plugin package, from an empty directory

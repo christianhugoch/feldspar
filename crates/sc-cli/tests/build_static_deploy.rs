@@ -116,7 +116,7 @@ fn fixture(name: &str) -> Fixture {
     write_executable(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/sh\nset -eu\nout=\"$PWD/target/{TARGET}/release\"\n\
+            "#!/bin/sh\nset -eu\nout=\"${{CARGO_TARGET_DIR:-$PWD/target}}/{TARGET}/release\"\n\
              mkdir -p \"$out\"\n\
              printf '#!/bin/sh\\necho feldspar usage\\n' > \"$out/feldspar\"\n\
              chmod +x \"$out/feldspar\"\n"
@@ -172,7 +172,14 @@ impl Fixture {
         );
         let output = Command::new("bash")
             .arg(self.repo.join("scripts/build-static.sh"))
-            .args(["--native", "--no-ui", "--no-strip", "--no-verify"])
+            .args([
+                "--native",
+                "--no-ui",
+                "--no-strip",
+                "--no-verify",
+                "--variant",
+                "static",
+            ])
             .arg("--prefix")
             .arg(&self.prefix)
             .arg("--remote-tmp")
@@ -461,6 +468,26 @@ fn unusable_deploy_options_are_refused_up_front() {
         "a relative --remote-tmp should be refused"
     );
 
+    // Deploying an artifact this run does not build cannot work.
+    let unbuilt = Command::new("bash")
+        .arg(&script)
+        .args([
+            "--variant",
+            "static",
+            "--deploy",
+            "vm",
+            "--deploy-variant",
+            "python",
+        ])
+        .output()
+        .expect("run build-static.sh");
+    assert_eq!(unbuilt.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unbuilt.stderr).contains("is not being built"),
+        "{}",
+        String::from_utf8_lossy(&unbuilt.stderr)
+    );
+
     // And the deploy options are documented, since --help is where an operator
     // finds them.
     let help = Command::new("bash")
@@ -469,7 +496,13 @@ fn unusable_deploy_options_are_refused_up_front() {
         .output()
         .expect("run build-static.sh --help");
     let help = String::from_utf8_lossy(&help.stdout);
-    for option in ["--deploy", "--ssh-opt", "--remote-tmp"] {
+    for option in [
+        "--deploy",
+        "--ssh-opt",
+        "--remote-tmp",
+        "--deploy-variant",
+        "--variant",
+    ] {
         assert!(help.contains(option), "--help should document {option}");
     }
 }

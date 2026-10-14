@@ -563,7 +563,8 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
     let cfg = at("code", "web");
     env.check("coding", &cfg).await?;
     // Every tool but `apply_patch`, which this model's edit format leaves out,
-    // `check`, `view_app`, `shell` and `process`, whose grants are off,
+    // `check`, `view_app`, `shell`, `process` and the two module tools, whose
+    // grants are off,
     // `list_assets` and `call_api`, which need an `application` setting this one
     // has not got,
     // `view_image`, which this model cannot see, and the plan tools, which only
@@ -580,6 +581,8 @@ async fn a_trait_configured_against_a_store_that_is_gone_is_invalid_with_a_reaso
             && name != &tool_names::call_api(&scope("code", "web"))
             && name != &tool_names::shell(&scope("code", "web"))
             && name != &tool_names::process(&scope("code", "web"))
+            && name != &tool_names::list_modules(&scope("code", "web"))
+            && name != &tool_names::install_module(&scope("code", "web"))
     });
     assert_eq!(offered(&env, &cfg), all);
 
