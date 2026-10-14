@@ -2,6 +2,17 @@
 
 Changes in reverse chronological order.
 
+## Offline sync: devices can pull changes
+
+An application with a synced table gets two endpoints in its REST API, for signed-in users.
+`sync/register` registers a device. `sync/pull` answers what the device needs: on its first
+pull every row the user may read, afterwards only the rows changed since its last pull, and the
+keys of rows that are gone or no longer readable. Access rules and ownership apply as on any
+read. A transaction that commits late is never skipped, and one left open elsewhere does not
+hold up other changes. Devices are kept in the new `_fd_sync_clients` table.
+
+- Tests: `crates/sc-api/tests/sync_pull.rs`.
+
 ## Offline sync: tables can record their changes
 
 The first step towards offline-first apps (design §14.11, `TODO-offline-sync.md`). A table's

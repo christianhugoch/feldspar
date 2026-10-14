@@ -1,0 +1,308 @@
+//! Offline sync, the pull side (§14.11, `TODO-offline-sync.md` S2): a device
+//! registers once, then asks "what changed since my watermark?" and gets the
+//! current rows of what changed, read with its user's rights.
+//!
+//! The change-log (`_fd_changes`) only says *which* rows changed; the rows
+//! themselves are read through [`ownership::read_rows_as`], the reader every
+//! list endpoint uses, so a pull never shows a device more than a list would.
+//!
+//! Delivery is **at least once**. The watermark is taken before anything is
+//! read, so a change that lands while a pull runs may be in this answer *and*
+//! the next one. A device writes every row it gets over its local copy, so a
+//! repeat does no harm, while a gap would lose data for good.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use sc_auth::User;
+use sc_catalog::{
+    Catalog, SYNC_CLIENTS_TABLE, SyncWatermark, Table, changed_keys, sync_watermark,
+};
+use sc_error::{Error, Result};
+use sc_expr::JsEvaluator;
+use sc_query::{Expr, InSet, Value};
+use serde_json::{Map, Value as Json, json};
+use uuid::Uuid;
+
+use crate::ownership;
+use crate::rows::{self, RowQuery};
+use crate::schema::{StructField, TypeSchema};
+
+/// How many keys one read asks for: a long `IN (…)` list is still one
+/// statement, but not an unbounded one.
+const KEYS_PER_READ: usize = 500;
+
+/// `POST {mount}/sync/register`'s body: an optional name for the device, so an
+/// admin can tell a user's phone from their tablet.
+pub(crate) fn register_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([StructField::new(
+        "name",
+        TypeSchema::optional(TypeSchema::text()),
+    )])
+}
+
+/// The new device's id, which it sends with every pull.
+pub(crate) fn register_output_schema() -> TypeSchema {
+    TypeSchema::struct_of([StructField::new("client_id", TypeSchema::text())])
+}
+
+/// `POST {mount}/sync/pull`'s body.
+///
+/// - `watermark`: the one the device got from its last pull and has applied,
+///   or null for a device with nothing yet.
+/// - `tables`: the synced tables the device already holds. A synced table
+///   missing from it (switched on since, or newly readable) comes in whole.
+pub(crate) fn pull_input_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("client_id", TypeSchema::text()),
+        StructField::new("watermark", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
+/// The answer: the next watermark, and one entry for **every** table the device
+/// should hold — a table it has that is not listed is no longer its to keep.
+///
+/// Per table, `reset` means "replace your copy with `rows`"; otherwise `rows`
+/// are written over the local ones and `removed` are deleted (gone, or no longer
+/// readable by this user).
+pub(crate) fn pull_output_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("watermark", TypeSchema::text()),
+        StructField::new(
+            "tables",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("table", TypeSchema::text()),
+                StructField::new("reset", TypeSchema::bool()),
+                StructField::new("rows", TypeSchema::array(TypeSchema::json())),
+                StructField::new("removed", TypeSchema::array(TypeSchema::text())),
+            ])),
+        ),
+    ])
+}
+
+/// Register a device of `user` for `application`; answers its new id.
+pub(crate) async fn register(
+    cat: &Catalog,
+    application: Uuid,
+    user: &User,
+    body: &Json,
+) -> Result<Json> {
+    let name = match body.get("name") {
+        None | Some(Json::Null) => Json::Null,
+        Some(Json::String(name)) => Json::String(name.trim().to_owned()),
+        Some(_) => return Err(Error::invalid("`name` must be text")),
+    };
+    let devices = devices_table(cat)?;
+    let id = Uuid::new_v4();
+    rows::create_row(
+        cat,
+        &devices,
+        &json!({
+            "id": id.to_string(),
+            "user_id": user.id.to_string(),
+            "application": application.to_string(),
+            "name": name,
+        }),
+    )
+    .await?;
+    Ok(json!({ "client_id": id.to_string() }))
+}
+
+/// Answer one pull of a device of `user`, over `exposed` — the application's
+/// tables, of which the synced ones the user may read are delivered.
+pub(crate) async fn pull(
+    cat: &Catalog,
+    application: Uuid,
+    exposed: &[String],
+    user: &User,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+    body: &Json,
+) -> Result<Json> {
+    let request = PullRequest::parse(body)?;
+    let devices = devices_table(cat)?;
+    check_device(cat, &devices, request.client_id, application, user).await?;
+
+    let synced: Vec<Table> = exposed
+        .iter()
+        .filter_map(|name| cat.get(name).ok().flatten())
+        .filter(|table| table.sync_enabled() && may_read(table, user.role))
+        .collect();
+
+    // Taken first: whatever is read below is at least as new as it, so the
+    // next pull, starting here, cannot miss anything.
+    let watermark = sync_watermark(cat).await?;
+    // A watermark this database never handed out (restored from a backup, or
+    // another server's) says nothing about what the device has: start over.
+    let since = request.watermark.filter(|w| w.not_after(&watermark));
+
+    let mut tables = Vec::with_capacity(synced.len());
+    for table in &synced {
+        let entry = match since {
+            Some(ref since) if request.tables.contains(&table.name) => {
+                changes_of(cat, table, since, &watermark, user, evaluator).await?
+            }
+            _ => json!({
+                "table": table.name,
+                "reset": true,
+                "rows": ownership::read_rows_as(
+                    cat, table, &RowQuery::new(), user.role, Some(user), evaluator,
+                ).await?,
+                "removed": [],
+            }),
+        };
+        tables.push(entry);
+    }
+
+    // What the device says it has applied — kept for the cleanup that will
+    // remove entries every device is past.
+    let mut seen = Map::new();
+    seen.insert(
+        "last_seen".into(),
+        Json::String(chrono::Utc::now().to_rfc3339()),
+    );
+    if let Some(since) = &since {
+        seen.insert("watermark".into(), json!(since.to_string()));
+    }
+    rows::update_row(cat, &devices, &request.client_id.to_string(), &Json::Object(seen)).await?;
+
+    Ok(json!({ "watermark": watermark.to_string(), "tables": tables }))
+}
+
+/// One pull's request, checked.
+struct PullRequest {
+    client_id: Uuid,
+    watermark: Option<SyncWatermark>,
+    tables: BTreeSet<String>,
+}
+
+impl PullRequest {
+    fn parse(body: &Json) -> Result<PullRequest> {
+        let client_id = body
+            .get("client_id")
+            .and_then(Json::as_str)
+            .and_then(|s| Uuid::parse_str(s.trim()).ok())
+            .ok_or_else(|| {
+                Error::invalid("`client_id` must be the id `sync/register` answered")
+            })?;
+        let watermark = match body.get("watermark") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(w)) => Some(SyncWatermark::parse(w)?),
+            Some(_) => return Err(Error::invalid("`watermark` must be text or null")),
+        };
+        let tables = match body.get("tables") {
+            None | Some(Json::Null) => BTreeSet::new(),
+            Some(Json::Array(items)) => items
+                .iter()
+                .map(|t| {
+                    t.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| Error::invalid("`tables` must list table names"))
+                })
+                .collect::<Result<_>>()?,
+            Some(_) => return Err(Error::invalid("`tables` must list table names")),
+        };
+        Ok(PullRequest {
+            client_id,
+            watermark,
+            tables,
+        })
+    }
+}
+
+fn devices_table(cat: &Catalog) -> Result<Table> {
+    cat.get(SYNC_CLIENTS_TABLE)?.ok_or_else(|| {
+        Error::invalid("offline sync needs a Postgres database; this one cannot record changes yet")
+    })
+}
+
+/// The device must be this user's, for this application: a device id is not a
+/// secret, so it is never enough on its own.
+async fn check_device(
+    cat: &Catalog,
+    devices: &Table,
+    id: Uuid,
+    application: Uuid,
+    user: &User,
+) -> Result<()> {
+    let query = RowQuery {
+        filter: Some(
+            Expr::col("id")
+                .eq(Expr::lit(Value::Uuid(id)))
+                .and(Expr::col("user_id").eq(Expr::lit(Value::Uuid(user.id))))
+                .and(Expr::col("application").eq(Expr::lit(Value::Uuid(application)))),
+        ),
+        limit: Some(1),
+        ..RowQuery::new()
+    };
+    if rows::list_row_values(cat, devices, &query, None)
+        .await?
+        .is_empty()
+    {
+        return Err(Error::not_found(
+            "unknown device: register it with `sync/register` first",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `role` may read `table` at all: the table's floor, or an ownership
+/// formula or row-level security that decides row by row.
+fn may_read(table: &Table, role: u8) -> bool {
+    role <= table.access.min_role_read || table.ownership.is_some() || table.rls_enabled
+}
+
+/// What changed in `table` since the device's last pull: the changed rows as
+/// they are now, and the keys of changed rows the user can no longer see
+/// (deleted, or not theirs anymore).
+async fn changes_of(
+    cat: &Catalog,
+    table: &Table,
+    since: &SyncWatermark,
+    watermark: &SyncWatermark,
+    user: &User,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<Json> {
+    let changed = changed_keys(cat, &table.name, since, watermark).await?;
+    let pk = rows::single_pk(table)?;
+    let mut found: BTreeMap<String, Json> = BTreeMap::new();
+    let keys: Vec<&String> = changed.iter().collect();
+    for chunk in keys.chunks(KEYS_PER_READ) {
+        let set = chunk
+            .iter()
+            .map(|key| {
+                rows::column_value(table, &pk, &Json::String((*key).clone())).map(Expr::lit)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let query = RowQuery {
+            filter: Some(Expr::In {
+                e: Box::new(Expr::col(&pk)),
+                set: InSet::List(set),
+            }),
+            ..RowQuery::new()
+        };
+        let read =
+            ownership::read_rows_as(cat, table, &query, user.role, Some(user), evaluator).await?;
+        for row in read.as_array().into_iter().flatten() {
+            if let Some(key) = row.get(&pk).map(key_text) {
+                found.insert(key, row.clone());
+            }
+        }
+    }
+    let removed: Vec<&String> = changed.iter().filter(|k| !found.contains_key(*k)).collect();
+    Ok(json!({
+        "table": table.name,
+        "reset": false,
+        "rows": found.into_values().collect::<Vec<_>>(),
+        "removed": removed,
+    }))
+}
+
+/// A key as the change-log writes it: a text key as itself, any other as its
+/// JSON rendering (`42`), which is what `->>` gives for a number.
+fn key_text(value: &Json) -> String {
+    match value {
+        Json::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}

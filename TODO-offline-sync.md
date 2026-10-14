@@ -18,11 +18,26 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## S2 — Pull
 
-- [ ] S2.1 `_fd_sync_clients` and registering a device for a user and an application.
-- [ ] S2.2 The pull endpoint: entries between the device's watermark and the current one, with
+- [x] S2.1 `_fd_sync_clients` and registering a device for a user and an application.
+- [x] S2.2 The pull endpoint: entries between the device's watermark and the current one, with
       the current rows read as the user; a row the user can no longer read is sent as removed.
-- [ ] S2.3 Tests: a transaction that commits late is not skipped; access rules and ownership
+- [x] S2.3 Tests: a transaction that commits late is not skipped; access rules and ownership
       apply; a first pull returns every readable row.
+- [x] S2.6 The watermark is a whole snapshot (running transactions included), so a transaction
+      left open elsewhere holds back only its own changes, not every device's pull.
+- [ ] S2.4 Large first pulls in pages (a whole table is one answer for now).
+- [ ] S2.5 A row whose ownership depends on another table (`parentⱵowner`) is only re-checked
+      when the row itself changes; re-check rows when the table they depend on changes.
+- [ ] S2.7 A database identity in the watermark (a random id made at bootstrap, renewed on
+      restore): a device whose watermark is from another database reloads its tables. Today a
+      restored database whose transaction ids are already past the device's goes unnoticed.
+- [ ] S2.8 A schema change that rewrites a synced table's rows (a column added with a default, a
+      type changed, a column dropped or renamed) fires no row trigger; the next pull of that
+      table resets it on every device. Next to `sync_dirty` in `schema_edit.rs`.
+- [ ] S2.9 One pull reads in one `REPEATABLE READ READ ONLY` transaction, with the watermark
+      taken inside it: all tables from one moment (a child row never arrives without its parent)
+      and nothing sent twice. Needs row reads, the RLS path included, on a given transaction, and
+      an isolation level on `sc_db::Transaction`. Before S4.3, which relies on it.
 
 ## S3 — Push and conflicts
 

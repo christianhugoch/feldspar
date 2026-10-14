@@ -255,6 +255,12 @@ const INVITE: &str = "invite";
 const FORGOT_PASSWORD: &str = "forgotPassword";
 const SET_PASSWORD: &str = "setPassword";
 
+/// Offline sync's endpoints (§14.11): `POST {mount}/sync/register` and
+/// `POST {mount}/sync/pull`, projected when one of the app's tables is synced.
+const SYNC_SEGMENT: &str = "sync";
+const SYNC_REGISTER: &str = "syncRegister";
+const SYNC_PULL: &str = "syncPull";
+
 /// The first path segments this provider's own routes claim, which a custom SQL
 /// query's sub-path may therefore not start with (see
 /// [`custom::validate_custom_queries`]).
@@ -262,8 +268,9 @@ const SET_PASSWORD: &str = "setPassword";
 /// A table's name is the other half of that rule, and it is not a constant — it
 /// is whatever the application declares. `signup` is reserved whether or not
 /// the application offers it, so turning sign-up on cannot shadow a query.
-pub(crate) const RESERVED_SEGMENTS: [&str; 8] = [
+pub(crate) const RESERVED_SEGMENTS: [&str; 9] = [
     ACTIONS_SEGMENT,
+    SYNC_SEGMENT,
     LOGIN,
     LOGOUT,
     WHOAMI,
@@ -276,7 +283,9 @@ pub(crate) const RESERVED_SEGMENTS: [&str; 8] = [
 /// Every endpoint name the provider's own auth may project — the five every
 /// app has plus `signup` and `invite` — which a custom query may therefore not
 /// be named.
-pub(crate) const RESERVED_AUTH_NAMES: [&str; 7] = [
+pub(crate) const RESERVED_AUTH_NAMES: [&str; 9] = [
+    SYNC_REGISTER,
+    SYNC_PULL,
     LOGIN,
     LOGOUT,
     WHOAMI,
@@ -335,8 +344,11 @@ pub struct RestProvider {
     /// `file.url()` answers from (TODO F2.8).
     file_urls: Option<Arc<dyn sc_action::FileUrls>>,
     /// The application this provider serves — whose code libraries a code
-    /// query imports (TODO F3.2).
+    /// query imports (TODO F3.2), and whose devices offline sync registers.
     application: Option<uuid::Uuid>,
+    /// The application's tables by name: the ones offline sync may deliver,
+    /// checked for `sync` again on each pull.
+    tables: Vec<String>,
 }
 
 impl RestProvider {
@@ -575,6 +587,24 @@ impl RestProvider {
             endpoints.register_resource(resource);
         }
 
+        // Offline sync (§14.11), for an app with a synced table. Signed in only:
+        // a device belongs to a user.
+        if tables.iter().any(Table::sync_enabled) {
+            let sync_path = || path_at(&mount).lit(SYNC_SEGMENT);
+            endpoints.register(
+                Endpoint::new(SYNC_REGISTER, Method::Post, sync_path().lit("register"))
+                    .input(crate::sync::register_input_schema())
+                    .output(crate::sync::register_output_schema())
+                    .auth(AuthRequirement::LoggedIn),
+            );
+            endpoints.register(
+                Endpoint::new(SYNC_PULL, Method::Post, sync_path().lit("pull"))
+                    .input(crate::sync::pull_input_schema())
+                    .output(crate::sync::pull_output_schema())
+                    .auth(AuthRequirement::LoggedIn),
+            );
+        }
+
         // The app's exposed triggers, one `POST {mount}/actions/{name}` each.
         // The role floor is the trigger's own, and an unset one is **admin**:
         // `min_role` is optional on a trigger because most triggers are never
@@ -615,6 +645,7 @@ impl RestProvider {
             row_cap: DEFAULT_ROW_CAP,
             file_urls: None,
             application: None,
+            tables: tables.iter().map(|t| t.name.clone()).collect(),
         }
     }
 
@@ -1886,6 +1917,27 @@ impl RestProvider {
             }
             HandlerRef::Named(_) if endpoint.name == LOGOUT => {
                 Ok(ApiResponse::end_session(json!({ "ok": true })))
+            }
+            HandlerRef::Named(_) if endpoint.name == SYNC_REGISTER || endpoint.name == SYNC_PULL => {
+                // `LoggedIn` is enforced above, so a caller is present here.
+                let user = user.ok_or_else(|| Error::auth("sign in to sync"))?;
+                let application = self.application.ok_or_else(|| {
+                    Error::config("offline sync needs the application this API serves")
+                })?;
+                let answer = if endpoint.name == SYNC_REGISTER {
+                    crate::sync::register(cat, application, user, &req.body).await?
+                } else {
+                    crate::sync::pull(
+                        cat,
+                        application,
+                        &self.tables,
+                        user,
+                        self.evaluator.as_ref(),
+                        &req.body,
+                    )
+                    .await?
+                };
+                Ok(ApiResponse::ok(answer))
             }
             HandlerRef::Named(_) if endpoint.name == WHOAMI => Ok(ApiResponse::ok(
                 // `LoggedIn` is enforced above, so a caller is present here.

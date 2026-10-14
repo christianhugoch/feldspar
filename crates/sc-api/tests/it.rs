@@ -19,6 +19,8 @@ mod calc_after_read;
 mod calc_fields;
 #[path = "sync_changes.rs"]
 mod sync_changes;
+#[path = "sync_pull.rs"]
+mod sync_pull;
 #[path = "code_host_as_user.rs"]
 mod code_host_as_user;
 #[path = "code_host_reads.rs"]

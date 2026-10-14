@@ -14,9 +14,11 @@
 //! User tables gain nothing: no version column, no "deleted" flag. A delete is an
 //! entry in the log.
 
+use std::collections::BTreeSet;
+
 use sc_db::ColumnGenerator;
 use sc_error::{Error, Result};
-use sc_query::SqlDialect;
+use sc_query::{SqlDialect, Statement, Value};
 use sc_types::{BasicType, TypeRef};
 use serde_json::Value as Json;
 
@@ -37,13 +39,17 @@ pub const SYNC_CLIENT_GUC: &str = "sc.sync_client";
 /// The device's own number for the change being applied.
 pub const SYNC_MUTATION_GUC: &str = "sc.sync_mutation";
 
+/// One row per registered device: whose it is, for which application, and the
+/// watermark of the last pull it confirmed having applied.
+pub const SYNC_CLIENTS_TABLE: &str = "_fd_sync_clients";
+
 /// `_fd_tables.attributes` key holding a table's sync settings, an object
 /// (`{ "enabled": true }`) so later settings have somewhere to go.
 pub const ATTR_SYNC: &str = "sync";
 
 /// The log's columns. `txid` is the writing transaction's id, which a pull
-/// compares against the oldest transaction still running (the watermark), so
-/// a transaction that commits late is never skipped.
+/// checks against its watermark snapshots, so a transaction that commits late
+/// is never skipped.
 fn changes_fields() -> Vec<DataField> {
     let int = || TypeRef::Basic(BasicType::Int);
     let text = || TypeRef::Basic(BasicType::Text);
@@ -66,7 +72,27 @@ fn changes_fields() -> Vec<DataField> {
     ]
 }
 
-/// Ensure the change-log, its indexes and the trigger function exist.
+/// The device table's columns. `watermark` is what the device last said it has
+/// (it sends it with each pull), not what the server last handed out: an answer
+/// lost on the way must not count as received.
+fn clients_fields() -> Vec<DataField> {
+    let uuid = || TypeRef::Basic(BasicType::Uuid);
+    let timestamp = || TypeRef::Basic(BasicType::Timestamp);
+    vec![
+        DataField::plain("id", uuid()).required().primary_key(),
+        DataField::plain("user_id", uuid()).required(),
+        DataField::plain("application", uuid()).required(),
+        DataField::plain("name", TypeRef::Basic(BasicType::Text)),
+        DataField::plain("watermark", TypeRef::Basic(BasicType::Text)),
+        DataField::plain("created_at", timestamp())
+            .required()
+            .generated(ColumnGenerator::Default("now()".into())),
+        DataField::plain("last_seen", timestamp()),
+    ]
+}
+
+/// Ensure the change-log, its indexes, the trigger function and the device
+/// table exist.
 ///
 /// Idempotent, and a no-op on a backend that cannot record changes with a
 /// trigger: there is nothing to sync there yet, and switching a table's sync
@@ -77,6 +103,9 @@ pub async fn bootstrap_sync(catalog: &Catalog) -> Result<()> {
     }
     catalog
         .bootstrap_table(CHANGES_TABLE, &changes_fields())
+        .await?;
+    catalog
+        .bootstrap_table(SYNC_CLIENTS_TABLE, &clients_fields())
         .await?;
     let dialect = catalog.primary().dialect();
     let table = dialect.quote_ident(CHANGES_TABLE);
@@ -90,6 +119,133 @@ pub async fn bootstrap_sync(catalog: &Catalog) -> Result<()> {
             function = record_function_sql(),
         ))])
         .await
+}
+
+/// Where a pull stopped: a Postgres snapshot (`xmin:xmax:running`), as text on
+/// the wire. Every transaction below `xmin` had finished, `running` had not,
+/// and none from `xmax` on had started.
+///
+/// A whole snapshot, not one number, so a transaction that stays open (a long
+/// import, a forgotten `BEGIN` in psql) holds back only its own changes: the
+/// next pull picks it up by its id, and everything else moves on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncWatermark {
+    xmin: i64,
+    xmax: i64,
+    running: Vec<i64>,
+}
+
+impl SyncWatermark {
+    /// Read a watermark a pull answered; anything else is refused.
+    pub fn parse(text: &str) -> Result<SyncWatermark> {
+        let bad = || Error::invalid("`watermark` must be the one the last pull answered");
+        let number = |s: &str| s.parse::<i64>().map_err(|_| bad());
+        let mut parts = text.trim().split(':');
+        let (Some(xmin), Some(xmax), Some(running), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(bad());
+        };
+        let (xmin, xmax) = (number(xmin)?, number(xmax)?);
+        let running = running
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(number)
+            .collect::<Result<Vec<_>>>()?;
+        if xmin > xmax || running.iter().any(|x| *x < xmin || *x >= xmax) {
+            return Err(bad());
+        }
+        Ok(SyncWatermark {
+            xmin,
+            xmax,
+            running,
+        })
+    }
+
+    /// Whether this watermark is from before `other`, or the same — false for
+    /// one this database never handed out (a backup's, another server's).
+    pub fn not_after(&self, other: &SyncWatermark) -> bool {
+        self.xmax <= other.xmax
+    }
+}
+
+impl std::fmt::Display for SyncWatermark {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let running: Vec<String> = self.running.iter().map(i64::to_string).collect();
+        write!(f, "{}:{}:{}", self.xmin, self.xmax, running.join(","))
+    }
+}
+
+fn require_sync(catalog: &Catalog) -> Result<()> {
+    if catalog.primary().capabilities().sync_triggers {
+        Ok(())
+    } else {
+        Err(Error::invalid(
+            "offline sync needs a Postgres database; this one cannot record changes yet",
+        ))
+    }
+}
+
+/// The current watermark. Taken before a pull reads anything, so what it reads
+/// is at least as new: a change may come twice, never not at all.
+pub async fn sync_watermark(catalog: &Catalog) -> Result<SyncWatermark> {
+    require_sync(catalog)?;
+    let rows = catalog
+        .primary()
+        .query(&Statement::raw(
+            "SELECT txid_current_snapshot()::text",
+            Vec::new(),
+        ))
+        .await?
+        .try_collect()
+        .await?;
+    match rows.first().and_then(|row| row.get_index(0)) {
+        Some(Value::Text(snapshot)) => SyncWatermark::parse(snapshot),
+        other => Err(Error::database(format!(
+            "the database answered the watermark with {other:?}"
+        ))),
+    }
+}
+
+/// The keys of `table` changed by a transaction that had committed at `until`
+/// but not yet at `since`.
+pub async fn changed_keys(
+    catalog: &Catalog,
+    table: &str,
+    since: &SyncWatermark,
+    until: &SyncWatermark,
+) -> Result<BTreeSet<String>> {
+    require_sync(catalog)?;
+    // The txid bounds only narrow the search to the index; the snapshots decide.
+    let sql = format!(
+        "SELECT DISTINCT row_key FROM {log} \
+         WHERE table_name = $1 AND txid >= $2 AND txid < $3 \
+           AND txid_visible_in_snapshot(txid, $4::text::txid_snapshot) \
+           AND NOT txid_visible_in_snapshot(txid, $5::text::txid_snapshot)",
+        log = catalog.primary().dialect().quote_ident(CHANGES_TABLE),
+    );
+    let rows = catalog
+        .primary()
+        .query(&Statement::raw(
+            sql,
+            vec![
+                Value::Text(table.to_owned()),
+                Value::Int(since.xmin),
+                Value::Int(until.xmax),
+                Value::Text(until.to_string()),
+                Value::Text(since.to_string()),
+            ],
+        ))
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| match row.get_index(0) {
+            Some(Value::Text(key)) => Some(key.clone()),
+            _ => None,
+        })
+        .collect())
 }
 
 /// The trigger function, `CREATE OR REPLACE`d on every boot so a fix to it

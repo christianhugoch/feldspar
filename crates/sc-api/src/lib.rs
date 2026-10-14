@@ -64,6 +64,7 @@ mod provider;
 mod resource;
 mod rest;
 mod schema;
+mod sync;
 mod typescript;
 mod user_rows;
 

@@ -10692,11 +10692,22 @@ every schema change.
 **Pulls are cut at a watermark, not at a time or a count.** A number or timestamp is taken
 before a transaction commits, so a transaction that started earlier can become visible after a
 later one has already been handed out, and a "since" query would skip it forever. Saltcorn 1's
-time windows have this gap. A pull returns the entries whose transaction id is at or above the
-device's watermark and below the oldest transaction still running
-(`txid_snapshot_xmin(txid_current_snapshot())`); that boundary is the new watermark. Everything
-below it is final, so nothing is skipped; a long-running transaction delays a pull but never
-loses a change. On SQLite, which runs one write transaction at a time, `seq` is the watermark.
+time windows have this gap. The watermark is a Postgres snapshot, `txid_current_snapshot()`
+as text (`xmin:xmax:running`): which transactions had finished and which were still running.
+A pull returns the entries of transactions committed at the new snapshot but not at the
+device's (`txid_visible_in_snapshot`), so one that commits late comes with the next pull. A
+transaction left open, even on an unrelated table, holds back only its own changes. On SQLite,
+which runs one write transaction at a time, `seq` is the watermark.
+
+**The pull API** is part of an application's REST API, for signed-in users, when one of its
+tables is synced. `POST {mount}/sync/register` gives a device an id, tied to the user and the
+application. `POST {mount}/sync/pull` takes that id, the watermark of the device's last pull
+and the synced tables it already holds. It answers the new watermark and one entry per table
+the user may read: a whole table (`reset`) when the device does not hold it yet or has no
+watermark, otherwise the current rows of the keys changed since, plus the keys that are gone or
+no longer readable (`removed`). Rows are read like any list read, so access rules and ownership
+apply. Delivery is at least once: the watermark is taken before reading, so a change may come
+twice but never not at all. The device's watermark is kept in `_fd_sync_clients`, for cleanup.
 
 **Uploads go through the row layer**, in the order the changes were made, in one transaction:
 access rules, ownership, validation, calculated fields and triggers apply as to any write, and
