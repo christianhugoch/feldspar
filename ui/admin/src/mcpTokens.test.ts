@@ -170,17 +170,16 @@ describe("the grant checkboxes", () => {
     expect(fields.map((field) => field.name)).toEqual([...GRANT_KEYS]);
   });
 
-  it("start ticked as the declaration says: it can build, it cannot destroy", () => {
+  it("start all ticked, whatever the copilot's own defaults are", () => {
     const grants = defaultGrants(grantFields(traits));
     expect(grants).toEqual({
       allow_create: true,
       allow_edit: true,
-      allow_drop: false,
-      allow_access_changes: false,
+      allow_drop: true,
+      allow_access_changes: true,
       allow_triggers: true,
       allow_applications: true,
-      // Installing a module runs somebody else's code: never ticked by default.
-      allow_modules: false,
+      allow_modules: true,
     });
   });
 });

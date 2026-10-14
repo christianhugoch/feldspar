@@ -4206,7 +4206,11 @@ can write an SQL endpoint and cannot remove one.
 `listModules` and `installModule` endpoints — so an agent writing a Python body can install the
 library it imports — and it is **off** unless a token or agent ticks it, because installing a
 package runs a third party's code with the server's privileges and a Python one has no sandbox at
-all. No existing credential gains it by upgrading. `installModule` also needs `allow_create`. The
+all. No existing credential gains it by upgrading. **An MCP token is the exception to all of these
+defaults:** a mint that leaves a flag out grants it (`sc_api::mcp::token_flags_from_submitted`) and
+the panel starts with every box ticked, because a token is minted by an admin, on purpose, for an
+agent they are handing the installation to; the stored `grants` is explicit, so the copilot's
+cautious defaults and the token's generous ones never meet. `installModule` also needs `allow_create`. The
 built-in `coding` trait offers the same two acts as `list_modules_<scope>` / `install_module_<scope>`
 behind its own `may_install_modules` checkbox, admin callers only (like the shell), through
 `sc_agent::ModuleManager` — which `sc-server` answers with the same functions the two endpoints

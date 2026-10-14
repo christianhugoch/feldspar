@@ -406,8 +406,8 @@ only where an admin said so:
 - **The coding agent**: tick *May list and install modules* on its `coding` trait. It is off by
   default, offered only when the run's caller is an administrator (like the shell), and the agent
   gets `list_modules_<scope>` and `install_module_<scope>`.
-- **An MCP client** (Claude Code over `/mcp`): mint the token with `allow_modules` (off by
-  default). It gets `listModules` and `installModule`; installing also needs `allow_create`.
+- **An MCP client** (Claude Code over `/mcp`): mint the token with `allow_modules` (on by
+  default for a token). It gets `listModules` and `installModule`; installing also needs `allow_create`.
   [OPERATIONS.md §7.7](OPERATIONS.md#77-installing-modules-over-mcp).
 
 Both install exactly as the Install button does — one row on the Modules tab, one reload — so what

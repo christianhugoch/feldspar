@@ -6650,21 +6650,18 @@ pub fn admin_handlers_with(
                         ))
                     })?;
 
-                // The six flags, read and written back through `sc-api::mcp` —
-                // the one place that knows what they are called and what they
-                // default to. A stored `grants` is explicit in all six, so the
-                // row records what was agreed to rather than what a later
-                // default would say.
+                // The seven flags, read and written back through `sc-api::mcp` —
+                // the one place that knows what they are called. A token
+                // defaults every flag on; a stored `grants` is explicit in all
+                // seven, so the row records what was agreed to rather than what
+                // a later default would say.
                 let submitted = match obj.get("grants") {
                     None | Some(Json::Null) => Attrs::new(),
                     Some(Json::Object(map)) => map.clone(),
                     Some(_) => return Err(Error::invalid("`grants` must be an object")),
                 };
                 sc_api::mcp::validate_flags(&submitted)?;
-                let grants = sc_api::mcp::flags_to_attrs(
-                    &sc_api::mcp::grants_from_attrs(&submitted),
-                    &sc_api::mcp::areas_from_attrs(&submitted),
-                );
+                let grants = sc_api::mcp::token_flags_from_submitted(&submitted);
 
                 let expires_at = match obj.get("expires_in_days") {
                     None | Some(Json::Null) => None,

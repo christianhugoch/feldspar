@@ -1061,7 +1061,8 @@ about proxies first — behind a reverse proxy every peer looks local.
 
 ### 7.2 Minting a token
 
-The panel below those switches. A label, an expiry in days, and seven grants:
+The panel below those switches. A label, an expiry in days, and seven grants — all
+seven ticked on a fresh form, so untick what this agent should not have:
 
 | Grant | What it allows |
 |---|---|
@@ -1071,7 +1072,7 @@ The panel below those switches. A label, an expiry in days, and seven grants:
 | `allow_access_changes` | change role floors, ownership formulae and row-level security |
 | `allow_triggers` | work on triggers at all |
 | `allow_applications` | work on applications' custom SQL queries |
-| `allow_modules` | list and install modules: npm packages and Python distributions (default **off**; §7.7) |
+| `allow_modules` | list and install modules: npm packages and Python distributions (§7.7) |
 
 `allow_access_changes` is the one to think hardest about: it changes what *every*
 user of the deployment can reach. `allow_drop` at least announces itself.
@@ -1109,17 +1110,17 @@ feldspar mcp-token create --label "claude-code on my laptop" --admin \
 | `--expires-in-days N` | lapse after N days; leave it out for a token that does not expire |
 | `--allow-create` / `--no-allow-create` | create tables, fields, triggers and queries (default **on**) |
 | `--allow-edit` / `--no-allow-edit` | change existing ones (default **on**) |
-| `--allow-drop` / `--no-allow-drop` | drop and delete (default **off**) |
-| `--allow-access-changes` / `--no-allow-access-changes` | role floors, ownership, row-level security (default **off**) |
+| `--allow-drop` / `--no-allow-drop` | drop and delete (default **on**) |
+| `--allow-access-changes` / `--no-allow-access-changes` | role floors, ownership, row-level security (default **on**) |
 | `--allow-triggers` / `--no-allow-triggers` | the trigger tools at all (default **on**) |
 | `--allow-applications` / `--no-allow-applications` | applications' custom SQL (default **on**) |
-| `--allow-modules` / `--no-allow-modules` | list and install modules (default **off**) |
+| `--allow-modules` / `--no-allow-modules` | list and install modules (default **on**) |
 | `--url ORIGIN` | the origin the printed `claude mcp add` line points at (default `http://localhost:<bind port>`) |
 | `--name NAME` | what the server is called in that line (default `feldspar`) |
 
-plus the usual database flags. A grant left out takes its default — the same
-safe configuration an untouched panel has: it can build, it cannot destroy, it
-cannot widen anybody's access. The user must be an administrator; any other user
+plus the usual database flags. A grant left out is **granted** — the same as an
+untouched panel, where every box starts ticked; say `--no-allow-…` for each one
+the token should not have. The user must be an administrator; any other user
 is refused, since the server would refuse every call the token made.
 
 The **secret is the only thing on stdout**, so it can be captured:
@@ -1363,7 +1364,7 @@ credential names a **user**, and it is checked against that user on every call.
 
 ### 7.7 Installing modules over MCP
 
-A token minted with `allow_modules` (off by default, on the panel and as `--allow-modules`) is
+A token minted with `allow_modules` (on by default for a token, on the panel and as `--allow-modules`) is
 offered two more tools:
 
 | Tool | What it does |

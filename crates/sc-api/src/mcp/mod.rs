@@ -295,6 +295,25 @@ pub fn flags_to_attrs(grants: &Grants, areas: &Areas) -> Attrs {
     out
 }
 
+/// The seven flags a freshly minted API token stores, from what the mint
+/// submitted: an absent flag is **granted**.
+///
+/// A token is minted by an admin, at a screen or a terminal, for an agent they
+/// are about to hand their installation to; everything on — modules, drops and
+/// access changes included — is what they almost always want, and unticking is
+/// one click. An `admin_copilot` agent's configuration keeps the cautious
+/// defaults of [`grants_from_attrs`] and [`areas_from_attrs`]; this applies only
+/// at a mint, and the result is written explicitly, so a stored token never
+/// re-reads itself against either set of defaults.
+pub fn token_flags_from_submitted(submitted: &Attrs) -> Attrs {
+    let mut out = Attrs::new();
+    for key in FLAG_KEYS {
+        let on = submitted.get(key).and_then(Json::as_bool).unwrap_or(true);
+        out.insert(key.to_owned(), Json::Bool(on));
+    }
+    out
+}
+
 /// Refuse a flag that is not `true`, `false` or absent, naming it.
 ///
 /// The validation both writers share: an agent's `validate_config` and a token
@@ -706,6 +725,23 @@ mod tests {
             assert_eq!(areas_from_attrs(&stored), areas);
             assert!(validate_flags(&stored).is_ok());
         }
+    }
+
+    #[test]
+    fn a_token_minted_with_nothing_said_is_granted_everything() {
+        let stored = token_flags_from_submitted(&Attrs::new());
+        assert_eq!(stored.len(), FLAG_KEYS.len());
+        assert_eq!(grants_from_attrs(&stored), Grants::all());
+        let areas = areas_from_attrs(&stored);
+        assert!(areas.triggers && areas.applications && areas.modules);
+
+        // What was said is kept; only the silence defaults on.
+        let mut said = Attrs::new();
+        said.insert(GRANT_DROP.to_owned(), Json::Bool(false));
+        let stored = token_flags_from_submitted(&said);
+        assert_eq!(stored[GRANT_DROP], Json::Bool(false));
+        assert_eq!(stored[GRANT_ACCESS_CHANGES], Json::Bool(true));
+        assert_eq!(stored[Area::Modules.key()], Json::Bool(true));
     }
 
     #[test]

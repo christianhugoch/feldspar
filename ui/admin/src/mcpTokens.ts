@@ -43,8 +43,7 @@ export const ADMIN_COPILOT = "admin_copilot";
 
 /** The seven flags a token carries, in the order an admin ticks them: four
  * grants — what it may *do* — then three areas, which say what it may do it *to*.
- * The last, `allow_modules`, is off unless ticked: installing a module runs a
- * third party's code with the server's privileges (`sc_api::mcp::Area::Modules`). */
+ * A fresh token has all seven (`sc_api::mcp::token_flags_from_submitted`). */
 export const GRANT_KEYS = [
   "allow_create",
   "allow_edit",
@@ -61,8 +60,8 @@ export const GRANT_KEYS = [
  * Deliberately terse, and deliberately not a second set of the copilot's
  * sentences: a short true label that is obviously the key's own word cannot
  * drift into disagreeing with a longer one it is not pretending to copy. The
- * defaults are the ones `sc_api::mcp` applies to an absent flag, which is what a
- * mint sending nothing would get anyway. */
+ * `default`s here are the copilot's; a token's mint form ignores them and starts
+ * with every box ticked (`defaultGrants`). */
 export const FALLBACK_GRANT_FIELDS: FieldSpec[] = [
   { name: "allow_create", label: "May create", default: true },
   { name: "allow_edit", label: "May change what is there", default: true },
@@ -96,12 +95,13 @@ export function grantFields(traits: ListAgentTraitsResponse): FieldSpec[] {
   );
 }
 
-/** Which boxes a fresh mint form starts with ticked: whatever each field
- * declares as its default, which is the safe configuration rather than the empty
- * one — it can build, it cannot destroy or widen anybody's access. */
+/** Which boxes a fresh mint form starts with ticked: all of them, whatever the
+ * copilot declares as its own defaults. A token is minted on purpose for an agent
+ * the admin is handing the installation to, and the server grants an absent flag
+ * too (`sc_api::mcp::token_flags_from_submitted`); unticking is one click. */
 export function defaultGrants(fields: FieldSpec[]): Record<string, boolean> {
   const grants: Record<string, boolean> = {};
-  for (const field of fields) grants[field.name] = field.default === true;
+  for (const field of fields) grants[field.name] = true;
   return grants;
 }
 

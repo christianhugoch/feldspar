@@ -86,7 +86,8 @@ async fn a_token_minted_from_the_cli_authenticates_until_it_is_revoked() -> sc_e
     assert_eq!(grants["allow_drop"], Json::Bool(true));
     assert_eq!(grants["allow_triggers"], Json::Bool(false));
     assert_eq!(grants["allow_create"], Json::Bool(true));
-    assert_eq!(grants["allow_access_changes"], Json::Bool(false));
+    assert_eq!(grants["allow_access_changes"], Json::Bool(true));
+    assert_eq!(grants["allow_modules"], Json::Bool(true));
     assert!(caller.token.expires_at.is_some());
 
     // It is listed, by id, without the secret.
