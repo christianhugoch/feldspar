@@ -79,3 +79,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] Resolving instead of refusing a change whose referenced row was deleted meanwhile
       (restore the parent, clear the reference, or keep it in a conflict list for a person).
 - [ ] Conflict strategies besides "server wins", chosen per table (`attributes.sync`).
+- [ ] Sync for tables in a connected database. Our trigger can't run there, so Saltcorn itself
+      writes the change-log entry whenever it changes a row. To stay safe without a shared
+      transaction, commit the log entry only after the other database has committed the row.
+      Changes made outside Saltcorn aren't seen, so these tables also need a way to reload.
+      The same approach would work for any database backend added later that has no trigger
+      support of its own.
