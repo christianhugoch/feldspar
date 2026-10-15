@@ -86,6 +86,7 @@ use crate::provider::{ApiProvider, ApiRequest, ApiResponse};
 use crate::resource::{ResourceField, ResourceFile, ResourceModel};
 use crate::rows;
 use crate::schema::{TypeSchema, ValueType};
+use crate::write_as;
 
 /// The provider's registered name.
 pub const REST_PROVIDER: &str = "rest";
@@ -255,11 +256,12 @@ const INVITE: &str = "invite";
 const FORGOT_PASSWORD: &str = "forgotPassword";
 const SET_PASSWORD: &str = "setPassword";
 
-/// Offline sync's endpoints (§14.11): `POST {mount}/sync/register` and
-/// `POST {mount}/sync/pull`, projected when one of the app's tables is synced.
+/// Offline sync's endpoints (§14.11): `POST {mount}/sync/register`, `…/pull`
+/// and `…/push`, projected when one of the app's tables is synced.
 const SYNC_SEGMENT: &str = "sync";
 const SYNC_REGISTER: &str = "syncRegister";
 const SYNC_PULL: &str = "syncPull";
+const SYNC_PUSH: &str = "syncPush";
 
 /// The first path segments this provider's own routes claim, which a custom SQL
 /// query's sub-path may therefore not start with (see
@@ -283,9 +285,10 @@ pub(crate) const RESERVED_SEGMENTS: [&str; 9] = [
 /// Every endpoint name the provider's own auth may project — the five every
 /// app has plus `signup` and `invite` — which a custom query may therefore not
 /// be named.
-pub(crate) const RESERVED_AUTH_NAMES: [&str; 9] = [
+pub(crate) const RESERVED_AUTH_NAMES: [&str; 10] = [
     SYNC_REGISTER,
     SYNC_PULL,
+    SYNC_PUSH,
     LOGIN,
     LOGOUT,
     WHOAMI,
@@ -601,6 +604,12 @@ impl RestProvider {
                 Endpoint::new(SYNC_PULL, Method::Post, sync_path().lit("pull"))
                     .input(crate::sync::pull_input_schema())
                     .output(crate::sync::pull_output_schema())
+                    .auth(AuthRequirement::LoggedIn),
+            );
+            endpoints.register(
+                Endpoint::new(SYNC_PUSH, Method::Post, sync_path().lit("push"))
+                    .input(crate::sync::push_input_schema())
+                    .output(crate::sync::push_output_schema())
                     .auth(AuthRequirement::LoggedIn),
             );
         }
@@ -1099,100 +1108,29 @@ impl RestProvider {
                 Err(()) => forbidden(user),
                 Ok(_) => self.list(cat, &table, req, user).await?,
             },
-            RestOp::Create => {
-                // The defaults first, so the ownership check sees the row that
-                // would be written (`rows::fill_defaults`).
-                let body = &rows::fill_defaults(cat, &table, body, caller.user.as_ref()).await?;
-                match formula(meets_write) {
-                    Err(()) => return Ok(forbidden(user)),
-                    Ok(None) => {}
-                    // An insert is checked against the proposed row, `_insert`
-                    // folded true (§7.3) — WITH CHECK semantics at runtime.
-                    Ok(Some(f)) => {
-                        let proposed = rows::coerce_row_values(&table, body)?;
-                        if !ownership::row_allowed(
-                            cat,
-                            &table,
-                            f,
-                            Operation::Insert,
-                            user,
-                            evaluator,
-                            &proposed,
-                        )
+            RestOp::Create | RestOp::Update | RestOp::Delete => {
+                let executor = rows::Executor::Pooled;
+                let writer = write_as::Caller {
+                    user,
+                    evaluator,
+                    context: &caller,
+                    executor: &executor,
+                };
+                let outcome = match &route.op {
+                    RestOp::Create => write_as::create(cat, &table, body, &writer)
                         .await?
-                        {
-                            return Ok(ApiResponse::error(
-                                403,
-                                "this row is outside your ownership",
-                            ));
-                        }
-                    }
-                }
-                ApiResponse::with_status(
-                    201,
-                    rows::create_row_ctx(cat, &table, body, Some(&caller)).await?,
-                )
-            }
-            RestOp::Update => {
-                let id = id()?;
-                match formula(meets_write) {
-                    Err(()) => return Ok(forbidden(user)),
-                    Ok(None) => ApiResponse::ok(
-                        rows::update_row_ctx(cat, &table, id, body, Some(&caller)).await?,
-                    ),
-                    Ok(Some(f)) => {
-                        // USING: granted on the existing row…
-                        let existing = self
-                            .owned_row(cat, &table, f, Operation::Update, user, id)
-                            .await?;
-                        // …and WITH CHECK: granted on the proposed row too, so
-                        // an update cannot move the row out of the caller's
-                        // ownership.
-                        let changes = rows::coerce_row_values(&table, body)?;
-                        let merged = ownership::merged_row(&table, &existing, &changes);
-                        if !ownership::row_allowed(
-                            cat,
-                            &table,
-                            f,
-                            Operation::Update,
-                            user,
-                            evaluator,
-                            &merged,
-                        )
+                        .map(|row| ApiResponse::with_status(201, row)),
+                    RestOp::Update => write_as::update(cat, &table, id()?, body, &writer)
                         .await?
-                        {
-                            return Ok(ApiResponse::error(
-                                403,
-                                "the update would move this row out of your ownership",
-                            ));
-                        }
-                        // The translated predicate rides in the UPDATE's WHERE
-                        // when it can, closing the check-to-write race.
-                        let guard =
-                            ownership::write_guard(cat, &table, f, Operation::Update, user)?;
-                        ApiResponse::ok(
-                            rows::update_row_guarded(cat, &table, id, body, guard, Some(&caller))
-                                .await?,
-                        )
-                    }
-                }
-            }
-            RestOp::Delete => {
-                let id = id()?;
-                match formula(meets_write) {
-                    Err(()) => return Ok(forbidden(user)),
-                    Ok(None) => {
-                        rows::delete_row_ctx(cat, &table, id, Some(&caller)).await?;
-                        deleted()
-                    }
-                    Ok(Some(f)) => {
-                        self.owned_row(cat, &table, f, Operation::Delete, user, id)
-                            .await?;
-                        let guard =
-                            ownership::write_guard(cat, &table, f, Operation::Delete, user)?;
-                        rows::delete_row_guarded(cat, &table, id, guard, Some(&caller)).await?;
-                        deleted()
-                    }
+                        .map(ApiResponse::ok),
+                    _ => write_as::delete(cat, &table, id()?, &writer)
+                        .await?
+                        .map(|()| deleted()),
+                };
+                match outcome {
+                    Ok(answer) => answer,
+                    Err(write_as::Denied::Floor) => forbidden(user),
+                    Err(denied) => ApiResponse::error(403, denied.message()),
                 }
             }
             RestOp::Download { field } => {
@@ -1305,27 +1243,7 @@ impl RestProvider {
         user: Option<&User>,
         id: &str,
     ) -> Result<std::collections::BTreeMap<String, Value>> {
-        let not_found = || {
-            let pk = rows::single_pk(table)?;
-            Err(Error::not_found(format!("no row with {pk} = {id}")))
-        };
-        let Some(existing) = ownership::fetch_row_values(cat, table, formula, id).await? else {
-            return not_found();
-        };
-        if !ownership::row_allowed(
-            cat,
-            table,
-            formula,
-            op,
-            user,
-            self.evaluator.as_ref(),
-            &existing,
-        )
-        .await?
-        {
-            return not_found();
-        }
-        Ok(existing)
+        write_as::owned_row_as(cat, table, formula, op, user, self.evaluator.as_ref(), id).await
     }
 
     /// Run a row operation on an **RLS-enabled** table (§6): the database's
@@ -1918,24 +1836,41 @@ impl RestProvider {
             HandlerRef::Named(_) if endpoint.name == LOGOUT => {
                 Ok(ApiResponse::end_session(json!({ "ok": true })))
             }
-            HandlerRef::Named(_) if endpoint.name == SYNC_REGISTER || endpoint.name == SYNC_PULL => {
+            HandlerRef::Named(_)
+                if [SYNC_REGISTER, SYNC_PULL, SYNC_PUSH].contains(&endpoint.name.as_str()) =>
+            {
                 // `LoggedIn` is enforced above, so a caller is present here.
                 let user = user.ok_or_else(|| Error::auth("sign in to sync"))?;
                 let application = self.application.ok_or_else(|| {
                     Error::config("offline sync needs the application this API serves")
                 })?;
-                let answer = if endpoint.name == SYNC_REGISTER {
-                    crate::sync::register(cat, application, user, &req.body).await?
-                } else {
-                    crate::sync::pull(
-                        cat,
-                        application,
-                        &self.tables,
-                        user,
-                        self.evaluator.as_ref(),
-                        &req.body,
-                    )
-                    .await?
+                let evaluator = self.evaluator.as_ref();
+                let answer = match endpoint.name.as_str() {
+                    SYNC_REGISTER => {
+                        crate::sync::register(cat, application, user, &req.body).await?
+                    }
+                    SYNC_PULL => {
+                        crate::sync::pull(
+                            cat,
+                            application,
+                            &self.tables,
+                            user,
+                            evaluator,
+                            &req.body,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        crate::sync::push(
+                            cat,
+                            application,
+                            &self.tables,
+                            user,
+                            evaluator,
+                            &req.body,
+                        )
+                        .await?
+                    }
                 };
                 Ok(ApiResponse::ok(answer))
             }

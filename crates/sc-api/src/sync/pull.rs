@@ -1,5 +1,4 @@
-//! Offline sync, the pull side (§14.11, `TODO-offline-sync.md` S2): a device
-//! registers once, then asks "what changed since my watermark?" and gets the
+//! The pull: a device asks "what changed since my watermark?" and gets the
 //! current rows of what changed, read with its user's rights.
 //!
 //! The change-log (`_fd_changes`) only says *which* rows changed; the rows
@@ -15,15 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use sc_auth::User;
-use sc_catalog::{
-    Catalog, SYNC_CLIENTS_TABLE, SyncWatermark, Table, changed_keys, sync_watermark,
-};
+use sc_catalog::{Catalog, SyncWatermark, Table, changed_keys, sync_watermark};
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
-use sc_query::{Expr, InSet, Value};
+use sc_query::{Expr, InSet};
 use serde_json::{Map, Value as Json, json};
 use uuid::Uuid;
 
+use super::device::{check_device, devices_table};
 use crate::ownership;
 use crate::rows::{self, RowQuery};
 use crate::schema::{StructField, TypeSchema};
@@ -31,20 +29,6 @@ use crate::schema::{StructField, TypeSchema};
 /// How many keys one read asks for: a long `IN (…)` list is still one
 /// statement, but not an unbounded one.
 const KEYS_PER_READ: usize = 500;
-
-/// `POST {mount}/sync/register`'s body: an optional name for the device, so an
-/// admin can tell a user's phone from their tablet.
-pub(crate) fn register_input_schema() -> TypeSchema {
-    TypeSchema::struct_of([StructField::new(
-        "name",
-        TypeSchema::optional(TypeSchema::text()),
-    )])
-}
-
-/// The new device's id, which it sends with every pull.
-pub(crate) fn register_output_schema() -> TypeSchema {
-    TypeSchema::struct_of([StructField::new("client_id", TypeSchema::text())])
-}
 
 /// `POST {mount}/sync/pull`'s body.
 ///
@@ -79,34 +63,6 @@ pub(crate) fn pull_output_schema() -> TypeSchema {
             ])),
         ),
     ])
-}
-
-/// Register a device of `user` for `application`; answers its new id.
-pub(crate) async fn register(
-    cat: &Catalog,
-    application: Uuid,
-    user: &User,
-    body: &Json,
-) -> Result<Json> {
-    let name = match body.get("name") {
-        None | Some(Json::Null) => Json::Null,
-        Some(Json::String(name)) => Json::String(name.trim().to_owned()),
-        Some(_) => return Err(Error::invalid("`name` must be text")),
-    };
-    let devices = devices_table(cat)?;
-    let id = Uuid::new_v4();
-    rows::create_row(
-        cat,
-        &devices,
-        &json!({
-            "id": id.to_string(),
-            "user_id": user.id.to_string(),
-            "application": application.to_string(),
-            "name": name,
-        }),
-    )
-    .await?;
-    Ok(json!({ "client_id": id.to_string() }))
 }
 
 /// Answer one pull of a device of `user`, over `exposed` — the application's
@@ -164,7 +120,13 @@ pub(crate) async fn pull(
     if let Some(since) = &since {
         seen.insert("watermark".into(), json!(since.to_string()));
     }
-    rows::update_row(cat, &devices, &request.client_id.to_string(), &Json::Object(seen)).await?;
+    rows::update_row(
+        cat,
+        &devices,
+        &request.client_id.to_string(),
+        &Json::Object(seen),
+    )
+    .await?;
 
     Ok(json!({ "watermark": watermark.to_string(), "tables": tables }))
 }
@@ -182,9 +144,7 @@ impl PullRequest {
             .get("client_id")
             .and_then(Json::as_str)
             .and_then(|s| Uuid::parse_str(s.trim()).ok())
-            .ok_or_else(|| {
-                Error::invalid("`client_id` must be the id `sync/register` answered")
-            })?;
+            .ok_or_else(|| Error::invalid("`client_id` must be the id `sync/register` answered"))?;
         let watermark = match body.get("watermark") {
             None | Some(Json::Null) => None,
             Some(Json::String(w)) => Some(SyncWatermark::parse(w)?),
@@ -208,42 +168,6 @@ impl PullRequest {
             tables,
         })
     }
-}
-
-fn devices_table(cat: &Catalog) -> Result<Table> {
-    cat.get(SYNC_CLIENTS_TABLE)?.ok_or_else(|| {
-        Error::invalid("offline sync needs a Postgres database; this one cannot record changes yet")
-    })
-}
-
-/// The device must be this user's, for this application: a device id is not a
-/// secret, so it is never enough on its own.
-async fn check_device(
-    cat: &Catalog,
-    devices: &Table,
-    id: Uuid,
-    application: Uuid,
-    user: &User,
-) -> Result<()> {
-    let query = RowQuery {
-        filter: Some(
-            Expr::col("id")
-                .eq(Expr::lit(Value::Uuid(id)))
-                .and(Expr::col("user_id").eq(Expr::lit(Value::Uuid(user.id))))
-                .and(Expr::col("application").eq(Expr::lit(Value::Uuid(application)))),
-        ),
-        limit: Some(1),
-        ..RowQuery::new()
-    };
-    if rows::list_row_values(cat, devices, &query, None)
-        .await?
-        .is_empty()
-    {
-        return Err(Error::not_found(
-            "unknown device: register it with `sync/register` first",
-        ));
-    }
-    Ok(())
 }
 
 /// Whether `role` may read `table` at all: the table's floor, or an ownership
@@ -270,9 +194,7 @@ async fn changes_of(
     for chunk in keys.chunks(KEYS_PER_READ) {
         let set = chunk
             .iter()
-            .map(|key| {
-                rows::column_value(table, &pk, &Json::String((*key).clone())).map(Expr::lit)
-            })
+            .map(|key| rows::column_value(table, &pk, &Json::String((*key).clone())).map(Expr::lit))
             .collect::<Result<Vec<_>>>()?;
         let query = RowQuery {
             filter: Some(Expr::In {
@@ -300,7 +222,7 @@ async fn changes_of(
 
 /// A key as the change-log writes it: a text key as itself, any other as its
 /// JSON rendering (`42`), which is what `->>` gives for a number.
-fn key_text(value: &Json) -> String {
+pub(super) fn key_text(value: &Json) -> String {
     match value {
         Json::String(s) => s.clone(),
         other => other.to_string(),

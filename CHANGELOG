@@ -2,6 +2,17 @@
 
 Changes in reverse chronological order.
 
+## Offline sync: devices can upload their changes
+
+A new `sync/push` endpoint takes the inserts, updates and deletes a device made offline and
+applies them in order, with the same rules as the REST API. A change that is refused (no
+access, invalid, a missing referenced row, a changed key) is reported with its reason and
+doesn't stop the others. Retrying an upload is safe: changes already handled are skipped.
+Conflicts with changes made on the server meanwhile come next.
+
+- The REST API's create, update and delete rules moved into one place, shared with the upload.
+- Tests: `crates/sc-api/tests/sync_push.rs`.
+
 ## Offline sync: devices can pull changes
 
 An application with a synced table gets two endpoints in its REST API, for signed-in users.

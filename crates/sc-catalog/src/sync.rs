@@ -21,10 +21,13 @@ use sc_error::{Error, Result};
 use sc_query::{SqlDialect, Statement, Value};
 use sc_types::{BasicType, TypeRef};
 use serde_json::Value as Json;
+use uuid::Uuid;
 
+use crate::CallerContext;
 use crate::catalog::{Catalog, SchemaStep};
 use crate::field::{Attrs, DataField};
 use crate::table::Table;
+use crate::tx::SharedTx;
 
 /// The change-log: one entry per recorded insert, update or delete.
 pub const CHANGES_TABLE: &str = "_fd_changes";
@@ -84,6 +87,9 @@ fn clients_fields() -> Vec<DataField> {
         DataField::plain("application", uuid()).required(),
         DataField::plain("name", TypeRef::Basic(BasicType::Text)),
         DataField::plain("watermark", TypeRef::Basic(BasicType::Text)),
+        // The highest change number of this device's uploads already handled,
+        // applied or refused: a retried upload skips everything up to it.
+        DataField::plain("last_mutation", TypeRef::Basic(BasicType::Int)),
         DataField::plain("created_at", timestamp())
             .required()
             .generated(ColumnGenerator::Default("now()".into())),
@@ -119,6 +125,30 @@ pub async fn bootstrap_sync(catalog: &Catalog) -> Result<()> {
             function = record_function_sql(),
         ))])
         .await
+}
+
+/// Mark the rest of `tx` as a device's upload: every change-log entry it writes
+/// names `client` and the device's own number for the change, `mutation`.
+pub async fn mark_sync_device(
+    tx: &SharedTx,
+    caller: Option<&CallerContext>,
+    client: Uuid,
+    mutation: i64,
+) -> Result<()> {
+    tx.run(
+        caller,
+        &Statement::raw(
+            "SELECT set_config($1, $2, true), set_config($3, $4, true)",
+            vec![
+                Value::Text(SYNC_CLIENT_GUC.to_owned()),
+                Value::Text(client.to_string()),
+                Value::Text(SYNC_MUTATION_GUC.to_owned()),
+                Value::Text(mutation.to_string()),
+            ],
+        ),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Where a pull stopped: a Postgres snapshot (`xmin:xmax:running`), as text on

@@ -103,8 +103,8 @@ pub use rls::{
 };
 pub use spatial::bootstrap_spatial;
 pub use sync::{
-    CHANGES_TABLE, SYNC_CLIENTS_TABLE, SyncWatermark, bootstrap_sync, changed_keys,
-    disable_sync_sql, enable_sync_sql, set_sync_enabled, sync_enabled, sync_key, sync_watermark,
+    SYNC_CLIENTS_TABLE, SyncWatermark, bootstrap_sync, changed_keys, disable_sync_sql,
+    enable_sync_sql, mark_sync_device, set_sync_enabled, sync_enabled, sync_key, sync_watermark,
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{

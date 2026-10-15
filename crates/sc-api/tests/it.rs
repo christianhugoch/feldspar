@@ -17,10 +17,6 @@ mod admin_client_sync;
 mod calc_after_read;
 #[path = "calc_fields.rs"]
 mod calc_fields;
-#[path = "sync_changes.rs"]
-mod sync_changes;
-#[path = "sync_pull.rs"]
-mod sync_pull;
 #[path = "code_host_as_user.rs"]
 mod code_host_as_user;
 #[path = "code_host_reads.rs"]
@@ -71,6 +67,12 @@ mod rest_query;
 mod rich_type_write_path;
 #[path = "sqlite_rows.rs"]
 mod sqlite_rows;
+#[path = "sync_changes.rs"]
+mod sync_changes;
+#[path = "sync_pull.rs"]
+mod sync_pull;
+#[path = "sync_push.rs"]
+mod sync_push;
 #[path = "typescript_typecheck.rs"]
 mod typescript_typecheck;
 #[path = "v1_table_reads.rs"]

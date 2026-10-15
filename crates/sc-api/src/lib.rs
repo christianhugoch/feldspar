@@ -67,6 +67,7 @@ mod schema;
 mod sync;
 mod typescript;
 mod user_rows;
+mod write_as;
 
 pub use admin::{ADMIN_API_PREFIX, ROW_PAGE_CAP, admin_endpoints};
 pub use endpoint::{

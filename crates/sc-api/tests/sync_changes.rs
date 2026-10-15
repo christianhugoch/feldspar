@@ -208,7 +208,7 @@ async fn sqlite_says_it_cannot_record_changes_yet() -> Result<()> {
     bootstrap_field_meta(&catalog).await?;
     // A no-op here: there is no change-log to create.
     bootstrap_sync(&catalog).await?;
-    assert!(catalog.get(sc_catalog::CHANGES_TABLE)?.is_none());
+    assert!(catalog.get("_fd_changes")?.is_none());
     catalog
         .create_table(
             "todo",

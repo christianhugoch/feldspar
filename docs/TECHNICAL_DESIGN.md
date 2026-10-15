@@ -10709,11 +10709,15 @@ no longer readable (`removed`). Rows are read like any list read, so access rule
 apply. Delivery is at least once: the watermark is taken before reading, so a change may come
 twice but never not at all. The device's watermark is kept in `_fd_sync_clients`, for cleanup.
 
-**Uploads go through the row layer**, in the order the changes were made, in one transaction:
-access rules, ownership, validation, calculated fields and triggers apply as to any write, and
-parents arrive before their children without sorting tables by their foreign keys. A device
-numbers its changes, and the server skips a number it has already applied, so an upload can be
-retried safely.
+**Uploads go through the REST API's own write rules** (`POST {mount}/sync/push`), in the
+order the changes were made: access rules, ownership, validation, calculated fields and
+triggers apply as to any write, and parents arrive before their children without sorting tables
+by their foreign keys. Each change runs in its own transaction, so a refused one (access,
+validation, a foreign key, a key change, a row not there) is reported with its reason and the
+others go on. A device numbers its changes; the last number handled is kept per device in the
+same transaction, so a retried upload skips what is done, and each change is handled once and
+in order even when two uploads of one device overlap. A configuration error stops the upload
+rather than refusing the change, so the change is retried once the app is fixed.
 
 **Conflicts are merged field by field.** A field changed only on the device or only on the
 server keeps that change. A field changed on both sides keeps the server's value. "Changed on

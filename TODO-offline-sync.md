@@ -41,26 +41,29 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## S3 — Push and conflicts
 
-- [ ] S3.1 The push endpoint: a device's inserts, updates and deletes applied in the device's
-      order through the row layer, with the user's rights and the device's id and change numbers
-      set for the trigger. Each change has its own savepoint: a refused one is reported with its
+- [x] S3.1 The push endpoint: a device's inserts, updates and deletes applied in the device's
+      order with the REST API's own write rules, and the device's id and change numbers set for
+      the trigger. Each change has its own transaction: a refused one is reported with its
       reason and the others go on.
-- [ ] S3.2 Retrying is safe: changes already applied are skipped.
+- [x] S3.2 Retrying is safe: each device's last handled change number is kept, and changes up
+      to it are skipped.
 - [ ] S3.3 Field-wise merge, server wins on a field changed on both sides. Delete against change:
       a device's delete of a row changed on the server since the device saw it is refused (the
       device gets the row back); a device's change of a row deleted on the server is refused (the
       device removes it). The answer lists accepted, merged and refused changes.
-- [ ] S3.4 Refused for now, and reported: a change of a row's primary key from a device; a row
+- [x] S3.4 Refused for now, and reported: a change of a row's primary key from a device; a row
       pointing at a row that no longer exists (deleted meanwhile); a delete the database's foreign
       keys forbid.
-- [ ] S3.5 Tests: each conflict case; a child inserted offline with its parent; a delete made
+- [~] S3.5 Tests: each conflict case; a child inserted offline with its parent; a delete made
       offline; a refused write (access, validation, foreign key) reported without stopping the
       others.
 
 ## S4 — The client
 
 - [ ] S4.1 The generated client (`src/feldspar/`) reads and writes a local copy with an outbox:
-      `expo-sqlite` in React Native, IndexedDB in the browser.
+      `expo-sqlite` in React Native, IndexedDB in the browser. A change the upload answers
+      `skipped` was handled by an earlier upload whose answer got lost: drop it from the outbox
+      and let the next pull bring the server's row.
 - [ ] S4.2 Background sync: pull and push when online, and a pull when a live `table_changes`
       stream says a synced table changed.
 - [ ] S4.3 A pull is applied in one local transaction, foreign-key checks deferred to its end;
