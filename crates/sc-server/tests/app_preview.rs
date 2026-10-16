@@ -322,6 +322,7 @@ async fn a_green_check_mounts_the_runs_preview_and_leaves_the_live_mount() -> sc
         previews: Some(previews),
         browser: None,
         requests: None,
+        modules: None,
         signals: Vec::new(),
         images: Vec::new(),
     };
@@ -364,6 +365,7 @@ async fn a_green_check_mounts_the_runs_preview_and_leaves_the_live_mount() -> sc
         previews: Some(previews),
         browser: None,
         requests: None,
+        modules: None,
         signals: Vec::new(),
         images: Vec::new(),
     };

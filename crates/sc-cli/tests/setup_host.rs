@@ -562,6 +562,41 @@ fn a_copy_beside_an_installed_binary_defaults_to_static() {
     fs::remove_dir_all(&dir).ok();
 }
 
+/// The Debian 13 + Python artifact leaves `VARIANT` beside its binary, and the
+/// host it is on then gets the library it links and the interpreter pip needs.
+#[test]
+fn a_python_artifact_gets_the_python_packages() {
+    let dir = scratch("python-variant");
+    let prefix = dir.join("opt/feldspar");
+    write_executable(&prefix.join("bin/feldspar"), "#!/bin/sh\necho feldspar\n");
+    let installed = prefix.join("setup-host.sh");
+    fs::copy(script(), &installed).unwrap();
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let plan = |variant: &str| {
+        fs::write(prefix.join("VARIANT"), format!("{variant}\n")).unwrap();
+        let out = Command::new("sh")
+            .arg(&installed)
+            .args(["--dry-run", "--domain", "example.com"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stdout_of(&out));
+        stdout_of(&out)
+    };
+    let python = plan("debian13-python");
+    assert!(
+        python.contains("libpython3.13 python3 python3-venv"),
+        "the python artifact's host needs its packages:\n{python}"
+    );
+    let plain = plan("static");
+    assert!(
+        !plain.contains("python3-venv"),
+        "the static artifact needs no Python:\n{plain}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 /// The same file *outside* an installed tree — a checkout, or piped from curl —
 /// keeps building from source as the default.
 #[test]

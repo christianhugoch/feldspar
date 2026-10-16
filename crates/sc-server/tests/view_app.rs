@@ -277,6 +277,7 @@ impl<'e> Run<'e> {
             previews: Some(previews),
             browser: Some(browser),
             requests: None,
+            modules: None,
             signals: Vec::new(),
             images: Vec::new(),
         };

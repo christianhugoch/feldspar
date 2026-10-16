@@ -264,6 +264,9 @@ async fn serve_command(args: &[String]) -> Result<()> {
         // live mounts (TODO §7b). Without a base domain a preview has no host.
         view_services.set_previews(apps.clone());
     }
+    // An agent with `may_install_modules` installs through the same path as the
+    // Modules tab (`sc_agent::ModuleManager`).
+    view_services.set_modules(apps.clone());
 
     // The certificate's names, now that the mounts are known: the base domain,
     // every mounted application's subdomain (and the admin UI's, if it has
@@ -2224,6 +2227,7 @@ fn print_usage() {
     eprintln!("                      [--allow-access-changes|--no-allow-access-changes]");
     eprintln!("                      [--allow-triggers|--no-allow-triggers]");
     eprintln!("                      [--allow-applications|--no-allow-applications]");
+    eprintln!("                      [--allow-modules|--no-allow-modules]");
     eprintln!("                      [--url ORIGIN] [--name NAME] [database flags]");
     eprintln!("  feldspar mcp-token list [--json] [database flags]");
     eprintln!("  feldspar mcp-token revoke ID [database flags]");

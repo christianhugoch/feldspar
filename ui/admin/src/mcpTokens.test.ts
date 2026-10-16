@@ -153,11 +153,15 @@ describe("the grant checkboxes", () => {
       "May drop tables and fields, and delete triggers and custom SQL queries",
     );
     // Verbatim: nothing here rewrites, shortens or re-punctuates what the
-    // server declared.
+    // server declared. A key the copilot does not declare — `allow_modules`,
+    // which only a token can use — keeps its own fallback label and default.
     for (const field of fields) {
       const declared = traits[0].config_spec.find((spec) => spec.name === field.name);
-      expect(field.label).toBe(declared?.label);
+      const fallback = FALLBACK_GRANT_FIELDS.find((spec) => spec.name === field.name);
+      expect(field.label).toBe(declared ? declared.label : fallback?.label);
     }
+    const modules = fields.find((field) => field.name === "allow_modules");
+    expect(modules?.default).toBe(false);
   });
 
   it("fall back to their own words when no copilot is registered", () => {
@@ -166,15 +170,16 @@ describe("the grant checkboxes", () => {
     expect(fields.map((field) => field.name)).toEqual([...GRANT_KEYS]);
   });
 
-  it("start ticked as the declaration says: it can build, it cannot destroy", () => {
+  it("start all ticked, whatever the copilot's own defaults are", () => {
     const grants = defaultGrants(grantFields(traits));
     expect(grants).toEqual({
       allow_create: true,
       allow_edit: true,
-      allow_drop: false,
-      allow_access_changes: false,
+      allow_drop: true,
+      allow_access_changes: true,
       allow_triggers: true,
       allow_applications: true,
+      allow_modules: true,
     });
   });
 });
@@ -195,7 +200,7 @@ describe("minting", () => {
     expect(mintProblem({ ...form, expiresInDays: "" })).toBeNull();
   });
 
-  it("sends all six flags explicitly, whichever are ticked", () => {
+  it("sends all seven flags explicitly, whichever are ticked", () => {
     const form = {
       label: "  claude-code on my laptop  ",
       grants: { allow_create: true, allow_triggers: true },
@@ -210,6 +215,7 @@ describe("minting", () => {
         allow_access_changes: false,
         allow_triggers: true,
         allow_applications: false,
+        allow_modules: false,
       },
       expires_in_days: 90,
     });

@@ -720,7 +720,7 @@ pub async fn insert_row_as(
         return rows::create_row_in(cat, table, body, Some(&caller), executor).await;
     }
     if let Some(formula) = write_formula(table, role, "write")? {
-        let proposed = rows::coerce_row_values(table, body)?;
+        let proposed = proposed_insert_row(table, body)?;
         if !row_allowed(
             cat,
             table,
@@ -939,6 +939,29 @@ pub(crate) async fn fetch_row_values(
     )
     .await?;
     Ok(fetched.drain(..).next())
+}
+
+/// The proposed row of an insert: the body's coerced values, with every stored
+/// field the body leaves out bound to `null` — the value the `INSERT` will
+/// store, and what a `WITH CHECK` policy sees on an RLS table. So `!owner || …`
+/// reads a missing `owner` as null rather than failing as an unbound name.
+///
+/// Run after [`rows::fill_defaults`], so a default expression has already
+/// supplied its field. A column the database fills itself
+/// ([`generated`](sc_catalog::DataField::generated): an identity key, a
+/// `DEFAULT`) is left unbound — `null` would not be what is stored, and a
+/// formula that reads one on insert keeps failing closed.
+pub(crate) fn proposed_insert_row(table: &Table, body: &Json) -> Result<BTreeMap<String, Value>> {
+    let mut values = rows::coerce_row_values(table, body)?;
+    for field in &table.fields {
+        if field.is_calc() || field.is_collab_doc() || field.generated.is_some() {
+            continue;
+        }
+        values
+            .entry(field.base.name.clone())
+            .or_insert(Value::Null);
+    }
+    Ok(values)
 }
 
 /// The proposed row of an update: the existing row with the body's coerced

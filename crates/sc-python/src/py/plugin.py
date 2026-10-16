@@ -558,6 +558,15 @@ _REGISTRIES = {}
 #: name `_fd_modules` holds and every host call arrives under.
 _BY_DISTRIBUTION = {}
 
+#: The distributions loaded as **libraries**, by normalised name: installed on
+#: purpose so that code bodies can import them (`requests`, `pandas`), with no
+#: `saltcorn.plugins` entry point and nothing registered. A library is imported
+#: once and then left alone: a reload is a re-import for a *plugin*, whose
+#: declarations must be read again, but forgetting `numpy` from `sys.modules`
+#: and importing it a second time is what a C extension does not survive — and
+#: every code body that imported it would be holding the old one anyway.
+_LIBRARIES = set()
+
 
 def normalise(name):
     """A distribution name in the one spelling everything here compares."""
@@ -807,6 +816,16 @@ def _entry_point_module(distribution):
     return None
 
 
+def _advertises_plugin(name):
+    """Whether the installed distribution `name` declares a ``saltcorn.plugins``
+    entry point — says it is a plugin rather than a library."""
+    try:
+        distribution = importlib.metadata.distribution(name)
+    except Exception:  # noqa: BLE001 — not installed, or metadata that will not parse
+        return False
+    return _entry_point_module(distribution) is not None
+
+
 def _top_level(distribution):
     """The distribution's own top-level package, off its metadata."""
     declared = None
@@ -1029,6 +1048,11 @@ def op_load(payload):
 
     name = module_name(distribution)
     package = _root(name)
+    key = normalise(distribution)
+    if key in _LIBRARIES and key in _BY_DISTRIBUTION:
+        # A library supplies nothing to re-read, and a re-import is what a
+        # compiled one does not survive: what was imported stays.
+        return manifest(distribution, _BY_DISTRIBUTION[key])
     # §11: a reload is a re-import, so the old registrations go first — a
     # decorator that is no longer there must not survive as an action.
     _forget(package)
@@ -1038,12 +1062,19 @@ def op_load(payload):
     registry = _REGISTRIES.get(package)
     if registry is None:
         registry = _registry(package)
-        registry.issues.append(
-            f"`{getattr(module, '__name__', name)}` declared nothing: a Saltcorn Python "
-            f"plugin registers what it supplies with the `saltcorn` decorators "
-            f"(`@saltcorn.action`, `@saltcorn.function`, `@saltcorn.table_provider`, "
-            f"`@saltcorn.model_provider`)"
-        )
+        if _advertises_plugin(distribution):
+            # It said it was a plugin and then declared nothing: the author's
+            # mistake, and the Modules tab is where they will look.
+            registry.issues.append(
+                f"`{getattr(module, '__name__', name)}` declared nothing: a Saltcorn "
+                f"Python plugin registers what it supplies with the `saltcorn` "
+                f"decorators (`@saltcorn.action`, `@saltcorn.function`, "
+                f"`@saltcorn.table_provider`, `@saltcorn.model_provider`)"
+            )
+        else:
+            # No entry point and nothing registered: a library, installed so
+            # that code bodies can import it. Not an issue — that is its job.
+            _LIBRARIES.add(key)
     registry.distribution = distribution
     registry.configuration = configuration
     _BY_DISTRIBUTION[normalise(distribution)] = registry
@@ -1064,6 +1095,7 @@ def op_unload(payload):
     every object it built alive. What this does is what can be done — nothing
     here will answer for it again.
     """
+    _LIBRARIES.discard(normalise(payload["module"]))
     registry = _BY_DISTRIBUTION.pop(normalise(payload["module"]), None)
     if registry is not None:
         _REGISTRIES.pop(registry.package, None)

@@ -783,6 +783,18 @@ model keeps them apart. And **introspection never resolves a column back to a ri
 `_fd_fields` overlay says so (§9) — guessing "this `text` column is an Email" from the database
 is exactly the magic that makes a legacy database behave surprisingly.
 
+**A path written to a `File` field must be the writer's to hand out** (`rows::may_attach_file`).
+The field's download endpoint serves whatever path the row holds to whoever may read the row, so
+a field that stored any path in its folder was a way to read somebody else's upload by naming
+it. On every insert and update the row layer makes, a caller below admin may only write the path
+of a file that **exists** and that they may replace (`sc_files::check_write`, §14.1): one they
+own, or one with no owner whose path floor their role clears. A missing file is refused in the
+same words as somebody else's, so the write is not a probe, and a path cannot be reserved before
+its owner uploads to it. Three writes are not checked: admin authority (the admin row editor, a
+trigger, a code body that is not delegated), an update that sends the path the row already holds
+(a whole-row save), and the field's own upload endpoint, which has already decided the caller
+may put a file at that path.
+
 **Geometry is a basic type** (analytics TODO A5.1, §14.6): `BasicType::Geometry(GeometryKind)`,
 where the kind is any geometry, a point, a line, a polygon or one of the multi variants. Its
 column is PostGIS's `geometry(<Kind>,4326)`, and its value is a **GeoJSON geometry object in a
@@ -1083,7 +1095,10 @@ absence — affected-rows 0, mapped to not-found — so "exists but forbidden" i
   the same query (zero extra round trips) and are stripped before rows reach the wire. Writes
   inject the predicate into the `UPDATE`/`DELETE` `WHERE` and additionally run a reified check
   on the existing row and, for updates/inserts, on the merged proposed row (WITH CHECK
-  semantics — moving a row out of your own ownership is refused). An **untranslatable** formula
+  semantics — moving a row out of your own ownership is refused). An insert's proposed row is
+  the row as stored: default expressions filled first, and every stored field the request
+  leaves out is `null` (so `!owner || …` grants), except a column the database fills itself
+  (identity key, `DEFAULT`), which stays unbound and fails closed if read. An **untranslatable** formula
   falls back to fetch-then-filter through the reified evaluator.
 - **Postgres row-level security** (`DbCapabilities::row_level_security`; opt-in per table via
   `rls_enabled`). `sc-catalog` emits `ENABLE` + **`FORCE ROW LEVEL SECURITY`** and four
@@ -4187,6 +4202,20 @@ discovering it is not the trigger editor. The two are independent, and each comp
 grants rather than replacing them: the applications area on with `allow_drop` off is an agent that
 can write an SQL endpoint and cannot remove one.
 
+**A third area, `allow_modules`, is the exception to "on by default".** It offers the tagged
+`listModules` and `installModule` endpoints — so an agent writing a Python body can install the
+library it imports — and it is **off** unless a token or agent ticks it, because installing a
+package runs a third party's code with the server's privileges and a Python one has no sandbox at
+all. No existing credential gains it by upgrading. **An MCP token is the exception to all of these
+defaults:** a mint that leaves a flag out grants it (`sc_api::mcp::token_flags_from_submitted`) and
+the panel starts with every box ticked, because a token is minted by an admin, on purpose, for an
+agent they are handing the installation to; the stored `grants` is explicit, so the copilot's
+cautious defaults and the token's generous ones never meet. `installModule` also needs `allow_create`. The
+built-in `coding` trait offers the same two acts as `list_modules_<scope>` / `install_module_<scope>`
+behind its own `may_install_modules` checkbox, admin callers only (like the shell), through
+`sc_agent::ModuleManager` — which `sc-server` answers with the same functions the two endpoints
+call, so all three paths are one install.
+
 **Other agents.** `subagent` exposes **one configured agent** as one tool, so an agent is a
 thing an agent can be given, exactly as a table and a trigger are. The parent hands over one
 bounded task, the sub-agent runs a whole loop of its own — its own system prompt, its own tools,
@@ -6640,6 +6669,18 @@ turns into a `Uint8Array`, so a JSON body cannot pose as bytes. Every code query
 the generated method as returning a `Blob`; a `GET` also gets `<name>Url(params)`, which builds
 the URL for `<img src>`, `<video>` and links. The generated method of a `bytes` body takes a
 `BodyInit` (`Blob`, `ArrayBuffer`, `Uint8Array`, …).
+
+**Streams out (TODO F7).** A third `response_type`, `stream` (JavaScript only; no `bytes` body,
+no `returns`), makes the query a door to a live subscription rather than an HTTP answer: its body
+ends in `return live.stream(name, key, { write, watch })`, and it is opened over the app's live
+socket with an `open` frame (§14.10, "Streams opened by a code query"). Its arguments are always
+its body — they are the frame's `params` — so `args_in_query` is false whatever its method. Over
+HTTP it answers `400` naming the socket; a JSON query that returns a stream handle is a code
+failure (`500`). The projected endpoint is marked `stream_output`, and the generated method is
+`name(body, handlers): LiveOpenedSession`, not a promise. `ApiProvider::open_stream` is the
+socket's way in: it checks the query's `min_role`, counts its rate limit against the socket's
+client address (not on a re-check), runs it, and answers `Granted(StreamReply)`, `Denied`,
+`RateLimited` or `Invalid`.
 
 **The arguments are open (TODO F1.1).** Because a body reads `body` and `query` whole, its
 projected endpoint carries `Endpoint::open_args`: the generated method **always** takes the
@@ -10013,8 +10054,9 @@ is byte-for-byte unchanged. It is not MQTT's topic, which stays in `source`.
 the client's own `sub`:
 
 ```
-client → server   subscribe {sub, stream, topic?, filter?, echo?} · unsubscribe {sub}
-                  publish {sub, value} · presence {sub, state} · doc_update {sub, update} · ping
+client → server   subscribe {sub, stream, topic?, filter?, echo?} · open {sub, query, params?, echo?}
+                  unsubscribe {sub}
+server → client   ready {sub, stream, element_type, replayed, can_publish, status, counters, opened?}
 server → client   ready {sub, stream, element_type, replayed, can_publish, status, counters}
                   element {sub, envelope} · lagged {sub, dropped} · status {sub, status, counters}
                   presence {sub, connection, members} · presence_diff {sub, joined?, left?, updated?}
@@ -10605,6 +10647,68 @@ edit refused and heard by nobody; losing and regaining the edit right, then the 
 1.2 MB document and a 100 KB paste; persisted and read back over REST. `tutorial_live_documents.rs`
 walks part 5 of `docs/tutorial-live.md`, ending with two headless Chromium contexts typing into one
 note through the scaffold's own generated runtime.
+
+#### Streams opened by a code query (TODO F7)
+
+A row or document subscription is decided by the role floor and the ownership rule, which see a
+signed-in user and nothing the page sends — so "whoever holds this unexpired share token may
+edit this pad" could not be said, and an anonymous link holder could not open a document. As for
+file downloads (§13.4, "Returning a file"), the answer is that **the code decides**: a custom
+query whose `response_type` is `stream` ends in
+
+```js
+return live.stream("pad_doc", link.pad, { write: link.mode === "edit", watch: ["audit"] });
+```
+
+and the page opens it with `open {sub, query, params, echo?}` instead of `subscribe`.
+
+- **The handle.** `live.stream` (in `LIVE_PRELUDE`) checks its arguments and returns a frozen
+  value tagged like `response(...)` (`__scStreamReply`), so a body cannot forge one from JSON. When
+  the run answers, `op_sc_respond` adds `read`: the tables the run's database calls named, which
+  `host_call` records per run. `take_code_response` reads it as `StreamReply {name, key, write,
+  watch, read}`.
+- **Opening.** The socket asks each of the app's providers `open_stream(query, params, ip,
+  recheck, …)`; the REST provider runs it as the caller (anonymous allowed) under its `min_role`
+  and rate limit. Then `check_handle`: the stream must be exposed by this application, stored,
+  have row topics, be a `document` stream or an `internal` one, and its table must be in the app.
+  **The stream's `min_role` and the row's read rule are not asked** — the query was the access
+  check, as an admin-authority file handle is. Anything short of a handle — no query of that name,
+  a JSON query, below its floor, a throw, `httpError`, a handle that fails the checks (logged for
+  the author) — is the one `unavailable` an absent stream gets; over the limit is
+  `rate_limited`; parameters that do not fit the declaration are `invalid`.
+- **Rights.** `write` stands in for `row_updatable_as`: a document's `doc_sync` is `read_only`
+  without it, and an `internal` stream with `client_publish` takes the page's publishes with it.
+- **`ready.opened`** — `{stream, kind: "document" | "row", key, root?, root_kind?}` — is sent on
+  a subscription `open` started, on its first `ready` and after a restart, so a page sets up a
+  `Y.Doc` without the stream having been named at generate time. Elements are `unknown`.
+- **Re-checked by running the query again** with the parameters it was opened with (kept in the
+  connection's memory, never logged): on the re-check clock, and at once when a write touches a
+  table the last run read or named in `watch`, or the subscription's own row (`QuerySub::
+  affected_by`, over the same `Watch` a row subscription holds). A re-run is not counted against
+  the rate limit. One that no longer returns the same stream and key is `revoked`; a changed
+  `write` is told by `refresh_rights` (`doc_sync` with the new `read_only`). Deleting a share row
+  therefore ends a link holder's editing at once. A query that reads the document's own table is
+  re-run at every persist of it (about every 2 s while someone types) — a code run per member,
+  bounded by the debounce.
+
+**The client.** `LiveConnection.openQuery(query, params, handlers)` keeps the query and params on
+its entry, sends `open` again after a reconnect, records `ready.opened`, and returns a
+`LiveOpenedSession` (`opened`, members, `readOnly`, `canPublish`, `send`, `publish`, `setState`,
+`close`). `live-doc.ts`'s core (`openCore`) is shared by `openDocument` and `openQueryDocument`,
+whose root is taken from `opened` when `ready` arrives; React's `useQueryDocument(api.openPad,
+{ token })` reopens when the params change.
+
+**Tests.** `sc-expr`: a handle carries the tables the run read, cannot be forged from JSON, and its
+options are checked. `sc-api`: validation and the endpoint's shape. `sc-live`: the `open` frame and
+`ready.opened`. `sc-server` `app_live_query_streams.rs` (SQLite, real sockets): an anonymous page
+edits with an edit token and its edit reaches the owner, a read token reads and its edit is refused;
+a wrong or expired token, an unexposed stream, a JSON query and an unknown one are the same
+`unavailable`; downgrading the share sends `read_only`, deleting it revokes, with the clock at an
+hour; an `internal` row stream says `kind: "row"` and publishes with an edit token only; the
+sixth open from one address in a minute is `rate_limited` and re-checks do not count; HTTP is a
+400. `sc-app` `live_doc.rs`: `openQueryDocument` under Node with the real `yjs` (the `open` frame,
+no root before `ready`, sync, an edit out, the reopen after a reconnect, a refusal), and
+`useQueryDocument` type-checked against the generated client.
 
 #### Admin
 
@@ -11377,8 +11481,13 @@ from in-process: a binary linked against `libpython3.x.so` fails at the **dynami
 `+crt-static` static-PIE binary, under which the Python link does not succeed at all (rustc
 selects a static `libpython` archive that is not PIC, and a `+crt-static` binary could not
 `dlopen` the `lib-dynload` extensions or any C-extension wheel even if it linked). Default-on
-would not degrade the release build, it would break it. **So the shipped tarball has no Python,
-and a Python-capable server is a separate dynamically-linked build.** The floor is CPython
+would not degrade the release build, it would break it. **So the static tarball has no Python,
+and a Python-capable server is a separate dynamically-linked build.** `scripts/build-static.sh`
+ships one such build beside the static artifact: `--variant python` (built by default along with
+the static one) produces `feldspar-debian13-python.tar.gz`. It is built on Debian 13 with no
+`+crt-static`, links `libpython3.13.so.1.0`, and runs on Debian 13 only. Its `install.sh` installs
+`libpython3.13`, and `setup-host.sh` adds `python3` and `python3-venv` when `/opt/feldspar/VARIANT`
+says `debian13-python` (docs/OPERATIONS.md §2.1). The floor is CPython
 **3.11**, `abi3`, and `abi3` delivers what it promises: one build serves every CPython from 3.11
 up, the only obstacle being the version-specific soname in `DT_NEEDED`, which an operator
 satisfies by having the matching `libpython` present. The cost of the dependency is small — 7

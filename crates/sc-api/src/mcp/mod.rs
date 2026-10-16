@@ -109,6 +109,13 @@ pub enum Area {
     Triggers,
     /// The three tools over an application's custom SQL queries.
     Applications,
+    /// Listing and installing **modules** — npm packages and Python
+    /// distributions — on this server. Its own area, and the one area that is
+    /// **off unless granted**: installing a package runs its install scripts and
+    /// its code with the server's own privileges, and a Python distribution has
+    /// no permission model at all. So no existing token or agent gains it by
+    /// upgrading; somebody has to tick it.
+    Modules,
 }
 
 impl Area {
@@ -119,6 +126,7 @@ impl Area {
         match self {
             Area::Triggers => "allow_triggers",
             Area::Applications => "allow_applications",
+            Area::Modules => "allow_modules",
         }
     }
 }
@@ -167,13 +175,16 @@ impl Grant {
     }
 }
 
-/// Which halves of the surface this caller was given. Both default on.
+/// Which parts of the surface this caller was given. Triggers and applications
+/// default on; modules default **off** (see [`Area::Modules`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Areas {
     /// Whether the trigger tools are offered at all.
     pub triggers: bool,
     /// Whether the application tools are offered at all.
     pub applications: bool,
+    /// Whether the module tools are offered at all.
+    pub modules: bool,
 }
 
 impl Default for Areas {
@@ -181,21 +192,24 @@ impl Default for Areas {
         Areas {
             triggers: true,
             applications: true,
+            modules: false,
         }
     }
 }
 
 impl Areas {
-    /// Both halves, which is what an unconfigured caller gets.
+    /// What an unconfigured caller gets: triggers and applications. Not
+    /// modules, which are only ever offered when ticked.
     pub fn all() -> Areas {
         Areas::default()
     }
 
-    /// Neither half: the schema tools alone.
+    /// No area at all: the schema tools alone.
     pub fn none() -> Areas {
         Areas {
             triggers: false,
             applications: false,
+            modules: false,
         }
     }
 
@@ -204,23 +218,25 @@ impl Areas {
         match area {
             Area::Triggers => self.triggers,
             Area::Applications => self.applications,
+            Area::Modules => self.modules,
         }
     }
 }
 
-/// Every key the six flags are stored under, in the order an admin ticks them.
+/// Every key the seven flags are stored under, in the order an admin ticks them.
 ///
 /// One list, because there are two things that write these — an
 /// `admin_copilot` agent's configuration and an API token's `grants` column —
 /// and a seventh key invented by one of them would be a flag the other silently
 /// ignores.
-pub const FLAG_KEYS: [&str; 6] = [
+pub const FLAG_KEYS: [&str; 7] = [
     GRANT_CREATE,
     GRANT_EDIT,
     GRANT_DROP,
     GRANT_ACCESS_CHANGES,
     Area::Triggers.key(),
     Area::Applications.key(),
+    Area::Modules.key(),
 ];
 
 /// The four grants as a stored configuration has them; an absent flag reads as
@@ -240,16 +256,24 @@ pub fn grants_from_attrs(config: &Attrs) -> Grants {
     }
 }
 
-/// The two areas as a stored configuration has them; an absent flag reads as on.
+/// The three areas as a stored configuration has them; an absent flag reads as
+/// its default — on for triggers and applications, off for modules.
 pub fn areas_from_attrs(config: &Attrs) -> Areas {
-    let flag = |key: &str| config.get(key).and_then(Json::as_bool).unwrap_or(true);
+    let defaults = Areas::default();
+    let flag = |area: Area| {
+        config
+            .get(area.key())
+            .and_then(Json::as_bool)
+            .unwrap_or(defaults.has(area))
+    };
     Areas {
-        triggers: flag(Area::Triggers.key()),
-        applications: flag(Area::Applications.key()),
+        triggers: flag(Area::Triggers),
+        applications: flag(Area::Applications),
+        modules: flag(Area::Modules),
     }
 }
 
-/// The six flags written back out, every key present and explicit.
+/// The seven flags written back out, every key present and explicit.
 ///
 /// What a token's `grants` column is made of. Explicit rather than sparse
 /// because the column is the record of *what an admin agreed to* — a missing key
@@ -264,8 +288,28 @@ pub fn flags_to_attrs(grants: &Grants, areas: &Areas) -> Attrs {
         (GRANT_ACCESS_CHANGES, grants.access_changes),
         (Area::Triggers.key(), areas.triggers),
         (Area::Applications.key(), areas.applications),
+        (Area::Modules.key(), areas.modules),
     ] {
         out.insert(key.to_owned(), Json::Bool(value));
+    }
+    out
+}
+
+/// The seven flags a freshly minted API token stores, from what the mint
+/// submitted: an absent flag is **granted**.
+///
+/// A token is minted by an admin, at a screen or a terminal, for an agent they
+/// are about to hand their installation to; everything on — modules, drops and
+/// access changes included — is what they almost always want, and unticking is
+/// one click. An `admin_copilot` agent's configuration keeps the cautious
+/// defaults of [`grants_from_attrs`] and [`areas_from_attrs`]; this applies only
+/// at a mint, and the result is written explicitly, so a stored token never
+/// re-reads itself against either set of defaults.
+pub fn token_flags_from_submitted(submitted: &Attrs) -> Attrs {
+    let mut out = Attrs::new();
+    for key in FLAG_KEYS {
+        let on = submitted.get(key).and_then(Json::as_bool).unwrap_or(true);
+        out.insert(key.to_owned(), Json::Bool(on));
     }
     out
 }
@@ -666,6 +710,7 @@ mod tests {
                 Areas {
                     triggers: false,
                     applications: true,
+                    modules: true,
                 },
             ),
         ] {
@@ -683,13 +728,35 @@ mod tests {
     }
 
     #[test]
+    fn a_token_minted_with_nothing_said_is_granted_everything() {
+        let stored = token_flags_from_submitted(&Attrs::new());
+        assert_eq!(stored.len(), FLAG_KEYS.len());
+        assert_eq!(grants_from_attrs(&stored), Grants::all());
+        let areas = areas_from_attrs(&stored);
+        assert!(areas.triggers && areas.applications && areas.modules);
+
+        // What was said is kept; only the silence defaults on.
+        let mut said = Attrs::new();
+        said.insert(GRANT_DROP.to_owned(), Json::Bool(false));
+        let stored = token_flags_from_submitted(&said);
+        assert_eq!(stored[GRANT_DROP], Json::Bool(false));
+        assert_eq!(stored[GRANT_ACCESS_CHANGES], Json::Bool(true));
+        assert_eq!(stored[Area::Modules.key()], Json::Bool(true));
+    }
+
+    #[test]
     fn an_empty_configuration_can_build_and_cannot_destroy() {
         let empty = Attrs::new();
         let grants = grants_from_attrs(&empty);
         assert!(grants.create && grants.edit);
         assert!(!grants.drop && !grants.access_changes);
-        // Both halves of the surface are offered until somebody says otherwise.
+        // Triggers and applications are offered until somebody says otherwise;
+        // modules are not offered until somebody says so.
         assert_eq!(areas_from_attrs(&empty), Areas::all());
+        assert!(!areas_from_attrs(&empty).has(Area::Modules));
+        let mut ticked = Attrs::new();
+        ticked.insert(Area::Modules.key().to_owned(), json!(true));
+        assert!(areas_from_attrs(&ticked).has(Area::Modules));
 
         // A flag that is not a boolean is the caller's mistake, named.
         let mut wrong = Attrs::new();

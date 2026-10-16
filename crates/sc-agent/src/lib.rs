@@ -111,5 +111,6 @@ pub use store::{
 pub use validate::{AgentIssue, Agents, validate_agent};
 pub use view::{
     AppHttpRequest, AppHttpResponse, AppPreviewer, AppRequester, BrowserAction, BrowserDriver,
-    BrowserReport, BrowserRequest, HostCapabilities, PreviewInfo, ViewServices,
+    BrowserReport, BrowserRequest, HostCapabilities, ModuleInstall, ModuleManager, PreviewInfo,
+    ViewServices,
 };

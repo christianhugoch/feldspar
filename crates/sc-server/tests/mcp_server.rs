@@ -1625,3 +1625,92 @@ async fn a_document_stream_is_created_exposed_and_deleted_over_mcp() -> sc_error
     );
     Ok(())
 }
+
+/// The module tools are the one area a token does not get by default: listing
+/// and installing a package is offered only to a token minted with
+/// `allow_modules`, and installing also needs `allow_create`.
+#[tokio::test]
+async fn the_module_tools_are_offered_only_to_a_token_given_allow_modules() -> sc_error::Result<()>
+{
+    let Harness {
+        mut client,
+        router,
+        catalog,
+        _db,
+        ..
+    } = setup().await?;
+    enable_mcp(&catalog, true).await?;
+
+    let default = mint(&mut client, "defaults", json!({})).await;
+    let modules = mint(&mut client, "modules", json!({ "allow_modules": true })).await;
+    let read_only = mint(
+        &mut client,
+        "modules, no create",
+        json!({ "allow_modules": true, "allow_create": false }),
+    )
+    .await;
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+
+    let (_, body) = McpRequest::new(&default, list.clone()).send(&router).await;
+    let offered = tool_names(&body);
+    for absent in ["listModules", "installModule"] {
+        assert!(!offered.contains(&absent.to_owned()), "{offered:?}");
+    }
+    let (_, body) = McpRequest::new(&modules, list).send(&router).await;
+    let offered = tool_names(&body);
+    for present in ["listModules", "installModule"] {
+        assert!(offered.contains(&present.to_owned()), "{offered:?}");
+    }
+    let install = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == json!("installModule"))
+        .unwrap();
+    assert!(
+        install["description"].as_str().unwrap().contains("pypi"),
+        "the description should say how to install a PyPI library: {install}"
+    );
+
+    // The call reaches the `listModules` handler, which on this harness (built
+    // without module services) answers with its own error.
+    let (is_error, answer) = call_tool(&router, &modules, "listModules", json!({})).await;
+    assert!(is_error, "{answer}");
+    assert!(
+        answer.to_string().contains("no module support"),
+        "{answer}"
+    );
+
+    // Installing without `allow_create` is refused, naming it, before anything
+    // is installed.
+    let (is_error, answer) = call_tool(
+        &router,
+        &read_only,
+        "installModule",
+        json!({ "language": "python", "source": "pypi", "location": "requests" }),
+    )
+    .await;
+    assert!(is_error, "{answer}");
+    assert!(answer.to_string().contains("allow_create"), "{answer}");
+
+    // And a token without the area cannot call it by name either.
+    let (_, body) = McpRequest::new(
+        &default,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "installModule",
+                "arguments": { "language": "python", "source": "pypi", "location": "requests" },
+            },
+        }),
+    )
+    .send(&router)
+    .await;
+    assert!(
+        !body["error"].is_null() || body["result"]["isError"] == json!(true),
+        "{body}"
+    );
+    Ok(())
+}

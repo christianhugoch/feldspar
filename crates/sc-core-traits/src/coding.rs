@@ -88,6 +88,7 @@ mod header;
 mod inspect;
 mod ledger;
 pub mod matching;
+mod modules;
 mod patch;
 mod plan;
 mod process;
@@ -152,6 +153,9 @@ pub use shell::{
     CFG_SHELL_TIMEOUT_MAX, DEFAULT_SHELL_TIMEOUT, DEFAULT_SHELL_TIMEOUT_MAX, SHELL_ENV,
     tool_name as shell_tool_name,
 };
+pub use modules::{
+    install_tool_name as install_module_tool_name, list_tool_name as list_modules_tool_name,
+};
 pub use state::{CodingState, EditStats};
 pub use view_app::{
     CFG_VIEW_APP_TIMEOUT, CFG_VIEW_APP_USER, DEFAULT_VIEW_APP_TIMEOUT,
@@ -178,6 +182,13 @@ pub const CFG_MAY_CHECK: &str = "may_check";
 /// May run shell commands and managed processes (TODO §7a). Off by default,
 /// offered only to an admin caller, and implying no other grant.
 pub const CFG_MAY_USE_SHELL: &str = "may_use_shell";
+
+/// May list and install modules — npm packages and Python distributions, so a
+/// Python code body can import a library — through the same path as the
+/// Modules tab. Off by default and offered only to an admin caller, like the
+/// shell, because an installed package runs its own code with the server's
+/// privileges ([`modules`]).
+pub const CFG_MAY_INSTALL_MODULES: &str = "may_install_modules";
 
 /// May look at the application's preview in a headless browser (TODO §7b).
 /// Off by default; needs [`crate::CFG_APPLICATION`] and a browser on the server.
@@ -240,6 +251,8 @@ pub fn tool_names(scope: &FileScope) -> Vec<String> {
         call_api::tool_name(scope),
         shell::tool_name(scope),
         process::tool_name(scope),
+        modules::list_tool_name(scope),
+        modules::install_tool_name(scope),
     ]
 }
 
@@ -345,6 +358,14 @@ impl AgentTrait for Coding {
         );
         spec.extend(view_app::config_fields());
         // Last, because it is every grant above at once.
+        spec.push(
+            FormField::new(CFG_MAY_INSTALL_MODULES, BasicType::Bool)
+                .label(
+                    "May list and install modules, e.g. Python libraries for code bodies \
+                     (admins only). An installed package runs with the server's privileges",
+                )
+                .default_value(false),
+        );
         spec.extend(shell::config_fields());
         spec
     }
@@ -383,6 +404,7 @@ impl AgentTrait for Coding {
             CFG_MAY_CHECK,
             CFG_MAY_VIEW_APP,
             CFG_MAY_USE_SHELL,
+            CFG_MAY_INSTALL_MODULES,
             shell::CFG_SHELL_NETWORK,
         ] {
             match check.config.get(key) {
@@ -492,6 +514,10 @@ impl AgentTrait for Coding {
             tools.push(shell::spec(&scope, config));
             tools.push(process::spec(&scope));
         }
+        if may(config, CFG_MAY_INSTALL_MODULES) && cx.caller.is_some_and(is_admin) {
+            tools.push(modules::list_spec(&scope));
+            tools.push(modules::install_spec(&scope));
+        }
         tools
     }
 
@@ -571,6 +597,16 @@ impl AgentTrait for Coding {
             _ if tool == process::tool_name(&scope) => {
                 permit_shell(config, ctx)?;
                 process::call(&scope, config, args, ctx).await
+            }
+            // Listing changes nothing, so a planning run may look.
+            _ if tool == modules::list_tool_name(&scope) => {
+                permit_modules(config, ctx)?;
+                modules::list(args, ctx).await
+            }
+            _ if tool == modules::install_tool_name(&scope) => {
+                permit_mode(&[RunMode::Act], "install a module", ctx)?;
+                permit_modules(config, ctx)?;
+                modules::install(args, ctx).await
             }
             other => Err(Error::invalid(format!(
                 "`{other}` is not one of this trait's tools; it offers {}",
@@ -678,6 +714,21 @@ fn permit_shell(config: &Attrs, ctx: &TraitContext<'_>) -> Result<()> {
     )))
 }
 
+/// Refuse the module tools to a run whose grant is off or whose caller is not
+/// an admin — the latter because an installed package runs as the server.
+fn permit_modules(config: &Attrs, ctx: &TraitContext<'_>) -> Result<()> {
+    permit_grant(config, CFG_MAY_INSTALL_MODULES, "install modules", ctx)?;
+    if is_admin(ctx.caller) {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "agent `{}` may not install modules for this user: installing is only for runs \
+         whose caller is an administrator, because a package runs with the server's \
+         own privileges",
+        ctx.agent
+    )))
+}
+
 /// Refuse a tool the run's mode does not offer, naming the mode.
 fn permit_mode(modes: &[RunMode], what: &str, ctx: &TraitContext<'_>) -> Result<()> {
     if modes.contains(&ctx.mode) {
@@ -766,6 +817,8 @@ mod tests {
                 "call_api_app_src_web",
                 "shell_app_src_web",
                 "process_app_src_web",
+                "list_modules_app_src_web",
+                "install_module_app_src_web",
             ]
         );
     }

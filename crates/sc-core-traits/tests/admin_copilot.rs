@@ -683,6 +683,7 @@ async fn the_two_callers_of_one_tool_set_are_offered_identical_tools() -> Result
             sc_api::mcp::Areas {
                 triggers: false,
                 applications: true,
+                modules: false,
             },
         ),
         (
@@ -690,6 +691,7 @@ async fn the_two_callers_of_one_tool_set_are_offered_identical_tools() -> Result
             sc_api::mcp::Areas {
                 triggers: true,
                 applications: false,
+                modules: false,
             },
         ),
     ];

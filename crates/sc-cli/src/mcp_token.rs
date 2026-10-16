@@ -2,7 +2,7 @@
 //! bearer tokens (design §13.6), from a terminal.
 //!
 //! The same three things the **Settings → Development** panel does, over the
-//! same `sc_auth::tokens` functions, with the same six grants read and written
+//! same `sc_auth::tokens` functions, with the same seven grants read and written
 //! through `sc_api::mcp` — so a token minted here is indistinguishable from one
 //! minted at the screen, and is listed and revoked there like any other.
 //!
@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::auth::UserSelector;
 
-/// The command-line flag for one of the six grant keys: `allow_drop` is
+/// The command-line flag for one of the seven grant keys: `allow_drop` is
 /// `--allow-drop`, and `--no-allow-drop` turns it off.
 pub fn grant_flag(key: &str) -> String {
     format!("--{}", key.replace('_', "-"))
@@ -43,7 +43,7 @@ pub struct CreateArgs {
     /// `--expires-in-days`: `None` for a token that does not lapse.
     pub expires_in_days: Option<i64>,
     /// The grant flags that were given, keyed as stored. A flag left out is
-    /// absent here and takes its default from `sc_api::mcp`.
+    /// absent here and defaults on (`sc_api::mcp::token_flags_from_submitted`).
     pub grants: Attrs,
     /// `--url`: the server origin the `claude mcp add` line points at.
     pub url: Option<String>,
@@ -147,14 +147,11 @@ pub fn parse_create(args: &[String]) -> Result<CreateArgs> {
     })
 }
 
-/// The six grants as they will be stored: every key explicit, the defaults
-/// filled in by the same functions the admin API uses.
+/// The seven grants as they will be stored: every key explicit, and a flag not
+/// given defaulting **on**, by the same function the admin API uses.
 pub fn normalised_grants(submitted: &Attrs) -> Result<Attrs> {
     sc_api::mcp::validate_flags(submitted)?;
-    Ok(sc_api::mcp::flags_to_attrs(
-        &sc_api::mcp::grants_from_attrs(submitted),
-        &sc_api::mcp::areas_from_attrs(submitted),
-    ))
+    Ok(sc_api::mcp::token_flags_from_submitted(submitted))
 }
 
 /// When a token minted now for `days` days lapses.
@@ -237,16 +234,18 @@ mod tests {
         assert_eq!(parsed.name, "feldspar");
 
         let stored = normalised_grants(&parsed.grants).unwrap();
-        // Given: drop on, triggers off. Left out: the defaults.
+        // Given: drop on, triggers off. Left out: on, every one of them.
         assert_eq!(stored["allow_drop"], Json::Bool(true));
         assert_eq!(stored["allow_triggers"], Json::Bool(false));
         assert_eq!(stored["allow_create"], Json::Bool(true));
         assert_eq!(stored["allow_edit"], Json::Bool(true));
-        assert_eq!(stored["allow_access_changes"], Json::Bool(false));
+        assert_eq!(stored["allow_access_changes"], Json::Bool(true));
         assert_eq!(stored["allow_applications"], Json::Bool(true));
+        assert_eq!(stored["allow_modules"], Json::Bool(true));
         assert_eq!(
             describe_grants(&stored),
-            "allow_create allow_edit allow_drop allow_applications"
+            "allow_create allow_edit allow_drop allow_access_changes \
+             allow_applications allow_modules"
         );
     }
 

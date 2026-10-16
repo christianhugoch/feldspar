@@ -1214,6 +1214,23 @@ pub fn admin_endpoints() -> EndpointSet {
                 // would be two loading states for one screen.
                 StructField::new("bundled", TypeSchema::array(bundled_module_schema())),
             ]))
+            // Tagged (§13.6) behind the modules area, which is off unless a
+            // token or an agent was explicitly given it: what is installed is
+            // somebody else's code.
+            .mcp(
+                McpTag::new(
+                    "List the modules installed on this server — npm packages and \
+                 Python distributions — with what each supplies (actions, \
+                 functions, table and model providers) and anything wrong with \
+                 it; whether npm, python and pip are available to install more; \
+                 where the Python environment is; and the bundled modules this \
+                 server ships with. A Python package installed here is importable \
+                 from every Python code body (`run_python_code` triggers, Python \
+                 API queries), so this is also the list of third-party libraries \
+                 Python code can use.",
+                )
+                .in_area(Area::Modules),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -1237,6 +1254,25 @@ pub fn admin_endpoints() -> EndpointSet {
                 StructField::new("language", TypeSchema::optional(TypeSchema::text())),
             ]))
             .output(module_schema())
+            .mcp(
+                McpTag::new(
+                    "Install a module, or upgrade one by installing it again. \
+                 `language` is `python` or `javascript` (the default). `source` is \
+                 `pypi` for a Python distribution from PyPI, `npm` for an npm \
+                 package, `local` for a directory on the server's disk, or \
+                 `bundled` for one of the modules `listModules` lists under \
+                 `bundled` (then `location` is its id). `location` is the \
+                 specifier: e.g. `requests`, `pandas>=2.2` or `httpx[http2]` for \
+                 PyPI. Any Python distribution may be installed, not only \
+                 Saltcorn plugins: a plain library such as `requests` supplies \
+                 nothing to the Modules list but becomes importable from every \
+                 Python code body. Its dependencies come with it. The package \
+                 runs with the server's own privileges, so install only what the \
+                 administrator asked for.",
+                )
+                .in_area(Area::Modules)
+                .needs(Grant::Create),
+            )
             .auth(AuthRequirement::admin()),
     );
 
@@ -6763,6 +6799,11 @@ mod tests {
                 "createRole",
                 "deleteRole",
                 "listFieldTypes",
+                // Modules, behind their own area that is off unless granted: an
+                // agent writing Python needs a library installed to import it,
+                // and asking a human to click Install is the gap this closes.
+                "listModules",
+                "installModule",
                 "listAgents",
                 "createAgent",
                 "updateAgent",
@@ -6857,6 +6898,9 @@ mod tests {
         assert_eq!(area_of("listWorkflowRuns"), Some(Area::Triggers));
         assert_eq!(area_of("buildApplication"), Some(Area::Applications));
         assert_eq!(area_of("listApplications"), Some(Area::Applications));
+        // Installing a package is its own area, off unless granted.
+        assert_eq!(area_of("listModules"), Some(Area::Modules));
+        assert_eq!(area_of("installModule"), Some(Area::Modules));
         // The schema half has no area: it is what this surface is.
         assert_eq!(area_of("listFieldTypes"), None);
         assert_eq!(area_of("listAgents"), None);

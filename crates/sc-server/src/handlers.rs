@@ -1899,62 +1899,9 @@ pub fn admin_handlers_with(
             let apps = apps.clone();
             async move {
                 let services = modules_of(&apps)?;
-                let set = services.modules();
-                let modules: Vec<Json> = set
-                    .modules()
-                    .iter()
-                    .map(|m| module_json(m, &ctx.locale))
-                    .collect();
-                // Installed is by **package name**, which is what the row is
-                // keyed by: a bundled module installed from a checkout, from a
-                // tarball, or from the registry it was also published to is one
-                // module, and the card should say so however it got there.
-                let bundled: Vec<Json> = services
-                    .bundled()
-                    .modules()
-                    .iter()
-                    .map(|entry| bundled_json(entry, set.get(&entry.name).is_some()))
-                    .collect();
-                let interpreter = services.python().env().interpreter();
-                // Asked once and used twice: whether there is an npm at all,
-                // and whether it is one that can install a module. An npm too
-                // old for the modules root's overrides fails every install with
-                // a semver error, so the tab says so before the admin picks a
-                // package rather than after (see `sc_module`'s installer).
-                let npm_version = sc_module::npm_version().await;
-                let npm_too_old = match &npm_version {
-                    Some(version) if sc_module::npm_too_old(version) => json!({
-                        "version": version,
-                        "minimum": sc_module::MIN_NPM_VERSION,
-                    }),
-                    _ => Json::Null,
-                };
-                Ok(HandlerResponse::ok(json!({
-                    "modules": modules,
-                    "root": services.installer().root().display().to_string(),
-                    // Asked here rather than assumed, because a server with no
-                    // Node toolchain can do everything else and nothing on this
-                    // tab — and the tab should say so before the admin types a
-                    // package name.
-                    "npm": npm_version.is_some(),
-                    // Null when npm can install a module, and the two versions
-                    // the sentence needs when it cannot.
-                    "npm_too_old": npm_too_old,
-                    "node": sc_module::have_node().await,
-                    // And the other language's, asked the same way and for the
-                    // same reason (§8): a server may have one toolchain and not
-                    // the other, and which of the two install forms can work is
-                    // not something an admin should learn by using one.
-                    "python": sc_python::have_python(&interpreter).await,
-                    "pip": sc_python::have_pip(&interpreter).await,
-                    // Where pip installs, beside where npm does. `None` only on
-                    // a machine with no data directory to default to.
-                    "python_dir": match services.python().env().directory() {
-                        Some(dir) => Json::from(dir.display().to_string()),
-                        None => Json::Null,
-                    },
-                    "bundled": bundled,
-                })))
+                Ok(HandlerResponse::ok(
+                    list_modules_json(&services, &ctx.locale).await,
+                ))
             }
         }
     });
@@ -1967,82 +1914,9 @@ pub fn admin_handlers_with(
             let apps = apps.clone();
             async move {
                 let services = modules_of(&apps)?;
-                let obj = require_object(&ctx.body)?;
-                let source = sc_module::ModuleSource::parse(non_empty_str_field(obj, "source")?)?;
-                let location = non_empty_str_field(obj, "location")?.trim().to_owned();
-                // Absent is `javascript`: the language nearly every module is
-                // written in, and the one every existing caller means.
-                let language = match obj.get("language").filter(|v| !v.is_null()) {
-                    Some(value) => sc_module::ModuleLanguage::parse(
-                        value
-                            .as_str()
-                            .ok_or_else(|| Error::invalid("field `language` must be a string"))?,
-                    )?,
-                    None => sc_module::ModuleLanguage::JavaScript,
-                };
-                // A **bundled** module is described by the catalog and not by
-                // the request: the id is the only thing the button had to send,
-                // and the language and the permissions are the server's own
-                // answer. Resolved before the install so a wrong id costs
-                // nothing, and so the permission set is on the row the first
-                // time it is written — a module that has to be reloaded to be
-                // allowed to work is not one click.
-                let bundled = match source {
-                    sc_module::ModuleSource::Bundled => {
-                        Some(services.bundled().require(&location)?)
-                    }
-                    _ => None,
-                };
-                let language = bundled.map_or(language, |entry| entry.language);
-                if !language.allows(source) {
-                    return Err(Error::invalid(format!(
-                        "a {} module cannot be installed from `{}`",
-                        language.as_str(),
-                        source.as_str()
-                    )));
-                }
-
-                let package = services
-                    .install_package(language, source, &location)
-                    .await?;
-                // A package name that is already installed is an **upgrade**,
-                // not a collision: reinstalling is how a module is upgraded
-                // (TODO, out of scope: an upgrade UI), and the admin who typed
-                // `@saltcorn/mqtt@0.3.0` over a 0.2.0 install means exactly
-                // that. The row keeps its id and its configuration.
-                let stored = load_module_by_name(&catalog, &package.name).await?;
-                let first_install = stored.is_none();
-                let mut module = match stored {
-                    Some(existing) => existing,
-                    None => sc_module::Module::new(&package.name, source, &location),
-                };
-                module.language = language;
-                module.source = source;
-                module.location = location;
-                module.version = Some(package.version);
-                // The catalog card's permissions, granted by the click that
-                // installed it — the card printed them, which is what makes
-                // this an admin granting a permission rather than a package
-                // granting itself one (`sc_module::bundled`).
-                //
-                // **Only on a first install.** A reinstall is how a bundled
-                // module is upgraded after a new release, and an admin who has
-                // since narrowed what it may reach — to a list of feed hosts,
-                // or to nothing at all — must not have that quietly undone by
-                // an upgrade. From the second install on, the row's set wins.
-                if let Some(entry) = bundled
-                    && first_install
-                {
-                    module.permissions = entry.permissions.clone();
-                }
-                save_module(&catalog, &module).await?;
-
-                services.reload().await?;
-                let set = services.modules();
-                let loaded = set
-                    .get(&module.name)
-                    .ok_or_else(|| Error::msg("the installed module is not in the loaded set"))?;
-                Ok(HandlerResponse::ok(module_json(loaded, &ctx.locale)).with_status(201))
+                let installed =
+                    install_module_json(&catalog, &services, &ctx.body, &ctx.locale).await?;
+                Ok(HandlerResponse::ok(installed).with_status(201))
             }
         }
     });
@@ -6777,21 +6651,18 @@ pub fn admin_handlers_with(
                         ))
                     })?;
 
-                // The six flags, read and written back through `sc-api::mcp` —
-                // the one place that knows what they are called and what they
-                // default to. A stored `grants` is explicit in all six, so the
-                // row records what was agreed to rather than what a later
-                // default would say.
+                // The seven flags, read and written back through `sc-api::mcp` —
+                // the one place that knows what they are called. A token
+                // defaults every flag on; a stored `grants` is explicit in all
+                // seven, so the row records what was agreed to rather than what
+                // a later default would say.
                 let submitted = match obj.get("grants") {
                     None | Some(Json::Null) => Attrs::new(),
                     Some(Json::Object(map)) => map.clone(),
                     Some(_) => return Err(Error::invalid("`grants` must be an object")),
                 };
                 sc_api::mcp::validate_flags(&submitted)?;
-                let grants = sc_api::mcp::flags_to_attrs(
-                    &sc_api::mcp::grants_from_attrs(&submitted),
-                    &sc_api::mcp::areas_from_attrs(&submitted),
-                );
+                let grants = sc_api::mcp::token_flags_from_submitted(&submitted);
 
                 let expires_at = match obj.get("expires_in_days") {
                     None | Some(Json::Null) => None,
@@ -8805,6 +8676,160 @@ pub(crate) fn llm_model_from_body(
         },
         attributes: sc_types::Attrs::new(),
     })
+}
+
+/// What `listModules` answers: the installed modules, the bundled catalog, and
+/// whether npm, python and pip are here to install more.
+///
+/// Shared by the admin handler and by the agents' [`sc_agent::ModuleManager`]
+/// (and so the MCP tool, which is the handler), so the three read one answer.
+pub(crate) async fn list_modules_json(services: &crate::ModuleServices, locale: &Locale) -> Json {
+    let set = services.modules();
+    let modules: Vec<Json> = set
+        .modules()
+        .iter()
+        .map(|m| module_json(m, locale))
+        .collect();
+    // Installed is by **package name**, which is what the row is
+    // keyed by: a bundled module installed from a checkout, from a
+    // tarball, or from the registry it was also published to is one
+    // module, and the card should say so however it got there.
+    let bundled: Vec<Json> = services
+        .bundled()
+        .modules()
+        .iter()
+        .map(|entry| bundled_json(entry, set.get(&entry.name).is_some()))
+        .collect();
+    let interpreter = services.python().env().interpreter();
+    // Asked once and used twice: whether there is an npm at all,
+    // and whether it is one that can install a module. An npm too
+    // old for the modules root's overrides fails every install with
+    // a semver error, so the tab says so before the admin picks a
+    // package rather than after (see `sc_module`'s installer).
+    let npm_version = sc_module::npm_version().await;
+    let npm_too_old = match &npm_version {
+        Some(version) if sc_module::npm_too_old(version) => json!({
+            "version": version,
+            "minimum": sc_module::MIN_NPM_VERSION,
+        }),
+        _ => Json::Null,
+    };
+    json!({
+        "modules": modules,
+        "root": services.installer().root().display().to_string(),
+        // Asked here rather than assumed, because a server with no
+        // Node toolchain can do everything else and nothing on this
+        // tab — and the tab should say so before the admin types a
+        // package name.
+        "npm": npm_version.is_some(),
+        // Null when npm can install a module, and the two versions
+        // the sentence needs when it cannot.
+        "npm_too_old": npm_too_old,
+        "node": sc_module::have_node().await,
+        // And the other language's, asked the same way and for the
+        // same reason (§8): a server may have one toolchain and not
+        // the other, and which of the two install forms can work is
+        // not something an admin should learn by using one.
+        "python": sc_python::have_python(&interpreter).await,
+        "pip": sc_python::have_pip(&interpreter).await,
+        // Where pip installs, beside where npm does. `None` only on
+        // a machine with no data directory to default to.
+        "python_dir": match services.python().env().directory() {
+            Some(dir) => Json::from(dir.display().to_string()),
+            None => Json::Null,
+        },
+        "bundled": bundled,
+    })
+}
+
+/// What `installModule` does with its body — `source`, `location` and an
+/// optional `language` — and the loaded module it answers with: install the
+/// package, write or update its row, reload the module set.
+///
+/// Shared by the admin handler (and so its MCP tool) and the agents'
+/// [`sc_agent::ModuleManager`], so an install from any of them is the same act.
+pub(crate) async fn install_module_json(
+    catalog: &Catalog,
+    services: &crate::ModuleServices,
+    body: &Json,
+    locale: &Locale,
+) -> Result<Json> {
+    let obj = require_object(body)?;
+    let source = sc_module::ModuleSource::parse(non_empty_str_field(obj, "source")?)?;
+    let location = non_empty_str_field(obj, "location")?.trim().to_owned();
+    // Absent is `javascript`: the language nearly every module is
+    // written in, and the one every existing caller means.
+    let language = match obj.get("language").filter(|v| !v.is_null()) {
+        Some(value) => sc_module::ModuleLanguage::parse(
+            value
+                .as_str()
+                .ok_or_else(|| Error::invalid("field `language` must be a string"))?,
+        )?,
+        None => sc_module::ModuleLanguage::JavaScript,
+    };
+    // A **bundled** module is described by the catalog and not by
+    // the request: the id is the only thing the button had to send,
+    // and the language and the permissions are the server's own
+    // answer. Resolved before the install so a wrong id costs
+    // nothing, and so the permission set is on the row the first
+    // time it is written — a module that has to be reloaded to be
+    // allowed to work is not one click.
+    let bundled = match source {
+        sc_module::ModuleSource::Bundled => {
+            Some(services.bundled().require(&location)?)
+        }
+        _ => None,
+    };
+    let language = bundled.map_or(language, |entry| entry.language);
+    if !language.allows(source) {
+        return Err(Error::invalid(format!(
+            "a {} module cannot be installed from `{}`",
+            language.as_str(),
+            source.as_str()
+        )));
+    }
+
+    let package = services
+        .install_package(language, source, &location)
+        .await?;
+    // A package name that is already installed is an **upgrade**,
+    // not a collision: reinstalling is how a module is upgraded
+    // (TODO, out of scope: an upgrade UI), and the admin who typed
+    // `@saltcorn/mqtt@0.3.0` over a 0.2.0 install means exactly
+    // that. The row keeps its id and its configuration.
+    let stored = load_module_by_name(catalog, &package.name).await?;
+    let first_install = stored.is_none();
+    let mut module = match stored {
+        Some(existing) => existing,
+        None => sc_module::Module::new(&package.name, source, &location),
+    };
+    module.language = language;
+    module.source = source;
+    module.location = location;
+    module.version = Some(package.version);
+    // The catalog card's permissions, granted by the click that
+    // installed it — the card printed them, which is what makes
+    // this an admin granting a permission rather than a package
+    // granting itself one (`sc_module::bundled`).
+    //
+    // **Only on a first install.** A reinstall is how a bundled
+    // module is upgraded after a new release, and an admin who has
+    // since narrowed what it may reach — to a list of feed hosts,
+    // or to nothing at all — must not have that quietly undone by
+    // an upgrade. From the second install on, the row's set wins.
+    if let Some(entry) = bundled
+        && first_install
+    {
+        module.permissions = entry.permissions.clone();
+    }
+    save_module(catalog, &module).await?;
+
+    services.reload().await?;
+    let set = services.modules();
+    let loaded = set
+        .get(&module.name)
+        .ok_or_else(|| Error::msg("the installed module is not in the loaded set"))?;
+    Ok(module_json(loaded, locale))
 }
 
 /// One loaded module as JSON (matching `module_schema`): the row, what the

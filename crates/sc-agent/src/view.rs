@@ -18,9 +18,13 @@
 //! - [`AppRequester`] sends one HTTP request to an application through the
 //!   server's own router, as a session for a user or as nobody, and hands back
 //!   the response — `call_api`'s way of seeing what an endpoint answers.
+//! - [`ModuleManager`] lists and installs **modules** — npm packages and Python
+//!   distributions — the way the admin's Modules tab does. Not a *view*
+//!   capability, but the same kind of seam: the installer and the module
+//!   registry are `sc-server`'s, and a trait here can name neither.
 //! - [`HostCapabilities`] is what the server found on its host at boot, so a
 //!   trait's configuration check can refuse a grant the host cannot honour.
-//! - [`ViewServices`] holds the three capabilities once the server has built them.
+//! - [`ViewServices`] holds the four capabilities once the server has built them.
 //!   The registry carries it, because the server builds its mounts after the
 //!   agents and every runner — a chat turn, a trigger, a delegated child — is
 //!   made from the registry.
@@ -34,6 +38,7 @@ use std::time::Duration;
 
 use sc_auth::User;
 use sc_error::Result;
+use serde_json::Value as Json;
 
 use crate::run::RunId;
 
@@ -230,8 +235,37 @@ pub trait AppRequester: Send + Sync {
     async fn request(&self, request: AppHttpRequest<'_>) -> Result<AppHttpResponse>;
 }
 
-/// The server's preview, browser and request capabilities, once it has built
-/// them.
+/// What an agent asks to install: the three things an admin types on the
+/// Modules tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleInstall {
+    /// `javascript` or `python`.
+    pub language: String,
+    /// `npm`, `pypi`, `local` or `bundled`.
+    pub source: String,
+    /// The package specifier, the directory, or the bundled module's id.
+    pub location: String,
+}
+
+/// Lists and installs modules on this server, as the Modules tab does.
+///
+/// Both answers are the admin API's own JSON — `listModules`'s and
+/// `installModule`'s — so an agent reads exactly what the MCP tools and the tab
+/// read, and a module installed here is a module like any other: one row, one
+/// reload, listed and removable on the tab.
+#[async_trait::async_trait]
+pub trait ModuleManager: Send + Sync {
+    /// What is installed, what each module supplies, and whether npm, python
+    /// and pip are there to install more.
+    async fn list(&self) -> Result<Json>;
+
+    /// Install (or reinstall, which upgrades) one package and reload the
+    /// module set. The answer is the loaded module.
+    async fn install(&self, request: ModuleInstall) -> Result<Json>;
+}
+
+/// The server's preview, browser, request and module capabilities, once it has
+/// built them.
 ///
 /// Late-bound, because the server builds the mount registry after the agents.
 /// Each slot is set once; a second set is ignored.
@@ -240,6 +274,7 @@ pub struct ViewServices {
     previews: OnceLock<Arc<dyn AppPreviewer>>,
     browser: OnceLock<Arc<dyn BrowserDriver>>,
     requests: OnceLock<Arc<dyn AppRequester>>,
+    modules: OnceLock<Arc<dyn ModuleManager>>,
 }
 
 impl ViewServices {
@@ -272,6 +307,16 @@ impl ViewServices {
     pub fn requests(&self) -> Option<&Arc<dyn AppRequester>> {
         self.requests.get()
     }
+
+    /// Install the module manager.
+    pub fn set_modules(&self, modules: Arc<dyn ModuleManager>) {
+        let _ = self.modules.set(modules);
+    }
+
+    /// The module manager, if installed.
+    pub fn modules(&self) -> Option<&Arc<dyn ModuleManager>> {
+        self.modules.get()
+    }
 }
 
 impl std::fmt::Debug for ViewServices {
@@ -280,6 +325,7 @@ impl std::fmt::Debug for ViewServices {
             .field("previews", &self.previews.get().is_some())
             .field("browser", &self.browser.get().is_some())
             .field("requests", &self.requests.get().is_some())
+            .field("modules", &self.modules.get().is_some())
             .finish()
     }
 }

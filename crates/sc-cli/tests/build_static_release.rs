@@ -97,7 +97,7 @@ fn fixture(name: &str, npx_status: i32) -> Fixture {
     write_executable(
         &bin.join("cargo"),
         &format!(
-            "#!/bin/sh\nset -eu\nout=\"$PWD/target/{TARGET}/release\"\n\
+            "#!/bin/sh\nset -eu\nout=\"${{CARGO_TARGET_DIR:-$PWD/target}}/{TARGET}/release\"\n\
              mkdir -p \"$out\"\n\
              printf '#!/bin/sh\\necho feldspar usage\\n' > \"$out/feldspar\"\n\
              chmod +x \"$out/feldspar\"\n"
@@ -151,6 +151,7 @@ impl Fixture {
             ])
             .arg("--output")
             .arg(self.dir.join("dist"))
+            .args(self.variant(extra))
             .args(extra)
             .env("PATH", &path)
             .output()
@@ -158,6 +159,16 @@ impl Fixture {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         (output, stdout, stderr)
+    }
+
+    /// `--variant static` unless the test chose one: the tests below that predate
+    /// the Python artifact are about one tarball and two uploads.
+    fn variant(&self, extra: &[&str]) -> &'static [&'static str] {
+        if extra.contains(&"--variant") {
+            &[]
+        } else {
+            &["--variant", "static"]
+        }
     }
 
     /// What the npx stub recorded, in the order it was called.
@@ -210,11 +221,8 @@ fn release_uploads_the_tarball_and_checksum_under_version_less_names() {
             tarball.display()
         ),
     );
-    assert!(
-        calls[1].starts_with(
-            "wrangler r2 object put feldspar-latest-static/feldspar.tar.gz.sha256 -f "
-        )
-    );
+    assert!(calls[1]
+        .starts_with("wrangler r2 object put feldspar-latest-static/feldspar.tar.gz.sha256 -f "));
     assert!(calls[1].ends_with(" --remote"), "{}", calls[1]);
 
     // What is inside it: the host installer, so the machine that downloads this
@@ -364,5 +372,115 @@ fn release_without_npx_is_refused_before_the_build() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    fs::remove_dir_all(&f.dir).ok();
+}
+
+/// The tarball's member at `path` (below its top-level directory), as text.
+fn member(tarball: &Path, path: &str) -> String {
+    let listing = Command::new("tar")
+        .arg("-tzf")
+        .arg(tarball)
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    let name = listing
+        .lines()
+        .find(|l| l.ends_with(&format!("/{path}")))
+        .unwrap_or_else(|| panic!("{tarball:?} has no {path}:\n{listing}"))
+        .to_owned();
+    let out = Command::new("tar")
+        .arg("-xzOf")
+        .arg(tarball)
+        .arg(&name)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn the_default_release_builds_and_publishes_the_static_and_the_python_artifact() {
+    let f = fixture("both", 0);
+    // The native Python build checks the interpreter it will link against; this
+    // one answers as Debian 13's does, whatever the test machine has.
+    write_executable(&f.bin.join("python3"), "#!/bin/sh\necho 3.13\n");
+    let (output, stdout, stderr) = f.release(&["--variant", "both"]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let static_tarball = f.tarball();
+    let python_tarball = PathBuf::from(
+        static_tarball
+            .display()
+            .to_string()
+            .replace(".tar.gz", "-debian13-python.tar.gz"),
+    );
+    assert!(static_tarball.is_file() && python_tarball.is_file());
+
+    // Four uploads: each tarball and its checksum, under version-less names that
+    // tell the two apart.
+    let objects: Vec<String> = f
+        .npx_calls()
+        .iter()
+        .map(|c| c.split_whitespace().nth(4).unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        objects,
+        [
+            "feldspar-latest-static/feldspar.tar.gz",
+            "feldspar-latest-static/feldspar.tar.gz.sha256",
+            "feldspar-latest-static/feldspar-debian13-python.tar.gz",
+            "feldspar-latest-static/feldspar-debian13-python.tar.gz.sha256",
+        ]
+    );
+    assert_eq!(
+        fs::read(f.uploads.join("feldspar-debian13-python.tar.gz")).unwrap(),
+        fs::read(&python_tarball).unwrap(),
+    );
+    let published =
+        fs::read_to_string(f.uploads.join("feldspar-debian13-python.tar.gz.sha256")).unwrap();
+    assert!(
+        published.ends_with("  feldspar-debian13-python.tar.gz\n"),
+        "{published}"
+    );
+    assert!(
+        stdout.contains(
+            "https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz"
+        ),
+        "{stdout}"
+    );
+
+    // Each artifact says which it is, for setup-host.sh to read...
+    assert_eq!(member(&static_tarball, "VARIANT"), "static\n");
+    assert_eq!(member(&python_tarball, "VARIANT"), "debian13-python\n");
+    // ...and only the Python one's install.sh sees to the library it links.
+    let install = member(&python_tarball, "install.sh");
+    assert!(
+        install.contains("libpython3.13.so.1.0")
+            && install.contains("apt-get install -y libpython3.13"),
+        "{install}"
+    );
+    assert!(!member(&static_tarball, "install.sh").contains("libpython"));
+    assert!(member(&python_tarball, "README").contains("Debian 13"));
+
+    // The download URL the operations manual gives is the one published.
+    let ops = fs::read_to_string(workspace_root().join("docs/OPERATIONS.md")).unwrap();
+    assert!(
+        ops.contains("https://feldspar-latest-static.saltcorn.com/feldspar-debian13-python.tar.gz"),
+        "docs/OPERATIONS.md should document the Python artifact's download URL"
+    );
+    fs::remove_dir_all(&f.dir).ok();
+}
+
+#[test]
+fn a_native_python_build_against_the_wrong_python_is_refused_before_the_build() {
+    let f = fixture("wrong-python", 0);
+    write_executable(&f.bin.join("python3"), "#!/bin/sh\necho 3.11\n");
+    let (output, _stdout, stderr) = f.release(&["--variant", "python"]);
+    assert!(!output.status.success());
+    assert!(stderr.contains("links libpython 3.13"), "{stderr}");
+    assert!(f.npx_calls().is_empty());
+    assert!(!f.dir.join("dist").exists(), "the build ran anyway");
     fs::remove_dir_all(&f.dir).ok();
 }
