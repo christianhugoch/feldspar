@@ -5,16 +5,18 @@
 //! themselves are read through [`ownership::read_rows_as`], the reader every
 //! list endpoint uses, so a pull never shows a device more than a list would.
 //!
-//! Delivery is **at least once**. The watermark is taken before anything is
-//! read, so a change that lands while a pull runs may be in this answer *and*
-//! the next one. A device writes every row it gets over its local copy, so a
-//! repeat does no harm, while a gap would lose data for good.
+//! **One pull is one moment.** Everything is read in one read-only
+//! `REPEATABLE READ` transaction, the watermark included: all tables as they
+//! were at the same instant, so a child row never arrives without its parent,
+//! and the watermark names exactly what was read, so nothing comes twice. A
+//! device that loses an answer asks again from its old watermark and gets it
+//! again; that is the only repeat, and it does no harm.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use sc_auth::User;
-use sc_catalog::{Catalog, SyncWatermark, Table, changed_keys, sync_watermark};
+use sc_catalog::{Catalog, SharedTx, SyncWatermark, Table, changed_keys, sync_watermark};
 use sc_error::{Error, Result};
 use sc_expr::JsEvaluator;
 use sc_query::{Expr, InSet};
@@ -23,7 +25,7 @@ use uuid::Uuid;
 
 use super::device::{check_device, devices_table};
 use crate::ownership;
-use crate::rows::{self, RowQuery};
+use crate::rows::{self, Executor, RowQuery};
 use crate::schema::{StructField, TypeSchema};
 
 /// How many keys one read asks for: a long `IN (…)` list is still one
@@ -85,30 +87,11 @@ pub(crate) async fn pull(
         .filter(|table| table.sync_enabled() && may_read(table, user.role))
         .collect();
 
-    // Taken first: whatever is read below is at least as new as it, so the
-    // next pull, starting here, cannot miss anything.
-    let watermark = sync_watermark(cat).await?;
-    // A watermark this database never handed out (restored from a backup, or
-    // another server's) says nothing about what the device has: start over.
-    let since = request.watermark.filter(|w| w.not_after(&watermark));
-
-    let mut tables = Vec::with_capacity(synced.len());
-    for table in &synced {
-        let entry = match since {
-            Some(ref since) if request.tables.contains(&table.name) => {
-                changes_of(cat, table, since, &watermark, user, evaluator).await?
-            }
-            _ => json!({
-                "table": table.name,
-                "reset": true,
-                "rows": ownership::read_rows_as(
-                    cat, table, &RowQuery::new(), user.role, Some(user), evaluator,
-                ).await?,
-                "removed": [],
-            }),
-        };
-        tables.push(entry);
-    }
+    let tx = SharedTx::begin_snapshot(cat).await?;
+    let read = read_tables(cat, &tx, &request, &synced, user, evaluator).await;
+    // Read-only: there is nothing to commit, whichever way the reads went.
+    let _ = tx.rollback().await;
+    let (watermark, since, tables) = read?;
 
     // What the device says it has applied — kept for the cleanup that will
     // remove entries every device is past.
@@ -129,6 +112,44 @@ pub(crate) async fn pull(
     .await?;
 
     Ok(json!({ "watermark": watermark.to_string(), "tables": tables }))
+}
+
+/// The watermark, the device's watermark when it is still usable, and one entry
+/// per synced table, all read on `tx` (one snapshot).
+async fn read_tables(
+    cat: &Catalog,
+    tx: &SharedTx,
+    request: &PullRequest,
+    synced: &[Table],
+    user: &User,
+    evaluator: Option<&Arc<dyn JsEvaluator>>,
+) -> Result<(SyncWatermark, Option<SyncWatermark>, Vec<Json>)> {
+    let watermark = sync_watermark(cat, tx).await?;
+    // A watermark this database never handed out (restored from a backup, or
+    // another server's) says nothing about what the device has: start over.
+    let since = request
+        .watermark
+        .clone()
+        .filter(|w| w.not_after(&watermark));
+    let executor = Executor::Transaction(tx.clone());
+    let mut tables = Vec::with_capacity(synced.len());
+    for table in synced {
+        let entry = match since {
+            Some(ref since) if request.tables.contains(&table.name) => {
+                changes_of(cat, tx, table, since, &watermark, user, evaluator).await?
+            }
+            _ => json!({
+                "table": table.name,
+                "reset": true,
+                "rows": ownership::read_rows_as_in(
+                    cat, table, &RowQuery::new(), user.role, Some(user), evaluator, &executor,
+                ).await?,
+                "removed": [],
+            }),
+        };
+        tables.push(entry);
+    }
+    Ok((watermark, since, tables))
 }
 
 /// One pull's request, checked.
@@ -181,13 +202,15 @@ fn may_read(table: &Table, role: u8) -> bool {
 /// (deleted, or not theirs anymore).
 async fn changes_of(
     cat: &Catalog,
+    tx: &SharedTx,
     table: &Table,
     since: &SyncWatermark,
     watermark: &SyncWatermark,
     user: &User,
     evaluator: Option<&Arc<dyn JsEvaluator>>,
 ) -> Result<Json> {
-    let changed = changed_keys(cat, &table.name, since, watermark).await?;
+    let changed = changed_keys(cat, tx, &table.name, since, watermark).await?;
+    let executor = Executor::Transaction(tx.clone());
     let pk = rows::single_pk(table)?;
     let mut found: BTreeMap<String, Json> = BTreeMap::new();
     let keys: Vec<&String> = changed.iter().collect();
@@ -203,8 +226,16 @@ async fn changes_of(
             }),
             ..RowQuery::new()
         };
-        let read =
-            ownership::read_rows_as(cat, table, &query, user.role, Some(user), evaluator).await?;
+        let read = ownership::read_rows_as_in(
+            cat,
+            table,
+            &query,
+            user.role,
+            Some(user),
+            evaluator,
+            &executor,
+        )
+        .await?;
         for row in read.as_array().into_iter().flatten() {
             if let Some(key) = row.get(&pk).map(key_text) {
                 found.insert(key, row.clone());

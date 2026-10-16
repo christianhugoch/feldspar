@@ -10810,8 +10810,10 @@ and the synced tables it already holds. It answers the new watermark and one ent
 the user may read: a whole table (`reset`) when the device does not hold it yet or has no
 watermark, otherwise the current rows of the keys changed since, plus the keys that are gone or
 no longer readable (`removed`). Rows are read like any list read, so access rules and ownership
-apply. Delivery is at least once: the watermark is taken before reading, so a change may come
-twice but never not at all. The device's watermark is kept in `_fd_sync_clients`, for cleanup.
+apply. A pull reads in one read-only `REPEATABLE READ` transaction and takes its watermark
+there, so all tables come from the same moment (a child row never arrives without its parent)
+and the watermark names exactly what was read: nothing is sent twice, and nothing is skipped.
+The device's watermark is kept in `_fd_sync_clients`, for cleanup.
 
 **Uploads go through the REST API's own write rules** (`POST {mount}/sync/push`), in the
 order the changes were made: access rules, ownership, validation, calculated fields and
@@ -10828,10 +10830,13 @@ server keeps that change. A field changed on both sides keeps the server's value
 the server" means a log entry for that row at or above the watermark the device's change was
 based on. An update of a row deleted meanwhile loses to the delete.
 
-**Keys:** offline inserts need a `uuid` primary key, which the device generates. A table with
-an integer key may still be synced for reading and updating. The log stores keys as text, so
-integer keys created offline can be added later with a translation step, without changing the
-schema.
+**Keys:** a device can create rows offline whatever the table's key. A `uuid` key is made by
+the device and kept by the server. An integer key is given out by the server, so offline the
+device uses a temporary key for the new row, also in the rows that point to it. On upload the
+server inserts the row, rewrites the temporary key to the real one in the later changes of the
+same upload, and answers the pairs; the device then replaces the temporary key in its copy and
+its outbox. A pair is found again for a retried upload whose answer was lost. The log stores
+keys as text, so none of this changes the schema.
 
 **What a device gets:** every row of the application's synced tables that the user may read.
 Filtering by more than the access rules (only recent rows, say) is left for later.

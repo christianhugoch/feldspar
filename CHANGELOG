@@ -2,6 +2,15 @@
 
 Changes in reverse chronological order.
 
+## Offline sync: a pull reads one moment
+
+A pull now reads all synced tables in one read-only transaction that sees a single moment, and
+takes its watermark from the same moment. A device never gets a child row without its parent,
+and a change is no longer sent twice when it lands while a pull runs.
+
+- Tests: `crates/sc-catalog/tests/shared_tx.rs` (a snapshot transaction reads one moment and
+  refuses writes) and the existing `crates/sc-api/tests/sync_pull.rs`.
+
 ## Offline sync: devices can upload their changes
 
 A new `sync/push` endpoint takes the inserts, updates and deletes a device made offline and

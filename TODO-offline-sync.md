@@ -34,7 +34,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] S2.8 A schema change that rewrites a synced table's rows (a column added with a default, a
       type changed, a column dropped or renamed) fires no row trigger; the next pull of that
       table resets it on every device. Next to `sync_dirty` in `schema_edit.rs`.
-- [ ] S2.9 One pull reads in one `REPEATABLE READ READ ONLY` transaction, with the watermark
+- [x] S2.9 One pull reads in one `REPEATABLE READ READ ONLY` transaction, with the watermark
       taken inside it: all tables from one moment (a child row never arrives without its parent)
       and nothing sent twice. Needs row reads, the RLS path included, on a given transaction, and
       an isolation level on `sc_db::Transaction`. Before S4.3, which relies on it.
@@ -57,6 +57,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [~] S3.5 Tests: each conflict case; a child inserted offline with its parent; a delete made
       offline; a refused write (access, validation, foreign key) reported without stopping the
       others.
+- [ ] S3.6 Rows created offline in a table with an integer key: the device sends a temporary
+      key, the server inserts the row and rewrites that temporary key to the real one in the
+      later changes of the same upload (a child's foreign key, an update, a delete). The answer
+      pairs each temporary key with its real key. A retried upload whose answer was lost gets
+      the pairs again (from the change-log's device and change number).
 
 ## S4 — The client
 
@@ -70,6 +75,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
       every insert or update entry fetches the current row and overwrites the local one, so a
       local cascade or a key change cannot lose a row.
 - [ ] S4.4 A React Native example app that works offline. Tests with the client under Node.
+- [ ] S4.5 Creating rows offline in a table with an integer key: the client makes a temporary
+      key, and when the upload answers the real one it replaces it in the local row, in every
+      local row that points to it, and in the changes still waiting in the outbox (S3.6).
 
 ## S5 — Cleanup and documentation
 

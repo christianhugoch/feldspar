@@ -216,18 +216,16 @@ fn require_sync(catalog: &Catalog) -> Result<()> {
     }
 }
 
-/// The current watermark. Taken before a pull reads anything, so what it reads
-/// is at least as new: a change may come twice, never not at all.
-pub async fn sync_watermark(catalog: &Catalog) -> Result<SyncWatermark> {
+/// The watermark of `tx`: the snapshot its statements read. On a
+/// [`SharedTx::begin_snapshot`] transaction that is the snapshot every read of
+/// it sees, so what the reads return and what the watermark names agree.
+pub async fn sync_watermark(catalog: &Catalog, tx: &SharedTx) -> Result<SyncWatermark> {
     require_sync(catalog)?;
-    let rows = catalog
-        .primary()
-        .query(&Statement::raw(
-            "SELECT txid_current_snapshot()::text",
-            Vec::new(),
-        ))
-        .await?
-        .try_collect()
+    let rows = tx
+        .run(
+            None,
+            &Statement::raw("SELECT txid_current_snapshot()::text", Vec::new()),
+        )
         .await?;
     match rows.first().and_then(|row| row.get_index(0)) {
         Some(Value::Text(snapshot)) => SyncWatermark::parse(snapshot),
@@ -238,9 +236,10 @@ pub async fn sync_watermark(catalog: &Catalog) -> Result<SyncWatermark> {
 }
 
 /// The keys of `table` changed by a transaction that had committed at `until`
-/// but not yet at `since`.
+/// but not yet at `since`, read on `tx`.
 pub async fn changed_keys(
     catalog: &Catalog,
+    tx: &SharedTx,
     table: &str,
     since: &SyncWatermark,
     until: &SyncWatermark,
@@ -254,20 +253,20 @@ pub async fn changed_keys(
            AND NOT txid_visible_in_snapshot(txid, $5::text::txid_snapshot)",
         log = catalog.primary().dialect().quote_ident(CHANGES_TABLE),
     );
-    let rows = catalog
-        .primary()
-        .query(&Statement::raw(
-            sql,
-            vec![
-                Value::Text(table.to_owned()),
-                Value::Int(since.xmin),
-                Value::Int(until.xmax),
-                Value::Text(until.to_string()),
-                Value::Text(since.to_string()),
-            ],
-        ))
-        .await?
-        .try_collect()
+    let rows = tx
+        .run(
+            None,
+            &Statement::raw(
+                sql,
+                vec![
+                    Value::Text(table.to_owned()),
+                    Value::Int(since.xmin),
+                    Value::Int(until.xmax),
+                    Value::Text(until.to_string()),
+                    Value::Text(since.to_string()),
+                ],
+            ),
+        )
         .await?;
     Ok(rows
         .iter()
