@@ -418,12 +418,31 @@ pub async fn run_schedule(
     at: DateTime<Utc>,
 ) -> Result<String> {
     // The backup first: no point holding a connection open while it is built.
+    // It is written to disk, never to memory — beside where it belongs for a
+    // local destination, so sending it is a rename, and to the spool directory
+    // for a remote one. Either file is deleted when this returns, unless the
+    // rename has already moved it into place.
     let available: Available = super::available(catalog).await?;
-    let bytes = super::write_backup(catalog, &schedule.include.selection(&available)).await?;
+    let name = backup_file_name(at);
+    let spool = match &schedule.destination {
+        super::destination::Destination::Local { directory } => {
+            tokio::fs::create_dir_all(directory)
+                .await
+                .map_err(|e| Error::file(format!("creating `{directory}`: {e}")))?;
+            super::SpoolFile::at(std::path::Path::new(directory).join(format!(".{name}.partial")))
+        }
+        _ => super::SpoolFile::new("backup"),
+    };
+    super::write_backup_to(
+        catalog,
+        &schedule.include.selection(&available),
+        spool.create()?,
+    )
+    .await?;
 
     let conn = schedule.destination.open().await?;
     let result = async {
-        let written = conn.put(&backup_file_name(at), bytes).await?;
+        let written = conn.put(&name, spool.path()).await?;
         prune(&conn, schedule.retention_days, at).await?;
         Ok(written)
     }

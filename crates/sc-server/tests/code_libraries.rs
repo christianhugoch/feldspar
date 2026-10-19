@@ -578,7 +578,9 @@ async fn a_backup_carries_the_libraries_to_a_second_installation() -> sc_error::
     assert_eq!(available.code_libraries, 6);
     let mut selection = BackupSelection::everything(&available);
     selection.code_libraries = true;
-    let archive = sc_server::write_backup(&first.catalog, &selection).await?;
+    let archive = tmp.path().join("backup.zip");
+    sc_server::write_backup_to(&first.catalog, &selection, std::fs::File::create(&archive)?)
+        .await?;
     let (contents, _) = sc_server::inspect_backup(&archive)?;
     assert_eq!(contents.code_libraries, 6);
 

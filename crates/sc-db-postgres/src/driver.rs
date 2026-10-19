@@ -318,6 +318,12 @@ impl DatabaseDriver for PgDriver {
         PgDriver::begin(self).await
     }
 
+    async fn begin_snapshot(&self) -> Result<Option<Box<dyn Transaction>>> {
+        let client = self.client().await?;
+        let tx = crate::transaction::PgTransaction::begin_snapshot(client, self.dialect).await?;
+        Ok(Some(Box::new(tx)))
+    }
+
     fn capabilities(&self) -> DbCapabilities {
         PgDriver::capabilities(self)
     }

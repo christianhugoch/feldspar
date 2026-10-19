@@ -601,6 +601,9 @@ async-graphql = { version = "7.2", default-features = false, features = [
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "json",
+    # A request body streamed from a file: an automated backup's S3 upload,
+    # which must not be read into memory first.
+    "stream",
 ] }
 
 # HTML → Markdown for the agent's `http` trait (`fetch_<name>`). `htmd` is a

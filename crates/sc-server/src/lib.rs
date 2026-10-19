@@ -66,7 +66,7 @@ pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, 
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
     BackupScheduler, RestoreReport, Selection as BackupSelection, available as backup_available,
-    inspect as inspect_backup, restore_backup, start_backup_scheduler, write_backup,
+    inspect as inspect_backup, restore_backup, start_backup_scheduler, write_backup_to,
 };
 // The S3 request signer, for the fake S3 server the automated-backup tests
 // check every request's signature against.

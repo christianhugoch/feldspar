@@ -778,7 +778,7 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
                 access.check_datasets(&catalog, [layer.dataset]).await?;
                 let bytes = layer::layer_tile(&catalog, &access.caller, &layer, z, x, y).await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
-                    bytes: bytes.into(),
+                    body: crate::handler::DownloadBody::Bytes(bytes.into()),
                     content_type: "application/vnd.mapbox-vector-tile".to_owned(),
                     // Fetched by the map, not saved by a person.
                     filename: String::new(),

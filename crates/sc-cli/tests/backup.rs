@@ -46,23 +46,31 @@ fn feldspar(args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// The titles in `books`, sorted.
-async fn titles(catalog: &Catalog) -> sc_error::Result<Vec<String>> {
+/// The titles in `books` with their covers' bytes, sorted by title.
+async fn titles(catalog: &Catalog) -> sc_error::Result<Vec<(String, Vec<u8>)>> {
     let rows = catalog
         .provider(&catalog.require("books")?)?
         .query(&Select::from(Source::table("books")))
         .await?
         .try_collect()
         .await?;
-    let mut titles: Vec<String> = rows
+    let mut titles: Vec<(String, Vec<u8>)> = rows
         .iter()
-        .map(|row| match row.get("title") {
-            Some(Value::Text(title)) => title.clone(),
-            other => panic!("a title, got {other:?}"),
+        .map(|row| match (row.get("title"), row.get("cover")) {
+            (Some(Value::Text(title)), Some(Value::Bytes(cover))) => (title.clone(), cover.clone()),
+            other => panic!("a title and a cover, got {other:?}"),
         })
         .collect();
     titles.sort();
     Ok(titles)
+}
+
+/// A cover's bytes: every byte value, and enough of them to be more than one
+/// read's worth.
+fn cover(seed: u8) -> Vec<u8> {
+    (0..200_000u32)
+        .map(|i| (i as u8).wrapping_mul(seed))
+        .collect()
 }
 
 #[tokio::test]
@@ -85,17 +93,20 @@ async fn a_backup_from_the_cli_restores_everything_but_tls_into_another_database
                     .primary_key()
                     .generated(sc_db::ColumnGenerator::Identity),
                 DataField::plain("title", TypeRef::Basic(BasicType::Text)).required(),
+                // A binary column, which the backup writes as base64 and the
+                // restore decodes by the column's type.
+                DataField::plain("cover", TypeRef::Basic(BasicType::Bytes)).required(),
             ],
         )
         .await?;
     source.reload().await?;
-    for title in ["Orlando", "The Waves"] {
+    for (title, seed) in [("Orlando", 3), ("The Waves", 7)] {
         source
             .provider(&source.require("books")?)?
             .write(&Statement::from(Insert::row(
                 "books",
-                vec!["title".into()],
-                vec![Expr::lit(title)],
+                vec!["title".into(), "cover".into()],
+                vec![Expr::lit(title), Expr::lit(Value::Bytes(cover(seed)))],
             )))
             .await?
             .try_collect()
@@ -116,8 +127,7 @@ async fn a_backup_from_the_cli_restores_everything_but_tls_into_another_database
         stderr.contains("site.zip"),
         "it says what it wrote: {stderr}"
     );
-    let archive = std::fs::read(&file)?;
-    let (contents, _) = sc_server::inspect_backup(&archive)?;
+    let (contents, _) = sc_server::inspect_backup(&file)?;
     assert!(!contents.ssl, "the TLS settings are left out");
     assert!(contents.settings, "the other settings are in");
     let books = contents
@@ -155,7 +165,13 @@ async fn a_backup_from_the_cli_restores_everything_but_tls_into_another_database
     );
 
     let target = connect_catalog(&DbConfig::from_url(&target_url)).await?;
-    assert_eq!(titles(&target).await?, ["Orlando", "The Waves"]);
+    assert_eq!(
+        titles(&target).await?,
+        [
+            ("Orlando".to_owned(), cover(3)),
+            ("The Waves".to_owned(), cover(7))
+        ]
+    );
     assert_eq!(
         sc_config::stored_config(&target, sc_config::SMTP_HOST).await?,
         Some("mail.example.com".into())

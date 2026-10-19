@@ -513,6 +513,47 @@ pub(crate) async fn read_body(
     Ok(out.freeze())
 }
 
+/// Stream a request body into a spool file ([`crate::backup::SpoolFile`]),
+/// refusing it once it passes `limit` bytes — [`read_body`] for a body that is
+/// a file and may be larger than is sensible to hold in memory: an uploaded
+/// backup. The file is deleted if anything goes wrong on the way, by its guard.
+pub(crate) async fn spool_body(
+    body: Body,
+    limit: u64,
+    flag: &str,
+) -> std::result::Result<crate::backup::SpoolFile, Box<Response>> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let failed = |e: String| {
+        Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not keep the upload: {e}"),
+        ))
+    };
+    let spool = crate::backup::SpoolFile::new("upload");
+    let file = spool.create().map_err(|e| failed(e.to_string()))?;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut stream = body.into_data_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            Box::new(json_error(
+                StatusCode::BAD_REQUEST,
+                format!("could not read the request body: {e}"),
+            ))
+        })?;
+        total += chunk.len() as u64;
+        if total > limit {
+            return Err(Box::new(too_large(limit, flag)));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+    }
+    file.shutdown().await.map_err(|e| failed(e.to_string()))?;
+    Ok(spool)
+}
+
 /// The operational health check. Always `200 {"status":"ok"}`; reaching it at
 /// all is the signal that the server booted and is accepting requests.
 async fn health() -> Response {
@@ -569,6 +610,7 @@ async fn upload(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: Some(bytes),
+        raw_file: None,
         analytics_app: None,
         client_ip: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
@@ -628,6 +670,7 @@ async fn download(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        raw_file: None,
         analytics_app: None,
         client_ip: None,
         path_params: HashMap::from([("store".to_owned(), store_name), ("path".to_owned(), path)]),
@@ -679,6 +722,7 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        raw_file: None,
         analytics_app: None,
         client_ip: None,
         path_params: HashMap::new(),
@@ -726,13 +770,16 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
             "this server has no backup handler registered",
         );
     };
-    let bytes = match read_body(body, state.max_upload_bytes, "--max-upload-bytes").await {
-        Ok(bytes) => bytes,
+    // To disk, not to memory: a backup can be larger than this process is
+    // allowed to be, and it waits there to be restored.
+    let spool = match spool_body(body, state.max_upload_bytes, "--max-upload-bytes").await {
+        Ok(spool) => spool,
         Err(response) => return *response,
     };
     let caller = user.clone();
     let ctx = HandlerCtx {
-        raw_body: Some(bytes),
+        raw_body: None,
+        raw_file: Some(std::sync::Arc::new(spool)),
         analytics_app: None,
         client_ip: None,
         path_params: HashMap::new(),
@@ -1789,6 +1836,7 @@ async fn dispatch_analytics_api(
         user,
         locale,
         raw_body: None,
+        raw_file: None,
         analytics_app: Some(Arc::new(scope)),
         client_ip,
     };
@@ -2357,6 +2405,7 @@ async fn handle_api(
     let caller = user.clone();
     let ctx = HandlerCtx {
         raw_body: None,
+        raw_file: None,
         analytics_app: None,
         client_ip,
         path_params,
@@ -2434,7 +2483,36 @@ async fn apply_response(
     // send alongside them, which is why this is a separate arm rather than a
     // header on the one below.
     if let Some(file) = resp.download {
-        let mut out = (status, jar, stale, file.bytes).into_response();
+        let mut out = match &file.body {
+            crate::handler::DownloadBody::Bytes(bytes) => {
+                (status, jar, stale, bytes.clone()).into_response()
+            }
+            // Streamed from the spool file with its length known, so the
+            // browser shows progress and the file is never read whole. The
+            // stream owns the file (and, where it could not be unlinked, the
+            // guard that deletes it), so a download that is abandoned half-way
+            // frees it as surely as one that finishes.
+            crate::handler::DownloadBody::File(spooled) => {
+                let Some((handle, guard)) = spooled.take() else {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "this download has already been sent",
+                    );
+                };
+                use futures::StreamExt;
+                let reader: sc_files::BoxAsyncRead = Box::new(tokio::fs::File::from_std(handle));
+                let body = axum::body::Body::from_stream(crate::file_response::chunks(reader).map(
+                    move |chunk| {
+                        let _keep = &guard;
+                        chunk
+                    },
+                ));
+                let mut out = (status, jar, stale, body).into_response();
+                out.headers_mut()
+                    .insert(header::CONTENT_LENGTH, HeaderValue::from(spooled.size()));
+                out
+            }
+        };
         if let Ok(value) = HeaderValue::from_str(&file.content_type) {
             out.headers_mut().insert(header::CONTENT_TYPE, value);
         }

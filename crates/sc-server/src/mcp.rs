@@ -596,6 +596,7 @@ impl AdminTool for EndpointTool {
             // A projected tool never carries bytes: the endpoints that do are
             // tier 3, and a JSON arguments object has no shape for them.
             raw_body: None,
+            raw_file: None,
             analytics_app: None,
             client_ip: None,
             // An MCP call is a coding agent's, not a browser's: there is no
@@ -721,6 +722,7 @@ impl sc_catalog::AdminHost for AdminHandlers {
             body: call.body,
             user,
             raw_body: None,
+            raw_file: None,
             analytics_app: None,
             client_ip: None,
             locale: sc_i18n::active().default_locale().clone(),

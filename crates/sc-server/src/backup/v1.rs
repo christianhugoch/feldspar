@@ -70,7 +70,7 @@ use uuid::Uuid;
 
 use sc_viewpattern::{CFG_SITE_NAME, MENU_CONFIG_KEY, SALTCORN_UI_FRAMEWORK, saltcorn_ui_csp};
 
-use super::restore::Entries;
+use super::archive::Entries;
 use super::{Available, Item, MANIFEST_FILE};
 use crate::handlers::csp_json;
 
@@ -106,13 +106,15 @@ const V1_USER_COLUMNS: [&str; 13] = [
     "_attributes",
 ];
 
-/// Whether these entries are a Saltcorn 1 backup rather than one of ours.
+/// Whether an archive with these entry names is a Saltcorn 1 backup rather than
+/// one of ours.
 ///
-/// By the presence of `pack.json`, which is v1's manifest in all but name. The
-/// caller has already established that there is no `manifest.json`, so this does
-/// not have to rule ours out.
-pub(super) fn is_v1_backup(entries: &Entries) -> bool {
-    entries.contains_key(PACK)
+/// By the presence of `pack.json`, which is v1's manifest in all but name — and
+/// by the *names* alone, so a Feldspar backup is never read into memory to be
+/// told apart. The caller has already established that there is no
+/// `manifest.json`, so this does not have to rule ours out.
+pub(super) fn is_v1_backup<'a>(mut names: impl Iterator<Item = &'a str>) -> bool {
+    names.any(|name| name == PACK)
 }
 
 /// Translate a Saltcorn 1 archive into the entries a Feldspar backup would have
@@ -138,8 +140,9 @@ pub(super) fn convert(entries: &Entries) -> Result<Entries> {
     // Users first, because every other table's references to them are rewritten
     // against the keys minted here.
     let users = convert_users(entries, pack, &site, &mut notes);
-    contents.users = i64::try_from(users.count).unwrap_or(i64::MAX);
-    out.insert("users.json".to_owned(), pretty(&users.document)?);
+    contents.users = i64::try_from(users.rows.len()).unwrap_or(i64::MAX);
+    out.insert(super::USERS_FILE.to_owned(), pretty(&users.document)?);
+    out.insert(super::USER_ROWS_FILE.to_owned(), ndjson(&users.rows)?);
     let user_keys = users.keys;
 
     let mut wants_store = false;
@@ -156,8 +159,8 @@ pub(super) fn convert(entries: &Entries) -> Result<Entries> {
                     pretty(&converted.document)?,
                 );
                 out.insert(
-                    format!("tables/{}/rows.json", converted.name),
-                    pretty(&Json::Array(converted.rows))?,
+                    format!("tables/{}/rows.ndjson", converted.name),
+                    ndjson(&converted.rows)?,
                 );
                 contents
                     .tables
@@ -602,14 +605,15 @@ impl UserKeys {
     }
 }
 
-/// The converted `users.json`, plus the key map the rest of the conversion needs.
+/// The converted `users/users.json` and the accounts for `users/rows.ndjson`,
+/// plus the key map the rest of the conversion needs.
 struct ConvertedUsers {
     document: Json,
-    count: usize,
+    rows: Vec<Json>,
     keys: UserKeys,
 }
 
-/// v1's roles and accounts as `{ roles, fields, users }`.
+/// v1's roles and accounts: `{ roles, fields }`, and the rows.
 ///
 /// `fields` carries `legacy_id` and any column an admin added to v1's users table:
 /// the restore adds the ones the users table here has not got before it inserts
@@ -736,8 +740,8 @@ fn convert_users(
     }
 
     ConvertedUsers {
-        count: rows.len(),
-        document: json!({ "roles": roles, "fields": fields, "users": Json::Array(rows) }),
+        document: json!({ "roles": roles, "fields": fields }),
+        rows,
         keys,
     }
 }
@@ -1456,6 +1460,22 @@ fn json_entry(entries: &Entries, path: &str) -> Result<Json> {
         .map_err(|e| Error::invalid(format!("`{path}` in the backup is not valid JSON: {e}")))
 }
 
+/// Rows as a rows entry: one compact object per line.
+///
+/// The values are v1's JSON as [`convert_row`] left it, which is already what
+/// the restore reads by column type ([`super::values::column_value`]): text,
+/// numbers, ISO timestamps and dates. Saltcorn 1 has no binary column type, so
+/// nothing here needs the base64 a Feldspar backup writes bytes in.
+fn ndjson(rows: &[Json]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut out, row)
+            .map_err(|e| Error::msg(format!("could not write a converted row: {e}")))?;
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
 fn pretty(value: &Json) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(value)
         .map_err(|e| Error::msg(format!("the imported backup could not be written: {e}")))
@@ -1650,6 +1670,20 @@ mod tests {
         .expect("valid JSON")
     }
 
+    /// A converted rows entry, back as the rows on its lines.
+    fn rows_of(entries: &Entries, path: &str) -> Json {
+        let bytes = entries
+            .get(path)
+            .unwrap_or_else(|| panic!("no `{path}` was converted"));
+        Json::Array(
+            bytes
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice(line).expect("a JSON row per line"))
+                .collect(),
+        )
+    }
+
     fn notes(entries: &Entries) -> Vec<String> {
         let manifest = document(entries, MANIFEST_FILE);
         notes_of(manifest.as_object().expect("an object"))
@@ -1657,10 +1691,10 @@ mod tests {
 
     #[test]
     fn a_v1_archive_is_recognised_and_ours_is_not() {
-        assert!(is_v1_backup(&v1_archive()));
+        assert!(is_v1_backup(v1_archive().keys().map(String::as_str)));
         let mut ours = Entries::new();
         ours.insert(MANIFEST_FILE.to_owned(), b"{}".to_vec());
-        assert!(!is_v1_backup(&ours));
+        assert!(!is_v1_backup(ours.keys().map(String::as_str)));
     }
 
     /// The manifest a converted archive carries: this system's format, and where
@@ -1739,7 +1773,7 @@ mod tests {
         assert_eq!(field("cover")["kind"]["type"], json!("file"));
         assert_eq!(field("cover")["kind"]["store"], json!("BooksDB"));
 
-        let rows = document(&out, "tables/Books/rows.json");
+        let rows = rows_of(&out, "tables/Books/rows.ndjson");
         let rows = rows.as_array().expect("rows");
         assert_eq!(rows.len(), 2);
         // A day-only date loses the time v1 stored it with; a real timestamp
@@ -1790,8 +1824,9 @@ mod tests {
     #[test]
     fn a_user_keeps_its_v1_number_and_every_reference_is_rewritten() {
         let out = convert(&v1_archive()).expect("a conversion");
-        let users = document(&out, "users.json");
-        let user = &users["users"][0];
+        let users = document(&out, "users/users.json");
+        let accounts = rows_of(&out, "users/rows.ndjson");
+        let user = &accounts[0];
         assert_eq!(user["email"], json!("admin@foo.com"));
         assert_eq!(user["role"], json!(1));
         assert_eq!(user["legacy_id"], json!(7));
@@ -1823,7 +1858,7 @@ mod tests {
         // And the reference: the row that pointed at user 7 points at the UUID
         // user 7 became. One that pointed at a user this backup does not carry
         // points at nothing, which is the only honest answer.
-        let rows = document(&out, "tables/Books/rows.json");
+        let rows = rows_of(&out, "tables/Books/rows.ndjson");
         assert_eq!(rows[0]["borrowed_by"], json!(id));
         assert_eq!(rows[1]["borrowed_by"], Json::Null);
         // The roles the users point at travel too.
@@ -1859,8 +1894,8 @@ mod tests {
         assert_eq!(store["files"][0]["min_role"], json!(40));
         // Who uploaded it, as the user that v1 user became.
         let owner = store["files"][0]["owner"].as_str().expect("an owner");
-        let users = document(&out, "users.json");
-        assert_eq!(json!(owner), users["users"][0]["id"]);
+        let accounts = rows_of(&out, "users/rows.ndjson");
+        assert_eq!(json!(owner), accounts[0]["id"]);
         assert_eq!(
             out.get("file-stores/BooksDB/files/whale.png"),
             Some(&b"\x89PNG".to_vec())

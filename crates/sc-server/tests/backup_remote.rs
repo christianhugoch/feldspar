@@ -329,8 +329,8 @@ async fn an_automated_backup_goes_to_an_s3_bucket() -> sc_error::Result<()> {
         .unwrap_or_else(|| panic!("{written}"));
     let archive = s3.get(name).expect("the backup is in the bucket");
     assert!(has_entry(&archive, "tables/books/table.json"));
-    assert!(!has_entry(&archive, "tables/books/rows.json"));
-    assert!(!has_entry(&archive, "users.json"));
+    assert!(!has_entry(&archive, "tables/books/rows.ndjson"));
+    assert!(!has_entry(&archive, "users/users.json"));
     let keys = s3.keys();
     for gone in &old {
         assert!(!keys.contains(gone), "{gone} should have been pruned");
@@ -731,7 +731,7 @@ async fn an_automated_backup_goes_to_an_sftp_server() -> sc_error::Result<()> {
         .unwrap_or_else(|| panic!("{written}"));
     let archive = std::fs::read(dir.join(name)).unwrap();
     assert!(has_entry(&archive, "tables/books/table.json"));
-    assert!(!has_entry(&archive, "users.json"));
+    assert!(!has_entry(&archive, "users/users.json"));
     for gone in &old {
         assert!(!dir.join(gone).exists(), "{gone} should have been pruned");
     }

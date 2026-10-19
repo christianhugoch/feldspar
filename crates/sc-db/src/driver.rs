@@ -88,6 +88,20 @@ pub trait DatabaseDriver: Send + Sync {
     /// exactly once.
     async fn begin(&self) -> Result<Box<dyn Transaction>>;
 
+    /// Begin a **read-only transaction that reads from one snapshot** — what
+    /// `pg_dump` reads a database through, so that tables read one after
+    /// another are consistent *with each other* and a foreign key read late
+    /// still finds the row it pointed at when the first table was read.
+    ///
+    /// `Ok(None)` is the default and means "this backend has no such thing that
+    /// is worth its cost": the caller reads statement by statement instead.
+    /// SQLite answers that way on purpose — its only transaction that holds a
+    /// snapshot is `BEGIN IMMEDIATE`, which would block every writer for as long
+    /// as the reader takes.
+    async fn begin_snapshot(&self) -> Result<Option<Box<dyn Transaction>>> {
+        Ok(None)
+    }
+
     /// What this backend supports. The authorization and message-bus layers
     /// branch on these flags rather than assuming a Postgres feature set.
     fn capabilities(&self) -> DbCapabilities;

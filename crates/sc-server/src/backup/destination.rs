@@ -414,30 +414,39 @@ pub enum Connection {
 }
 
 impl Connection {
-    /// Store `bytes` as `name`, whole or not at all, and say where it went.
+    /// Store the backup at `source` as `name`, whole or not at all, and say
+    /// where it went. The file is read as it is sent, never into memory.
     ///
-    /// On a disk and over SFTP that means writing a dot-prefixed `.partial`
-    /// file and renaming it into place, so neither a reader nor the pruning
-    /// ever sees half a backup. An S3 put is atomic already.
-    pub async fn put(&self, name: &str, bytes: Vec<u8>) -> Result<String> {
+    /// On a disk that means a rename — [`super::schedule::run_schedule`] writes
+    /// a local backup beside where it belongs, under a dot-prefixed `.partial`
+    /// name, so this is the moment it appears — with a copy to a `.partial` and
+    /// a rename as the fallback when `source` is on another file system. Over
+    /// SFTP it is the same `.partial` and rename at the far end, so neither a
+    /// reader nor the pruning ever sees half a backup. An S3 put is atomic
+    /// already.
+    pub async fn put(&self, name: &str, source: &Path) -> Result<String> {
         let partial = format!(".{name}.partial");
         match self {
             Connection::Local(dir) => {
                 let target = dir.join(name);
-                let partial = dir.join(partial);
-                tokio::fs::write(&partial, &bytes)
-                    .await
-                    .map_err(|e| Error::file(format!("writing `{}`: {e}", partial.display())))?;
-                if let Err(e) = tokio::fs::rename(&partial, &target).await {
-                    let _ = tokio::fs::remove_file(&partial).await;
-                    return Err(Error::file(format!("writing `{}`: {e}", target.display())));
+                if tokio::fs::rename(source, &target).await.is_err() {
+                    // Another file system (`EXDEV`), most likely: copy it over
+                    // beside the target, then rename that.
+                    let partial = super::SpoolFile::at(dir.join(partial));
+                    tokio::fs::copy(source, partial.path()).await.map_err(|e| {
+                        Error::file(format!("writing `{}`: {e}", partial.path().display()))
+                    })?;
+                    tokio::fs::rename(partial.path(), &target)
+                        .await
+                        .map_err(|e| Error::file(format!("writing `{}`: {e}", target.display())))?;
+                    partial.keep();
                 }
                 Ok(target.to_string_lossy().into_owned())
             }
             Connection::Sftp(conn, d) => {
                 let target = d.path_of(name);
                 let partial = d.path_of(&partial);
-                if let Err(e) = conn.write(&partial, &bytes).await {
+                if let Err(e) = conn.upload(source, &partial).await {
                     let _ = conn.remove(&partial).await;
                     return Err(e);
                 }
@@ -454,7 +463,7 @@ impl Connection {
                 ))
             }
             Connection::S3(client) => {
-                client.put(name, bytes).await?;
+                client.put_file(name, source).await?;
                 Ok(client.url_of(name))
             }
         }

@@ -12,21 +12,39 @@
 //!   and one with a store's credentials removed would restore a store that cannot
 //!   connect. The zip is therefore as sensitive as the database, and the dialog
 //!   says so where the admin chooses.
-//! - **It does not stream.** The zip is built in memory and handed to the
-//!   response whole. A backup is bounded by the installation's own size and the
-//!   admin asked for it; streaming would mean deciding what to do about a table
-//!   changing underneath a half-written file, which is a bigger question than the
-//!   memory it saves.
+//!
+//! And one thing it does, which shapes the rest: **it streams, into a file.**
+//! Memory is bounded by about one page of rows plus the I/O buffers, whatever
+//! the size of the installation. That rules out the obvious arrangement — read a
+//! table, serialise it, add it to a zip in memory — and is what a 43 MB `bytea`
+//! table taking 3.4 GB to back up taught. So:
+//!
+//! - The zip is written to a [`std::fs::File`] ([`write_backup_to`]), never to a
+//!   buffer. The callers spool it to disk and serve, rename or send that file.
+//! - A table's rows are read a **page** at a time ([`write_table_rows`]) and
+//!   written one compact JSON line each as they arrive. The page size adapts to
+//!   the rows, so a table of large blobs is read a few rows at a time.
+//! - A file store's files are copied a chunk at a time, and a file that is
+//!   already compressed (a video, an image, a zip) is stored rather than
+//!   deflated again ([`already_compressed`]).
+//! - On Postgres every row is read through **one snapshot**
+//!   ([`sc_db::DatabaseDriver::begin_snapshot`]), so a table read last is
+//!   consistent with the one read first and the foreign keys between them line
+//!   up — `pg_dump`'s arrangement, and the answer to "what if a table changes
+//!   underneath a half-written file".
 
-use std::io::{Cursor, Write};
+use std::io::{Seek, Write};
 
 use sc_api::rows;
 use sc_catalog::{Catalog, FIELD_META_TABLE, Table, list_field_meta_for_table, list_file_stores};
+use sc_db::{Row, Transaction};
 use sc_error::{Error, Result};
-use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement};
+use sc_query::{BinOp, Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use serde_json::{Map, Value as Json, json};
+use tokio::io::AsyncReadExt;
 use zip::write::SimpleFileOptions;
 
+use super::values;
 use super::{Available, Item, MANIFEST_FILE, SSL_SECTION, Selection};
 use crate::handlers::{
     agent_json, application_json, backup_db_connection_json, backup_file_meta_json,
@@ -195,14 +213,43 @@ async fn kept_fits(
         .collect())
 }
 
-/// Build the zip for `selection`.
+/// Write the zip for `selection` into `file`, returning its length.
 ///
-/// The bytes are the whole answer: what went into them is *in* them, in the
+/// The file is the whole answer: what went into it is *in* it, in the
 /// manifest, which is the same thing a restore reads back with
 /// [`inspect`](super::inspect). A second copy of that record travelling beside the
 /// file would be a second copy to keep true.
-pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Vec<u8>> {
-    let mut zip = ZipBuilder::new();
+///
+/// The zip writes are synchronous calls into a buffered file — the page cache —
+/// made from async code, as the in-memory writes they replaced were.
+pub async fn write_backup_to(
+    catalog: &Catalog,
+    selection: &Selection,
+    file: std::fs::File,
+) -> Result<u64> {
+    let mut zip = ZipBuilder::new(std::io::BufWriter::with_capacity(256 * 1024, file));
+    let mut source = RowSource::open(catalog).await?;
+    write_entries(catalog, selection, &mut source, &mut zip).await?;
+    source.finish().await;
+    let file = zip
+        .finish()?
+        .into_inner()
+        .map_err(|e| zip_error("the archive", &e.error().to_string()))?;
+    // On disk before anyone is told it is there: the CLI and the scheduler
+    // rename it into place next, and a rename can reach the disk first.
+    file.sync_all()
+        .map_err(|e| zip_error("the archive", &e.to_string()))?;
+    file.metadata()
+        .map(|m| m.len())
+        .map_err(|e| zip_error("the archive", &e.to_string()))
+}
+
+async fn write_entries<W: Write + Seek>(
+    catalog: &Catalog,
+    selection: &Selection,
+    source: &mut RowSource<'_>,
+    zip: &mut ZipBuilder<W>,
+) -> Result<()> {
     let mut contents = Available::default();
 
     // --- tables: the overlay, the columns, and the rows ---------------------
@@ -248,9 +295,17 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
 
         let mut count = None;
         if selection.includes_data(name) {
-            let rows = table_rows(catalog, &table).await?;
-            count = Some(i64::try_from(rows.len()).unwrap_or(i64::MAX));
-            zip.json(&format!("tables/{name}/rows.json"), &Json::Array(rows))?;
+            count = Some(
+                write_table_rows(
+                    source,
+                    &table,
+                    None,
+                    zip,
+                    &format!("tables/{name}/rows.ndjson"),
+                    true,
+                )
+                .await?,
+            );
         }
         contents.tables.push({
             let item = Item::new(table.name.clone()).labelled(table.label.clone());
@@ -335,12 +390,18 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
         // definition and no files, rather than failing the whole backup: the
         // definition is the part that is hard to recreate by hand.
         if let Ok(store) = catalog.require_file_store(&def.name) {
-            for path in walk(store.as_ref(), "").await? {
-                let bytes = store.read(&path).await?;
+            for (path, size) in walk(store.as_ref(), "").await? {
+                let written = copy_file(
+                    store.as_ref(),
+                    &path,
+                    size,
+                    zip,
+                    &format!("{dir}/files/{path}"),
+                )
+                .await?;
                 let meta = store.get_meta(&path).await.unwrap_or_default();
-                zip.bytes(&format!("{dir}/files/{path}"), &bytes)?;
                 let mode = file_mode(store.as_ref(), &path);
-                files.push(backup_file_meta_json(&path, &meta, mode));
+                files.push(backup_file_meta_json(&path, Some(written), &meta, mode));
             }
         }
         let count = i64::try_from(files.len()).unwrap_or(i64::MAX);
@@ -357,14 +418,17 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
 
     // --- users and the roles they point at ----------------------------------
     //
-    // One entry, because a user without their role is a foreign key pointing at
-    // nothing. The rows are the table's own — **including `password_hash`**,
-    // which is the difference between a restored installation people can sign in
-    // to and one where every account needs a new password. A hash is what the
-    // database holds and what a restore has to put back.
+    // One directory, because a user without their role is a foreign key pointing
+    // at nothing: `users.json` for the roles and the admin-added columns,
+    // `rows.ndjson` beside it for the accounts. The rows are the table's own —
+    // **including `password_hash`**, which is the difference between a restored
+    // installation people can sign in to and one where every account needs a
+    // new password. A hash is what the database holds and what a restore has to
+    // put back.
     if selection.users {
         let users_table = catalog.require(sc_auth::USERS_TABLE)?;
-        let users = table_rows(catalog, &users_table).await?;
+        contents.users =
+            write_table_rows(source, &users_table, None, zip, super::USER_ROWS_FILE, true).await?;
         let roles: Vec<Json> = sc_auth::list_roles(catalog)
             .await?
             .iter()
@@ -393,10 +457,9 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
                 field_json(f, &description)
             })
             .collect();
-        contents.users = i64::try_from(users.len()).unwrap_or(i64::MAX);
         zip.json(
-            "users.json",
-            &json!({ "roles": roles, "fields": fields, "users": Json::Array(users) }),
+            super::USERS_FILE,
+            &json!({ "roles": roles, "fields": fields }),
         )?;
     }
 
@@ -439,7 +502,7 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
 
     // --- analytics: datasets, models, workspaces, and the fits -------------
     if selection.analytics {
-        write_analytics(catalog, selection, &mut zip, &mut contents).await?;
+        write_analytics(catalog, selection, source, zip, &mut contents).await?;
     }
 
     // --- LLM providers, each with its models --------------------------------
@@ -577,18 +640,18 @@ pub async fn write_backup(catalog: &Catalog, selection: &Selection) -> Result<Ve
             "contents": contents.to_json(),
         }),
     )?;
-
-    zip.finish()
+    Ok(())
 }
 
 /// Datasets, models and workspaces — and, when chosen, the models' fits.
 ///
 /// Datasets are written in the order a restore can save them in, every base
 /// before the datasets built on it, so the restore does not have to sort.
-async fn write_analytics(
+async fn write_analytics<W: Write + Seek>(
     catalog: &Catalog,
     selection: &Selection,
-    zip: &mut ZipBuilder,
+    source: &mut RowSource<'_>,
+    zip: &mut ZipBuilder<W>,
     contents: &mut Available,
 ) -> Result<()> {
     if has_table(catalog, sc_dataset::DATASETS_TABLE)? {
@@ -614,22 +677,24 @@ async fn write_analytics(
             let mut outputs = Vec::new();
             for model in &models {
                 for fit in kept_fits(catalog, model).await? {
+                    let draws = catalog.require(sc_model::DRAWS_TABLE)?;
                     instances
-                        .extend(rows_of(catalog, sc_model::INSTANCES_TABLE, "id", fit.id.0).await?);
+                        .extend(rows_of(source, sc_model::INSTANCES_TABLE, "id", fit.id.0).await?);
                     outputs.extend(
-                        rows_of(catalog, sc_model::OUTPUTS_TABLE, "instance", fit.id.0).await?,
+                        rows_of(source, sc_model::OUTPUTS_TABLE, "instance", fit.id.0).await?,
                     );
                     // One entry per fit, because a posterior's draws are the
-                    // one thing here that can be large: a restore reads them a
-                    // fit at a time rather than as one document.
-                    let draws =
-                        rows_of(catalog, sc_model::DRAWS_TABLE, "instance", fit.id.0).await?;
-                    if !draws.is_empty() {
-                        zip.json(
-                            &format!("analytics/draws/{}.json", fit.id.0),
-                            &Json::Array(draws),
-                        )?;
-                    }
+                    // one thing here that can be large: they are paged out as
+                    // a table's rows are, and read back a batch at a time.
+                    write_table_rows(
+                        source,
+                        &draws,
+                        Some(Expr::col("instance").eq(Expr::lit(fit.id.0))),
+                        zip,
+                        &format!("analytics/draws/{}.ndjson", fit.id.0),
+                        false,
+                    )
+                    .await?;
                 }
             }
             contents.fits = count(instances.len());
@@ -679,10 +744,10 @@ fn bases_first(mut pending: Vec<sc_dataset::DatasetDef>) -> Vec<sc_dataset::Data
     ordered
 }
 
-/// The rows of a system table whose `column` is `id`, as JSON — the fits'
-/// rows, which have no admin-API shape to borrow.
+/// The rows of a system table whose `column` is `id`, as a backup writes them —
+/// the fits' rows, which have no admin-API shape to borrow.
 async fn rows_of(
-    catalog: &Catalog,
+    source: &mut RowSource<'_>,
     table: &str,
     column: &str,
     id: uuid::Uuid,
@@ -690,13 +755,8 @@ async fn rows_of(
     let select = Select::from(Source::table(table.to_owned()))
         .columns(vec![Projection::all()])
         .filter(Expr::col(column).eq(Expr::lit(id)));
-    let fetched = catalog
-        .primary()
-        .query(&Statement::from(select))
-        .await?
-        .try_collect()
-        .await?;
-    Ok(fetched.iter().map(rows::row_to_json).collect())
+    let fetched = source.query(&Statement::from(select)).await?;
+    Ok(fetched.iter().map(values::row_to_json).collect())
 }
 
 /// A Saltcorn UI application's translations, `{ locale: catalogue }` — `None`
@@ -753,23 +813,6 @@ async fn library_of(
     sc_viewpattern::list_library(catalog, app.id).await
 }
 
-/// Every row of a table as JSON, ordered by its primary key where it has a
-/// single one so two backups of an unchanged table are the same file.
-async fn table_rows(catalog: &Catalog, table: &Table) -> Result<Vec<Json>> {
-    let mut select =
-        Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
-    if let Ok(pk) = rows::single_pk(table) {
-        select.order = vec![OrderBy::asc(Expr::col(pk))];
-    }
-    let fetched = catalog
-        .primary()
-        .query(&Statement::from(select))
-        .await?
-        .try_collect()
-        .await?;
-    Ok(fetched.iter().map(rows::row_to_json).collect())
-}
-
 /// A file's permission bits, where the store keeps it on disk and the platform
 /// has them.
 ///
@@ -788,13 +831,14 @@ fn file_mode(_store: &dyn sc_files::FileStore, _path: &str) -> Option<u32> {
     None
 }
 
-/// Every file in a store, depth-first, as store-relative paths.
+/// Every file in a store, depth-first, as store-relative paths with the size
+/// the listing gave (where it gave one).
 ///
 /// Directories are not recorded: an empty directory carries no information a
 /// restore could not recreate, and every non-empty one is implied by the paths of
 /// the files in it. A `node_modules` is not descended into
 /// ([`super::is_installed_dependency`]).
-async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<String>> {
+async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<(String, Option<u64>)>> {
     let mut out = Vec::new();
     let mut pending = vec![dir.to_owned()];
     while let Some(dir) = pending.pop() {
@@ -805,7 +849,7 @@ async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<String>>
             if entry.is_dir {
                 pending.push(entry.path);
             } else {
-                out.push(entry.path);
+                out.push((entry.path, entry.size));
             }
         }
     }
@@ -813,50 +857,279 @@ async fn walk(store: &dyn sc_files::FileStore, dir: &str) -> Result<Vec<String>>
     Ok(out)
 }
 
-/// A zip being built in memory.
+/// Where a backup reads rows from: one snapshot on a backend that has one, the
+/// database itself otherwise ([`sc_db::DatabaseDriver::begin_snapshot`]).
+enum RowSource<'a> {
+    Snapshot(Box<dyn Transaction>),
+    Direct(&'a Catalog),
+}
+
+impl<'a> RowSource<'a> {
+    async fn open(catalog: &'a Catalog) -> Result<RowSource<'a>> {
+        Ok(match catalog.primary().begin_snapshot().await? {
+            Some(tx) => RowSource::Snapshot(tx),
+            None => RowSource::Direct(catalog),
+        })
+    }
+
+    async fn query(&mut self, statement: &Statement) -> Result<Vec<Row>> {
+        let rows = match self {
+            RowSource::Snapshot(tx) => tx.query(statement).await?,
+            RowSource::Direct(catalog) => catalog.primary().query(statement).await?,
+        };
+        rows.try_collect().await
+    }
+
+    /// End the snapshot. It wrote nothing, so there is nothing to commit, and a
+    /// failure to end it is the connection's problem, not the backup's.
+    async fn finish(self) {
+        if let RowSource::Snapshot(tx) = self {
+            let _ = tx.rollback().await;
+        }
+    }
+}
+
+/// The most rows one page of a table is read in.
+const PAGE_ROWS: u64 = 1000;
+
+/// How many rows the first page of a table is: one, because nothing is known
+/// yet about how large a row is, and a first page of a thousand 40 MB rows is
+/// the very thing paging is for. It costs one extra query per table.
+const FIRST_PAGE_ROWS: u64 = 1;
+
+/// The size one page of rows aims at, measured as the lines they become. The
+/// Postgres driver holds a whole result in memory before handing back the
+/// first row, so this — not the table — is what a backup's memory is bounded
+/// by.
+const PAGE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Write the rows of `table` matching `filter` as one NDJSON entry at `path`,
+/// returning how many there were.
+///
+/// With a single primary key the rows are read in pages, by **keyset**: ordered
+/// by the key, each page starting after the last key of the one before, which
+/// costs the same however far into the table it is (an `OFFSET` would rescan
+/// everything it skips) and is what makes two backups of an unchanged table the
+/// same file. The page size adapts: it starts at [`FIRST_PAGE_ROWS`] and after
+/// every page is rescaled so the next one comes to about [`PAGE_BYTES`] (at
+/// most [`PAGE_ROWS`]), so a table of large blobs is read a few rows at a time
+/// and a table of small rows a thousand at a time.
+///
+/// A table with no single key has no order to page by and is read with one
+/// query, still written a row at a time.
+///
+/// `always` writes the entry even when there are no rows — a table's rows file,
+/// which says "this table was empty" — rather than leaving it out, as a fit with
+/// no draws does.
+async fn write_table_rows<W: Write + Seek>(
+    source: &mut RowSource<'_>,
+    table: &Table,
+    filter: Option<Expr>,
+    zip: &mut ZipBuilder<W>,
+    path: &str,
+    always: bool,
+) -> Result<i64> {
+    let pk = rows::single_pk(table).ok();
+    let mut limit = FIRST_PAGE_ROWS;
+    let mut after: Option<Value> = None;
+    let mut count: i64 = 0;
+    let mut started = false;
+    if always {
+        zip.start_rows(path)?;
+        started = true;
+    }
+    loop {
+        let mut select =
+            Select::from(Source::table(table.name.clone())).columns(vec![Projection::all()]);
+        let mut condition = filter.clone();
+        if let Some(pk) = &pk {
+            if let Some(last) = &after {
+                let past = Expr::binary(BinOp::Gt, Expr::col(pk.clone()), Expr::lit(last.clone()));
+                condition = Some(match condition {
+                    Some(filter) => Expr::binary(BinOp::And, filter, past),
+                    None => past,
+                });
+            }
+            select.order = vec![OrderBy::asc(Expr::col(pk.clone()))];
+            select.limit = Some(limit);
+        }
+        select.filter = condition;
+        let page = source.query(&Statement::from(select)).await?;
+        if !started && !page.is_empty() {
+            zip.start_rows(path)?;
+            started = true;
+        }
+        let mut bytes: u64 = 0;
+        for row in &page {
+            bytes += zip.row(&values::row_to_json(row))?;
+            count += 1;
+        }
+        let Some(pk) = &pk else {
+            break;
+        };
+        let read = page.len() as u64;
+        if read < limit {
+            break;
+        }
+        after = match page.last().and_then(|row| row.get(pk)) {
+            Some(Value::Null) | None => {
+                return Err(Error::msg(format!(
+                    "`{}` has a row with no `{pk}`, so its rows cannot be read in order",
+                    table.name
+                )));
+            }
+            Some(last) => Some(last.clone()),
+        };
+        limit = (PAGE_BYTES / (bytes / read).max(1)).clamp(1, PAGE_ROWS);
+    }
+    Ok(count)
+}
+
+/// The size one read of a file store's file copies.
+const CHUNK: usize = 64 * 1024;
+
+/// Copy one store file into the zip a chunk at a time, returning its length.
+async fn copy_file<W: Write + Seek>(
+    store: &dyn sc_files::FileStore,
+    path: &str,
+    size: Option<u64>,
+    zip: &mut ZipBuilder<W>,
+    entry: &str,
+) -> Result<u64> {
+    let mut reader = store.open_read(path, None).await?;
+    zip.start_file(entry, path, size)?;
+    let mut buffer = vec![0u8; CHUNK];
+    let mut written = 0;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|e| Error::file(format!("reading `{path}` from its store: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        zip.write_chunk(entry, &buffer[..read])?;
+        written += read as u64;
+    }
+    Ok(written)
+}
+
+/// Whether a file's name says its bytes are compressed already — an image, a
+/// recording, an archive, a web font, an office document (which is a zip).
+///
+/// Such a file is stored in the backup as it is: deflating a video costs CPU
+/// for a few bytes at best. Everything else is deflated.
+pub(super) fn already_compressed(path: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        // images
+        "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "jxl",
+        // audio and video
+        "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "mp4", "m4v", "mov", "mkv", "webm",
+        "avi", "wmv", "mpg", "mpeg", "3gp", // archives
+        "zip", "gz", "tgz", "xz", "txz", "zst", "bz2", "7z", "rar", "br", "lz4",
+        // fonts
+        "woff", "woff2", // office formats, which are zips
+        "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "jar", "apk",
+    ];
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => EXTENSIONS
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known)),
+        _ => false,
+    }
+}
+
+/// Past this size an entry is written with Zip64 sizes: a 32-bit size field
+/// overflows at 4 GiB, and a writer that finds out half-way through cannot go
+/// back. A little under, for the deflate stream's own overhead.
+const ZIP64_FROM: u64 = 0xFFFF_0000;
+
+/// A zip being written to a file.
 ///
 /// Thin on purpose: it exists so the entry options are stated once and so the
 /// callers above read as a list of what goes into a backup rather than as zip
 /// plumbing.
-struct ZipBuilder {
-    zip: zip::ZipWriter<Cursor<Vec<u8>>>,
-    options: SimpleFileOptions,
+struct ZipBuilder<W: Write + Seek> {
+    zip: zip::ZipWriter<W>,
+    /// One row's line, reused from row to row.
+    line: Vec<u8>,
 }
 
-impl ZipBuilder {
-    fn new() -> ZipBuilder {
+impl<W: Write + Seek> ZipBuilder<W> {
+    fn new(out: W) -> ZipBuilder<W> {
         ZipBuilder {
-            zip: zip::ZipWriter::new(Cursor::new(Vec::new())),
-            options: SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated),
+            zip: zip::ZipWriter::new(out).set_auto_large_file(),
+            line: Vec::new(),
         }
+    }
+
+    fn deflated() -> SimpleFileOptions {
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
     }
 
     /// Add a JSON entry, pretty-printed: a backup is a thing people open and
     /// read, and `git diff` on an unpacked one is a real way to answer "what
     /// changed".
     fn json(&mut self, path: &str, value: &Json) -> Result<()> {
-        let text = serde_json::to_vec_pretty(value)
-            .map_err(|e| Error::msg(format!("could not serialise {path}: {e}")))?;
-        self.bytes(path, &text)
+        self.zip
+            .start_file(path, Self::deflated())
+            .map_err(|e| zip_error(path, &e.to_string()))?;
+        serde_json::to_writer_pretty(&mut self.zip, value)
+            .map_err(|e| zip_error(path, &e.to_string()))
     }
 
-    fn bytes(&mut self, path: &str, bytes: &[u8]) -> Result<()> {
+    /// Start an NDJSON entry of rows. How long it will be is not known, so it
+    /// is written with Zip64 sizes in case it passes 4 GiB.
+    fn start_rows(&mut self, path: &str) -> Result<()> {
         self.zip
-            .start_file(path, self.options)
-            .map_err(|e| zip_error(path, &e.to_string()))?;
+            .start_file(path, Self::deflated().large_file(true))
+            .map_err(|e| zip_error(path, &e.to_string()))
+    }
+
+    /// One row as one compact line of the entry started last, returning the
+    /// line's length. A UTF-8 string never contains a raw newline in JSON, so
+    /// the newline is always the end of the row.
+    fn row(&mut self, row: &Json) -> Result<u64> {
+        self.line.clear();
+        serde_json::to_writer(&mut self.line, row)
+            .map_err(|e| zip_error("a row", &e.to_string()))?;
+        self.line.push(b'\n');
+        self.zip
+            .write_all(&self.line)
+            .map_err(|e| zip_error("a row", &e.to_string()))?;
+        let length = self.line.len() as u64;
+        // A page of large rows must not leave its largest line behind.
+        if self.line.capacity() > 1024 * 1024 {
+            self.line = Vec::new();
+        }
+        Ok(length)
+    }
+
+    /// Start the entry for a store file named `name`, of `size` bytes where
+    /// the store said.
+    fn start_file(&mut self, path: &str, name: &str, size: Option<u64>) -> Result<()> {
+        let options = if already_compressed(name) {
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+        } else {
+            Self::deflated()
+        };
+        let large = size.is_none_or(|size| size >= ZIP64_FROM);
+        self.zip
+            .start_file(path, options.large_file(large))
+            .map_err(|e| zip_error(path, &e.to_string()))
+    }
+
+    fn write_chunk(&mut self, path: &str, bytes: &[u8]) -> Result<()> {
         self.zip
             .write_all(bytes)
-            .map_err(|e| zip_error(path, &e.to_string()))?;
-        Ok(())
+            .map_err(|e| zip_error(path, &e.to_string()))
     }
 
-    fn finish(self) -> Result<Vec<u8>> {
-        Ok(self
-            .zip
+    fn finish(self) -> Result<W> {
+        self.zip
             .finish()
-            .map_err(|e| zip_error("the archive", &e.to_string()))?
-            .into_inner())
+            .map_err(|e| zip_error("the archive", &e.to_string()))
     }
 }
 
@@ -875,4 +1148,105 @@ async fn stored_llm_providers(catalog: &Catalog) -> Result<Vec<sc_llm::LlmProvid
         .into_iter()
         .filter(|def| !sc_llm::is_host_llm_provider(catalog, def.id))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backup::archive::Archive;
+    use crate::backup::spool::SpoolFile;
+
+    #[test]
+    fn a_file_is_stored_when_its_name_says_it_is_compressed_already() {
+        for path in [
+            "clips/intro.mp4",
+            "photos/B.JPG",
+            "dist/app.tar.gz",
+            "fonts/inter.woff2",
+            "report.docx",
+            "archive.7z",
+        ] {
+            assert!(already_compressed(path), "{path} is stored");
+        }
+        for path in [
+            "notes.txt",
+            "data.csv",
+            "index.html",
+            "mp4",
+            "dir/.gz",
+            "dir.zip/readme",
+            "app.js",
+        ] {
+            assert!(!already_compressed(path), "{path} is deflated");
+        }
+    }
+
+    /// The central directory's general-purpose flags of the entry `name`.
+    fn flags_of(zip: &[u8], name: &str) -> u16 {
+        let mut at = 0;
+        while let Some(offset) = zip[at..].windows(4).position(|w| w == b"PK\x01\x02") {
+            let header = at + offset;
+            let flags = u16::from_le_bytes([zip[header + 8], zip[header + 9]]);
+            let length = usize::from(u16::from_le_bytes([zip[header + 28], zip[header + 29]]));
+            if &zip[header + 46..header + 46 + length] == name.as_bytes() {
+                return flags;
+            }
+            at = header + 4;
+        }
+        panic!("no central directory entry for {name}");
+    }
+
+    #[tokio::test]
+    async fn what_the_builder_writes_the_archive_reads_back() {
+        const NOTE: &str = "file-stores/s/files/Ærø/日本.txt";
+        const VIDEO: &str = "file-stores/s/files/clip.mp4";
+        let spool = SpoolFile::new("backup");
+        let mut zip = ZipBuilder::new(std::io::BufWriter::new(spool.create().unwrap()));
+        zip.json("manifest.json", &json!({ "a": 1 })).unwrap();
+        zip.start_rows("tables/t/rows.ndjson").unwrap();
+        let mut lengths = 0;
+        for i in 0..3 {
+            lengths += zip.row(&json!({ "id": i, "name": "Grüße" })).unwrap();
+        }
+        zip.start_file(NOTE, "Ærø/日本.txt", Some(5)).unwrap();
+        zip.write_chunk(NOTE, b"hello").unwrap();
+        zip.start_file(VIDEO, "clip.mp4", None).unwrap();
+        zip.write_chunk(VIDEO, b"not really a video").unwrap();
+        zip.finish().unwrap().into_inner().unwrap();
+
+        // A non-ASCII name is flagged as UTF-8, so every unzip reads it as written.
+        let bytes = std::fs::read(spool.path()).unwrap();
+        assert_ne!(flags_of(&bytes, NOTE) & 0x0800, 0, "the UTF-8 flag");
+        assert_eq!(flags_of(&bytes, VIDEO) & 0x0800, 0, "ASCII needs no flag");
+
+        let archive = Archive::open_zip(spool.path()).unwrap();
+        assert_eq!(archive.json("manifest.json").unwrap()["a"], 1);
+        assert_eq!(
+            archive.names_under("file-stores/s/files/"),
+            vec![VIDEO.to_owned(), NOTE.to_owned()]
+        );
+        let mut reader = archive.rows("tables/t/rows.ndjson");
+        let batch = reader.next_batch().await.unwrap().unwrap();
+        assert_eq!(batch.rows.len(), 3);
+        assert_eq!(batch.rows[2], json!({ "id": 2, "name": "Grüße" }));
+        assert_eq!(
+            lengths,
+            batch
+                .rows
+                .iter()
+                .map(|r| r.to_string().len() as u64 + 1)
+                .sum::<u64>()
+        );
+        assert!(reader.next_batch().await.is_none());
+
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(spool.path()).unwrap()).unwrap();
+        assert_eq!(
+            zip.by_name(VIDEO).unwrap().compression(),
+            zip::CompressionMethod::Stored
+        );
+        assert_eq!(
+            zip.by_name(NOTE).unwrap().compression(),
+            zip::CompressionMethod::Deflated
+        );
+    }
 }

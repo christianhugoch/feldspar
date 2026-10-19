@@ -43,6 +43,22 @@ impl PgTransaction {
         })
     }
 
+    /// Open a read-only transaction that reads every statement from the snapshot
+    /// its first one takes — the isolation `pg_dump` uses
+    /// ([`sc_db::DatabaseDriver::begin_snapshot`]).
+    pub(crate) async fn begin_snapshot(client: Object, dialect: PgDialect) -> Result<Self> {
+        const SQL: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+        sc_log::log_sql(SQL, crate::exec::NO_BINDS);
+        client
+            .batch_execute(SQL)
+            .await
+            .map_err(|e| Error::database(format!("begin snapshot transaction: {e}")))?;
+        Ok(PgTransaction {
+            client: Some(client),
+            dialect,
+        })
+    }
+
     /// Borrow the live connection, or error if the transaction is already
     /// finished.
     fn client(&self) -> Result<&Object> {

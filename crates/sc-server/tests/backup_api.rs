@@ -124,9 +124,9 @@ impl Client {
             }
         }
         let headers = response.headers().clone();
-        // Generous: a backup of a handful of rows and one small file, plus the
-        // zip's own overhead.
-        let bytes = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+        // Generous: the largest backup here is a few tens of megabytes of
+        // blobs and video.
+        let bytes = axum::body::to_bytes(response.into_body(), 512 * 1024 * 1024)
             .await
             .unwrap()
             .to_vec();
@@ -1481,8 +1481,8 @@ async fn what_a_backup_includes_is_remembered_as_what_was_left_out() -> sc_error
     );
     // The rows really were left out of the file, not merely absent from the dialog.
     assert!(has_entry(&bytes, "tables/books/table.json"));
-    assert!(!has_entry(&bytes, "tables/books/rows.json"));
-    assert!(!has_entry(&bytes, "users.json"));
+    assert!(!has_entry(&bytes, "tables/books/rows.ndjson"));
+    assert!(!has_entry(&bytes, "users/users.json"));
     assert!(has_entry(&bytes, "triggers.json"));
 
     // Reopened, the dialog shows the tuned selection…
@@ -1552,9 +1552,9 @@ async fn rows_are_never_backed_up_without_their_table() -> sc_error::Result<()> 
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    assert!(!has_entry(&bytes, "tables/books/rows.json"));
+    assert!(!has_entry(&bytes, "tables/books/rows.ndjson"));
     assert!(!has_entry(&bytes, "tables/books/table.json"));
-    assert!(has_entry(&bytes, "users.json"));
+    assert!(has_entry(&bytes, "users/users.json"));
     Ok(())
 }
 
@@ -3062,8 +3062,8 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
     // everything ticked).
     let archive = std::fs::read(&written).unwrap();
     assert!(has_entry(&archive, "tables/books/table.json"));
-    assert!(!has_entry(&archive, "tables/books/rows.json"));
-    assert!(!has_entry(&archive, "users.json"));
+    assert!(!has_entry(&archive, "tables/books/rows.ndjson"));
+    assert!(!has_entry(&archive, "users/users.json"));
     assert!(has_entry(&archive, "triggers.json"));
     let (_, options) = server.client.send("GET", "/api/backup", None).await;
     assert_eq!(options["include"]["users"], json!(true));
@@ -3145,3 +3145,221 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
 /// each played by a server in this process.
 #[path = "backup_remote.rs"]
 mod remote;
+
+fn db_error(e: impl std::fmt::Display) -> sc_error::Error {
+    sc_error::Error::database(e.to_string())
+}
+
+/// Deterministic, incompressible-looking bytes: `len` of them from `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
+/// Format 2's reason for being: a table of multi-megabyte `bytea` rows, a table
+/// of thousands of small ones, and a file store with a video in it go out
+/// through `/backup/create` and back in through `/backup/upload`, byte for byte.
+///
+/// What it pins down along the way: the blobs are paged out a row or so at a
+/// time and written as base64, not as arrays of numbers; a table longer than
+/// one page is read past its first page by key; non-finite floats and
+/// sub-second timestamps survive; the video is stored in the zip rather than
+/// deflated again, while text is deflated; and a file whose path is not ASCII
+/// keeps its name.
+#[tokio::test]
+async fn large_binary_rows_and_files_stream_through_a_backup_and_restore() -> sc_error::Result<()> {
+    const BLOB: usize = 5 * 1024 * 1024;
+    const SMALL_ROWS: i32 = 2_500;
+    const VIDEO: &str = "clips/intro.mp4";
+    const NOTE: &str = "Ærø/über-日本.txt";
+
+    let mut source = setup().await?;
+    {
+        let client = source.db.client().await?;
+        let db = db_error;
+        client
+            .batch_execute(
+                "CREATE TABLE blobs (id int PRIMARY KEY, name text NOT NULL, data bytea); \
+                 CREATE TABLE readings (id int PRIMARY KEY, value float8, at timestamptz); \
+                 INSERT INTO readings \
+                   SELECT n, n * 0.5, timestamptz '2026-10-19 12:00:00.123456+00' \
+                     + n * interval '1 second' \
+                   FROM generate_series(1, 2497) AS n; \
+                 INSERT INTO readings VALUES \
+                   (2498, 'NaN', NULL), (2499, 'Infinity', NULL), (2500, '-Infinity', NULL);",
+            )
+            .await
+            .map_err(db)?;
+        for id in 1..=4_i32 {
+            let bytes = noise(id as u64, BLOB + id as usize);
+            client
+                .execute(
+                    "INSERT INTO blobs VALUES ($1, $2, $3)",
+                    &[&id, &format!("blob {id}"), &bytes],
+                )
+                .await
+                .map_err(db)?;
+        }
+        // An empty value and a missing one are values too.
+        client
+            .execute(
+                "INSERT INTO blobs VALUES (5, 'empty', ''::bytea), (6, 'none', NULL)",
+                &[],
+            )
+            .await
+            .map_err(db)?;
+    }
+    source.catalog.reload().await?;
+
+    // A store holding a video and a note whose path is not ASCII.
+    let (status, body) = source
+        .client
+        .send(
+            "POST",
+            "/api/file-stores",
+            Some(json!({
+                "name": "media",
+                "description": "",
+                "backend": "local",
+                "config": { "path": source.files.to_string_lossy() },
+                "min_role": null,
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let video = noise(99, 6 * 1024 * 1024 + 7);
+    std::fs::create_dir_all(source.files.join("clips")).unwrap();
+    std::fs::write(source.files.join(VIDEO), &video).unwrap();
+    std::fs::create_dir_all(source.files.join("Ærø")).unwrap();
+    let note = "Grüße aus Ærøskøbing — 日本語\n".repeat(1000);
+    std::fs::write(source.files.join(NOTE), &note).unwrap();
+
+    let archive = backup_everything(&mut source).await;
+
+    // --- what the file holds ------------------------------------------------
+    let manifest: Value = serde_json::from_str(&entry(&archive, "manifest.json")).unwrap();
+    assert_eq!(manifest["version"], json!(2));
+    let rows = entry(&archive, "tables/blobs/rows.ndjson");
+    let lines: Vec<Value> = rows
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one row per line"))
+        .collect();
+    assert_eq!(lines.len(), 6);
+    // Bytes are base64, one string — not an array of numbers.
+    use base64::Engine as _;
+    let first = lines[0]["data"].as_str().expect("bytes as a string");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(first)
+            .unwrap(),
+        noise(1, BLOB + 1)
+    );
+    let readings = entry(&archive, "tables/readings/rows.ndjson");
+    assert_eq!(readings.lines().count(), SMALL_ROWS as usize);
+    assert!(readings.contains(r#""value":"NaN""#), "NaN is named");
+    assert!(readings.contains(r#""value":"-Infinity""#));
+    assert!(
+        readings.contains("2026-10-19T12:00:01.123456Z"),
+        "a timestamp keeps its microseconds"
+    );
+    {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive[..])).unwrap();
+        let mp4 = zip
+            .by_name(&format!("file-stores/media/files/{VIDEO}"))
+            .unwrap();
+        assert_eq!(mp4.compression(), zip::CompressionMethod::Stored);
+        drop(mp4);
+        let text = zip
+            .by_name(&format!("file-stores/media/files/{NOTE}"))
+            .expect("the non-ASCII name survives");
+        assert_eq!(text.compression(), zip::CompressionMethod::Deflated);
+    }
+    let store: Value =
+        serde_json::from_str(&entry(&archive, "file-stores/media/store.json")).unwrap();
+    let listed = store["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == json!(VIDEO))
+        .expect("the video is listed");
+    assert_eq!(listed["size"], json!(video.len()));
+
+    // --- and back, into a server with its own store --------------------------
+    let mut target = setup().await?;
+    sc_catalog::save_file_store(
+        &target.catalog,
+        &FileStoreDef::local("media", target.files.to_string_lossy()),
+    )
+    .await?;
+    sc_catalog::connect_file_store_def(
+        &target.catalog,
+        &sc_catalog::load_file_store_by_name(&target.catalog, "media")
+            .await?
+            .expect("the store just saved"),
+    )?;
+    let report = restore_everything(&mut target, &archive).await;
+    assert!(
+        report_has(&report, "restored", "6 rows into `blobs`"),
+        "{report}"
+    );
+    assert!(
+        report_has(&report, "restored", "2500 rows into `readings`"),
+        "{report}"
+    );
+    assert!(
+        !report_has(&report, "warnings", "may be damaged"),
+        "{report}"
+    );
+    assert!(!report_has(&report, "warnings", "a row of"), "{report}");
+
+    let client = target.db.client().await?;
+    let db = db_error;
+    let blobs = client
+        .query("SELECT id::int4, data FROM blobs ORDER BY id", &[])
+        .await
+        .map_err(db)?;
+    assert_eq!(blobs.len(), 6);
+    for row in &blobs[..4] {
+        let id: i32 = row.get(0);
+        let data: Vec<u8> = row.get(1);
+        assert!(data == noise(id as u64, BLOB + id as usize), "blob {id}");
+    }
+    assert_eq!(blobs[4].get::<_, Option<Vec<u8>>>(1), Some(Vec::new()));
+    assert_eq!(blobs[5].get::<_, Option<Vec<u8>>>(1), None);
+
+    let readings = client
+        .query(
+            "SELECT count(*), \
+                    count(*) FILTER (WHERE value = 'NaN'), \
+                    count(*) FILTER (WHERE value = 'Infinity'), \
+                    count(*) FILTER (WHERE value = '-Infinity'), \
+                    max(at) = timestamptz '2026-10-19 12:41:37.123456+00' \
+             FROM readings",
+            &[],
+        )
+        .await
+        .map_err(db)?;
+    let row = &readings[0];
+    assert_eq!(row.get::<_, i64>(0), i64::from(SMALL_ROWS));
+    assert_eq!(row.get::<_, i64>(1), 1);
+    assert_eq!(row.get::<_, i64>(2), 1);
+    assert_eq!(row.get::<_, i64>(3), 1);
+    assert!(
+        row.get::<_, bool>(4),
+        "the last reading, to the microsecond"
+    );
+
+    assert!(std::fs::read(target.files.join(VIDEO)).unwrap() == video);
+    assert_eq!(
+        std::fs::read_to_string(target.files.join(NOTE)).unwrap(),
+        note
+    );
+    Ok(())
+}

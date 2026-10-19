@@ -10,29 +10,30 @@
 //! step with the first, and the failure would be silent — a field added to the
 //! form and forgotten here, restored as its default a year later. Table *rows*
 //! and file *contents* are the two things with no admin-API shape to borrow, and
-//! they are written as what they are: a JSON array of row objects, and bytes.
+//! they are written as what they are: one JSON object per line, and bytes.
 //!
-//! The layout inside the zip, one directory per kind:
+//! The layout inside the zip, one directory per kind (format version 2):
 //!
 //! ```text
 //! manifest.json                       what this file holds, and what wrote it
-//! tables/<table>/table.json           { table, fields } — the overlay + columns
-//! tables/<table>/rows.json            [ { column: value, … }, … ]
+//! tables/<table>/table.json           { table, fields, constraints } — the overlay + columns
+//! tables/<table>/rows.ndjson          { column: value, … } — one row per line
 //! applications/<subdomain>.json       one application
 //! applications/<subdomain>/views.json its Saltcorn UI views, when chosen
 //! applications/<subdomain>/pages.json its Saltcorn UI pages, when chosen
 //! applications/<subdomain>/library.json its Saltcorn UI library, with the views
 //! applications/<subdomain>/translations.json { locale: catalogue } — a Saltcorn UI app's
-//! file-stores/<store>/store.json      { definition, files: [ { path, mode, meta } ] }
+//! file-stores/<store>/store.json      { definition, files: [ { path, size, mode, … } ] }
 //! file-stores/<store>/files/<path>    the bytes, as they are
-//! users.json                          { roles, users, fields } — hashes included
+//! users/users.json                    { roles, fields } — the admin-added columns
+//! users/rows.ndjson                   the accounts, one per line — hashes included
 //! modules.json                        [ module, … ] — reinstalled from where they came
 //! db-connections.json                 [ connection, … ] — passwords included
 //! analytics/datasets.json             [ dataset, … ]
 //! analytics/models.json               [ model, … ]
 //! analytics/workspaces.json           [ workspace, … ]
 //! analytics/fits.json                 { instances, outputs } — fitted model instances
-//! analytics/draws/<instance>.json     [ draw row, … ] — one entry per fit that sampled
+//! analytics/draws/<instance>.ndjson   draw rows, one per line — one entry per fit that sampled
 //! streams.json                        [ stream, … ] — secrets included
 //! llm-providers.json                  [ { provider, models: [ model, … ] }, … ] — keys included
 //! agents.json                         [ agent, … ]
@@ -40,6 +41,24 @@
 //! triggers.json                       [ trigger, … ] — a workflow's current steps inside
 //! settings/<section>.json             one settings section's stored values
 //! ```
+//!
+//! The format is chosen for **reliability**, in four ways:
+//!
+//! - **Rows are NDJSON.** Each row is whole on its own line, so neither the
+//!   writer nor the restore needs a table in memory, and a damaged line costs
+//!   one row rather than the table. The restore counts the lines it reads
+//!   against the manifest's count and says when they differ.
+//! - **Values are spelt by type** ([`values`]): bytes as base64, `NaN` and the
+//!   infinities by name, timestamps to the nanosecond — and read back by the
+//!   *restoring* table's column types, so a backup moves between SQLite and
+//!   Postgres in either direction.
+//! - **Everything streams** ([`write`], [`archive`]): a backup is written into a
+//!   file and a restore reads from one, with memory bounded by a page of rows
+//!   and the I/O buffers. On Postgres the rows are read from one snapshot.
+//! - **Names are UTF-8 and sizes are 64-bit.** The zip records a non-ASCII entry
+//!   name (a store path, a table name) as UTF-8, and an entry that may pass
+//!   4 GiB is written with Zip64 sizes. A file whose name says it is
+//!   compressed already is stored rather than deflated.
 //!
 //! Three rules the rest of this module implements:
 //!
@@ -61,24 +80,27 @@
 //! restorer sees it, so the upload, the dialog, the selection and the report are
 //! the same ones a Feldspar backup goes through.
 
+mod archive;
 pub mod destination;
 mod restore;
 pub(crate) mod s3;
 pub mod schedule;
 mod sftp;
+mod spool;
 mod v1;
+mod values;
 mod write;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json};
 use uuid::Uuid;
 
 pub use restore::{RestoreReport, inspect, restore_backup};
 pub use schedule::BackupScheduler;
+pub use spool::SpoolFile;
 
 /// Start the automated backups' task (see [`schedule`]).
 ///
@@ -86,14 +108,21 @@ pub use schedule::BackupScheduler;
 /// `build-app` or an admin script must not start writing backups because it
 /// happened to open the same database. The returned handle is the caller's to
 /// abort; dropping it leaves the task running for the life of the process.
+///
+/// The spool directory ([`spool`]) is swept here too, for the same reason: what
+/// a previous `serve` left in it when it died is this one's to clear.
 pub fn start_backup_scheduler(
     catalog: &Arc<sc_catalog::Catalog>,
 ) -> (Arc<BackupScheduler>, tokio::task::JoinHandle<()>) {
+    let swept = spool::sweep();
+    if swept > 0 {
+        sc_log::log_info!("removed {swept} backup spool file(s) left by an earlier run");
+    }
     let scheduler = Arc::new(BackupScheduler::new(Arc::clone(catalog)));
     let handle = scheduler.start();
     (scheduler, handle)
 }
-pub use write::{available, write_backup};
+pub use write::{available, write_backup_to};
 
 /// Where a browser posts a selection and gets a zip back.
 ///
@@ -107,6 +136,10 @@ pub const BACKUP_UPLOAD_ROUTE: &str = "/backup/upload";
 
 /// The manifest's file name inside the zip.
 pub const MANIFEST_FILE: &str = "manifest.json";
+/// The roles and the admin-added columns of the users table.
+pub(crate) const USERS_FILE: &str = "users/users.json";
+/// The user accounts, one per line.
+pub(crate) const USER_ROWS_FILE: &str = "users/rows.ndjson";
 /// The settings section the SSL choice covers — the one section of `_fd_config`
 /// a backup carries. Named here because the writer picks the keys out of it and
 /// the restorer refuses every key that is not in it: a backup must not be a way to
@@ -122,7 +155,10 @@ pub const FORMAT: &str = "feldspar-backup";
 /// The layout version. The system is a prototype and reads only its own current
 /// format (there is no compatibility path, by project policy), so this exists to
 /// *refuse* an older or newer file clearly rather than to migrate one.
-pub const FORMAT_VERSION: i64 = 1;
+///
+/// 2 is the streaming layout: NDJSON rows, typed values, `users/`. A version-1
+/// file is refused by the same check, as any other version is.
+pub const FORMAT_VERSION: i64 = 2;
 /// The Feldspar that wrote the archive, recorded in the manifest beside the
 /// format.
 ///
@@ -137,7 +173,7 @@ pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// The wait is one dialog: upload the file, read what is in it, untick two things,
 /// press the button. Half an hour is generous for that and short enough that a
-/// forgotten upload does not sit in memory for the life of the process.
+/// forgotten upload does not sit on disk for the life of the process.
 const UPLOAD_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// How many uploaded backups are held at once. Two admins, or one admin who
@@ -148,13 +184,14 @@ const MAX_PENDING_UPLOADS: usize = 4;
 ///
 /// The restore is deliberately **two requests** — hand over the file, then say
 /// what to take from it — because the second cannot be composed until the first
-/// has been read. Holding the bytes here is what keeps the archive from being
+/// has been read. Holding the file here is what keeps the archive from being
 /// uploaded twice; the alternative (send the file again with the choice) doubles
 /// the wait on the one operation an admin is already nervous about.
 ///
-/// Bounded on both axes: an upload expires and the oldest is dropped when a fifth
-/// arrives. The bytes never touch disk, so a process that dies loses nothing but
-/// an upload the admin can repeat.
+/// Each upload is a spool file on disk ([`SpoolFile`]), not bytes in memory, and
+/// is deleted when it is taken (the restore that took it drops it when done),
+/// when it expires, and when a fifth upload pushes out the oldest. A process
+/// that dies leaves its uploads to the next one's sweep ([`spool::sweep`]).
 #[derive(Default)]
 pub struct PendingUploads {
     held: Mutex<Vec<Pending>>,
@@ -163,7 +200,7 @@ pub struct PendingUploads {
 struct Pending {
     id: Uuid,
     at: Instant,
-    bytes: Bytes,
+    file: Arc<SpoolFile>,
 }
 
 impl PendingUploads {
@@ -173,7 +210,7 @@ impl PendingUploads {
     }
 
     /// Keep an uploaded archive, returning the token that names it.
-    pub fn keep(&self, bytes: Bytes) -> Result<Uuid> {
+    pub fn keep(&self, file: Arc<SpoolFile>) -> Result<Uuid> {
         let mut held = self.lock()?;
         held.retain(|pending| pending.at.elapsed() < UPLOAD_TTL);
         while held.len() >= MAX_PENDING_UPLOADS {
@@ -183,18 +220,18 @@ impl PendingUploads {
         held.push(Pending {
             id,
             at: Instant::now(),
-            bytes,
+            file,
         });
         Ok(id)
     }
 
     /// Take an archive back out, removing it: a restore consumes its upload, so
     /// pressing the button twice cannot run the restore twice.
-    pub fn take(&self, id: Uuid) -> Result<Bytes> {
+    pub fn take(&self, id: Uuid) -> Result<Arc<SpoolFile>> {
         let mut held = self.lock()?;
         held.retain(|pending| pending.at.elapsed() < UPLOAD_TTL);
         match held.iter().position(|pending| pending.id == id) {
-            Some(index) => Ok(held.remove(index).bytes),
+            Some(index) => Ok(held.remove(index).file),
             None => Err(Error::not_found(
                 "that uploaded backup is no longer held — upload the file again",
             )),
@@ -1132,6 +1169,30 @@ mod tests {
         let selection = Selection::everything(&available);
         assert_eq!(selection.tables, vec!["books", "authors"]);
         assert_eq!(selection.table_data, vec!["books"]);
+    }
+
+    /// An upload is a file on disk, deleted when it is pushed out by a newer
+    /// one or taken by its restore — never left behind.
+    #[test]
+    fn an_upload_is_deleted_when_it_is_evicted_or_taken() {
+        let pending = PendingUploads::new();
+        let mut paths = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..=MAX_PENDING_UPLOADS {
+            let file = SpoolFile::new("upload");
+            std::fs::write(file.path(), b"zip").unwrap();
+            paths.push(file.path().to_owned());
+            ids.push(pending.keep(Arc::new(file)).unwrap());
+        }
+        assert!(!paths[0].exists(), "the oldest was pushed out and deleted");
+        assert!(pending.take(ids[0]).is_err());
+        let taken = pending.take(ids[1]).unwrap();
+        assert!(paths[1].exists(), "held by the restore that took it");
+        drop(taken);
+        assert!(!paths[1].exists(), "and deleted when it is done");
+        assert!(pending.take(ids[1]).is_err(), "a restore cannot run twice");
+        drop(pending);
+        assert!(paths.iter().all(|p| !p.exists()));
     }
 
     #[test]

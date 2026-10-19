@@ -190,6 +190,26 @@ impl SftpConnection {
         Ok(())
     }
 
+    /// Copy the local file `from` to `path`, replacing any file there, without
+    /// reading it whole.
+    pub async fn upload(&self, from: &std::path::Path, path: &str) -> Result<()> {
+        let mut source = tokio::fs::File::open(from)
+            .await
+            .map_err(|e| Error::file(format!("opening `{}`: {e}", from.display())))?;
+        let mut file = self
+            .sftp
+            .create(path)
+            .await
+            .map_err(|e| Error::file(format!("creating `{path}`: {e}")))?;
+        tokio::io::copy(&mut source, &mut file)
+            .await
+            .map_err(|e| Error::file(format!("writing `{path}`: {e}")))?;
+        file.shutdown()
+            .await
+            .map_err(|e| Error::file(format!("writing `{path}`: {e}")))?;
+        Ok(())
+    }
+
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.sftp
             .rename(from, to)

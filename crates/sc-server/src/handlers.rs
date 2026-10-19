@@ -3979,7 +3979,7 @@ pub fn admin_handlers_with(
                     })?;
                 let bytes = crate::posterior::run_zip(&catalog, &models, &model, &instance).await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
-                    bytes: Bytes::from(bytes),
+                    body: crate::handler::DownloadBody::Bytes(Bytes::from(bytes)),
                     content_type: "application/zip".to_owned(),
                     filename: crate::posterior::run_filename(&model, &instance),
                 }))
@@ -4605,9 +4605,16 @@ pub fn admin_handlers_with(
                 sc_config::set_config(&catalog, sc_config::BACKUP_INCLUDE, preferences.to_json())
                     .await?;
 
-                let bytes = crate::backup::write_backup(&catalog, &selection).await?;
+                // Written to the spool directory and served from there, so the
+                // archive is never in memory; an error before the first byte is
+                // still the JSON error every other handler gives.
+                let spool = crate::backup::SpoolFile::new("backup");
+                let len =
+                    crate::backup::write_backup_to(&catalog, &selection, spool.create()?).await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
-                    bytes: Bytes::from(bytes),
+                    body: crate::handler::DownloadBody::File(crate::handler::SpooledFile::open(
+                        spool, len,
+                    )?),
                     content_type: "application/zip".to_owned(),
                     filename: backup_filename(),
                 }))
@@ -4621,9 +4628,12 @@ pub fn admin_handlers_with(
         move |ctx| {
             let pending = pending.clone();
             async move {
-                let bytes = ctx.raw_body()?.clone();
-                let (contents, manifest) = crate::backup::inspect(&bytes)?;
-                let id = pending.keep(bytes)?;
+                let file = ctx
+                    .raw_file
+                    .clone()
+                    .ok_or_else(|| Error::invalid("this handler requires an uploaded file"))?;
+                let (contents, manifest) = crate::backup::inspect(file.path())?;
+                let id = pending.keep(file)?;
                 Ok(HandlerResponse::ok(json!({
                     "id": id.to_string(),
                     "created_at": manifest.get("created_at"),
@@ -4663,9 +4673,11 @@ pub fn admin_handlers_with(
                         ));
                     }
                 };
-                let bytes = pending.take(id)?;
+                // Deleted when this is done with it, whichever way the restore
+                // goes.
+                let file = pending.take(id)?;
                 let report =
-                    crate::backup::restore_backup(&catalog, &apps, &bytes, &selection).await?;
+                    crate::backup::restore_backup(&catalog, &apps, file.path(), &selection).await?;
                 // A restore can create tables and stores an application's API is
                 // projected from, so the mounted apps are re-projected once at the
                 // end — the same thing a schema change through the admin API does.
@@ -8163,9 +8175,17 @@ pub(crate) fn backup_store_def_json(def: &FileStoreDef) -> Json {
 /// `mode` is the file's permission bits where the store is a directory on disk,
 /// so a restore gives an executable script back its executable bit; `None` (an
 /// object store, or a platform without Unix modes) leaves it out.
-pub(crate) fn backup_file_meta_json(path: &str, meta: &FileMeta, mode: Option<u32>) -> Json {
+pub(crate) fn backup_file_meta_json(
+    path: &str,
+    size: Option<u64>,
+    meta: &FileMeta,
+    mode: Option<u32>,
+) -> Json {
     json!({
         "path": path,
+        // What a person reading `store.json` wants to know about a file before
+        // unpacking it; the restore reads the bytes, not this.
+        "size": size,
         "mode": mode,
         "min_role": meta.min_role,
         // Who created the file travels with it. It is an id, so it only means

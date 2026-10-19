@@ -11734,6 +11734,31 @@ ticked; a ticked store's directory — and a git store's Saltcorn-generated depl
 removed (`sc_files::remove_store_from_disk`), which refuses a directory that is or contains `/`,
 `$HOME`, the data directory or the working directory.
 
+**Backups** (`sc-server`'s `backup/`, format version 2). A backup is a zip of the admin API's own
+JSON — each record in the shape its list endpoint returns, read back through the parser its
+create endpoint uses — plus the two things with no admin-API shape: table rows and file bytes.
+Rows are **NDJSON** (`tables/<t>/rows.ndjson`, `users/rows.ndjson` beside `users/users.json`,
+`analytics/draws/<instance>.ndjson`), one compact object per line, with values spelt by type
+(`backup/values.rs`): bytes as padded base64, `NaN`/`Infinity`/`-Infinity` by name, timestamps in
+UTC to the nanosecond, decimals as strings. The restore decodes by the *restoring* column's
+type, so a backup moves between SQLite and Postgres either way, counts each entry's lines
+against the manifest's row count, and inserts 250 rows a statement, falling back to one at a
+time for a batch that fails. **Both directions stream**, so memory is bounded by a page of rows
+and the I/O buffers rather than by the installation: the writer pages each table by keyset on
+its primary key (a one-row first page, then sized to ~8 MB of rows), reads every row through one
+`REPEATABLE READ, READ ONLY` snapshot on Postgres (`DatabaseDriver::begin_snapshot`; SQLite has
+none worth its write lock), and copies store files in 64 KB chunks, storing rather than deflating
+a file whose extension says it is compressed already; entries are Zip64 where they may pass
+4 GiB, and non-ASCII names carry the UTF-8 flag. The zip goes to a file, never a buffer: the CLI
+writes `.FILE.partial` and renames it; the in-app download and an upload awaiting restore are
+spool files in `<data dir>/backup-spool` (on disk, because a tmpfs `/tmp` counts against the
+cgroup's memory), streamed with a `Content-Length` and deleted when done (a boot removes any a
+day old); the scheduler writes a local backup beside its destination and renames it, and streams
+a remote one from the spool over SFTP or as an S3 `PUT` hashed in a first pass. The restore reads
+the zip positionally from disk, a blocking thread per streamed entry handing batches over a
+two-deep channel. A Feldspar backup of another format version is refused; a Saltcorn 1 backup is
+recognised by its entry names and converted in memory into this layout (`backup/v1.rs`).
+
 ### 16.1 Internationalisation
 
 Every string this product puts in front of a person starts out English, and there are three

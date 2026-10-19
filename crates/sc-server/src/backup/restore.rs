@@ -22,9 +22,16 @@
 //! same `*_from_body` the endpoint that creates one uses, which is what makes the
 //! validation identical: an agent restored from a backup is refused for exactly
 //! the reasons an agent typed into the form would be.
+//!
+//! And one arrangement: **the backup is read as the restore goes**, from the file
+//! ([`Archive`]). Metadata documents are read whole; a table's rows arrive a batch
+//! at a time and go in a multi-row `INSERT` per batch; a store's files are copied
+//! a chunk at a time. So a restore needs about as much memory as one batch, not
+//! as much as the backup, and an installation can restore the largest backup it
+//! can take.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 
 use sc_api::{rows, schema_edit};
@@ -36,7 +43,9 @@ use sc_error::{Error, Result};
 use sc_query::{Expr, Insert, Statement};
 use serde_json::{Map, Value as Json};
 
-use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection};
+use super::archive::{Archive, RowReader};
+use super::values;
+use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection, USER_ROWS_FILE, USERS_FILE};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
@@ -75,35 +84,29 @@ impl RestoreReport {
     }
 }
 
-/// The entries of a backup zip, read whole.
-///
-/// The archive is expanded into memory rather than read entry by entry as the
-/// restore proceeds, because the restore is asynchronous and a zip reader's
-/// borrow of the archive is not: holding one across an `await` is not expressible.
-/// The cost is that a restore holds the uncompressed backup in memory, which is
-/// the same trade the writer makes and for a rarer operation.
-pub(super) type Entries = BTreeMap<String, Vec<u8>>;
-
 /// Read a backup's manifest without restoring anything: what the dialog is built
 /// from after the file is uploaded.
-pub fn inspect(archive: &[u8]) -> Result<(Available, Json)> {
-    let entries = read_backup(archive)?;
-    let manifest = manifest_of(&entries)?;
+pub fn inspect(path: &Path) -> Result<(Available, Json)> {
+    let archive = read_backup(path)?;
+    let manifest = manifest_of(&archive)?;
     let contents = manifest
         .get("contents")
         .ok_or_else(|| Error::invalid("this backup's manifest does not say what is in it"))?;
     Ok((Available::from_json(contents)?, Json::Object(manifest)))
 }
 
-/// Restore the parts of `archive` that `selection` asks for.
+/// Restore the parts of the backup at `path` that `selection` asks for.
+///
+/// The file is read as the restore goes ([`Archive`]), so it must stay where it
+/// is until this returns.
 pub async fn restore_backup(
     catalog: &Catalog,
     apps: &AppMounts,
-    archive: &[u8],
+    path: &Path,
     selection: &Selection,
 ) -> Result<RestoreReport> {
-    let entries = read_backup(archive)?;
-    let manifest = manifest_of(&entries)?;
+    let archive = read_backup(path)?;
+    let manifest = manifest_of(&archive)?;
     let contents = Available::from_json(
         manifest
             .get("contents")
@@ -128,7 +131,7 @@ pub async fn restore_backup(
     // at the backup's id for it are pointed at this one as they go in.
     let mut user_ids = BTreeMap::new();
     if selection.users {
-        user_ids = restore_users(catalog, &entries, &mut report).await;
+        user_ids = restore_users(catalog, &archive, contents.users, &mut report).await;
     }
 
     // --- modules, before anything that might be one of theirs ----------------
@@ -137,7 +140,7 @@ pub async fn restore_backup(
     // provider or a model provider — so it is installed before every one of the
     // things below that could name what it supplies.
     if selection.modules {
-        restore_modules(apps, catalog, &entries, &mut report).await;
+        restore_modules(apps, catalog, &archive, &mut report).await;
     }
 
     // --- connections to other databases, before the tables -------------------
@@ -146,7 +149,7 @@ pub async fn restore_backup(
     // SQLite connection is a file in a file store, and saving one needs the
     // store; those wait for the file stores below.
     if selection.db_connections {
-        restore_db_connections(catalog, &entries, false, &mut report).await;
+        restore_db_connections(catalog, &archive, false, &mut report).await;
     }
 
     // --- tables: every table, then every column, then the rows --------------
@@ -157,7 +160,7 @@ pub async fn restore_backup(
     let mut restored_tables = Vec::new();
     let mut deferred_access = Vec::new();
     for name in &selection.tables {
-        match restore_table(catalog, &entries, name).await {
+        match restore_table(catalog, &archive, name).await {
             Ok((line, access)) => {
                 report.did(line);
                 restored_tables.push(name.clone());
@@ -176,10 +179,10 @@ pub async fn restore_backup(
     // make a backup's column order decide whether half of them survived.
     for pass in [FieldPass::Plain, FieldPass::Reference] {
         for name in &restored_tables {
-            restore_fields(catalog, &entries, name, pass, &mut report).await;
+            restore_fields(catalog, &archive, name, pass, &mut report).await;
         }
     }
-    restore_calc_fields(catalog, &entries, &restored_tables, &mut report).await;
+    restore_calc_fields(catalog, &archive, &restored_tables, &mut report).await;
 
     // Rows in dependency order, so a row holding a foreign key is inserted after
     // the row it points at.
@@ -187,25 +190,35 @@ pub async fn restore_backup(
         if !selection.includes_data(&name) {
             continue;
         }
-        match table_rows(&entries, &format!("tables/{name}/rows.json")) {
-            Ok(rows) => {
-                let table = match catalog.require(&name) {
-                    Ok(table) => table,
-                    Err(e) => {
-                        report.skipped(format!("rows of `{name}`: {}", e.causes()));
-                        continue;
-                    }
-                };
-                let rows = repoint_users(&table, rows, &user_ids);
-                let (inserted, problems) = insert_rows(catalog, &table, &rows).await;
-                report.did(format!("{inserted} rows into `{name}`"));
-                for problem in problems {
-                    report.skipped(format!("a row of `{name}`: {problem}"));
-                }
-                rewind_identities(catalog, &table, &mut report).await;
-            }
-            Err(e) => report.skipped(format!("rows of `{name}`: {}", e.causes())),
+        let path = format!("tables/{name}/rows.ndjson");
+        // Absent means "no rows were backed up", which is not an error: a table
+        // can be backed up with its metadata alone.
+        if !archive.contains(&path) {
+            continue;
         }
+        let table = match catalog.require(&name) {
+            Ok(table) => table,
+            Err(e) => {
+                report.skipped(format!("rows of `{name}`: {}", e.causes()));
+                continue;
+            }
+        };
+        let expected = contents
+            .tables
+            .iter()
+            .find(|item| item.name == name)
+            .and_then(|item| item.count);
+        restore_table_rows(
+            catalog,
+            &table,
+            archive.rows(&path),
+            &path,
+            expected,
+            &user_ids,
+            &mut report,
+        )
+        .await;
+        rewind_identities(catalog, &table, &mut report).await;
     }
 
     // The ownership formula and row-level security, now that every column is
@@ -233,26 +246,26 @@ pub async fn restore_backup(
     // judged every row as it arrived — against a table whose other rows were not
     // in yet (§5.1).
     for name in &restored_tables {
-        restore_constraints(catalog, &entries, name, &mut report).await;
+        restore_constraints(catalog, &archive, name, &mut report).await;
     }
 
     // --- file stores: the definition, then the bytes, then the rules ---------
     for name in &selection.file_stores {
-        restore_file_store(catalog, &entries, name, &mut report).await;
+        restore_file_store(catalog, &archive, name, &mut report).await;
     }
     if selection.db_connections {
-        restore_db_connections(catalog, &entries, true, &mut report).await;
+        restore_db_connections(catalog, &archive, true, &mut report).await;
     }
 
     // --- analytics: datasets over the tables, models over the datasets -------
     if selection.analytics {
-        restore_analytics(catalog, apps, &entries, &selection, &mut report).await;
+        restore_analytics(catalog, apps, &archive, &selection, &mut report).await;
     }
 
     // --- streams, before the applications that expose them and the triggers
     // that listen to them ------------------------------------------------------
     if selection.streams {
-        restore_streams(catalog, apps, &entries, &mut report).await;
+        restore_streams(catalog, apps, &archive, &mut report).await;
     }
 
     // --- applications, LLM providers, agents, triggers ----------------------
@@ -262,26 +275,26 @@ pub async fn restore_backup(
     // LLM providers before agents and triggers, because an agent is refused
     // unless the provider (and model) it names exists.
     for subdomain in &selection.applications {
-        restore_application(catalog, apps, &entries, subdomain, &selection, &mut report).await;
+        restore_application(catalog, apps, &archive, subdomain, &selection, &mut report).await;
     }
     // Code libraries after the applications, because one that belongs to an
     // application is refused unless that application exists here.
     if selection.code_libraries {
-        restore_code_libraries(catalog, &entries, &mut report).await;
+        restore_code_libraries(catalog, &archive, &mut report).await;
     }
     if selection.llm_providers {
-        restore_llm_providers(catalog, &entries, &mut report).await;
+        restore_llm_providers(catalog, &archive, &mut report).await;
     }
     if selection.agents {
-        restore_agents(catalog, apps, &entries, &mut report).await;
+        restore_agents(catalog, apps, &archive, &mut report).await;
     }
     if selection.triggers {
-        restore_triggers(catalog, apps, &entries, &selection, &mut report).await;
+        restore_triggers(catalog, apps, &archive, &selection, &mut report).await;
     }
 
     // --- the SSL settings ---------------------------------------------------
     if selection.ssl {
-        let result = restore_ssl(catalog, &entries).await;
+        let result = restore_ssl(catalog, &archive).await;
         report.outcome("the SSL settings", result);
     }
     if selection.settings {
@@ -290,10 +303,10 @@ pub async fn restore_backup(
             .filter(|section| section.name != SSL_SECTION)
         {
             let path = format!("settings/{}.json", section.name);
-            if !entries.contains_key(&path) {
+            if !archive.contains(&path) {
                 continue;
             }
-            let result = restore_settings_section(catalog, &entries, section.name).await;
+            let result = restore_settings_section(catalog, &archive, section.name).await;
             report.outcome(&format!("the {} settings", section.name), result);
         }
     }
@@ -316,11 +329,12 @@ pub async fn restore_backup(
 /// one — what [`repoint_users`] rewrites the rows' references with.
 async fn restore_users(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
+    expected: i64,
     report: &mut RestoreReport,
 ) -> BTreeMap<String, String> {
     let mut repointed = BTreeMap::new();
-    let document = match json_entry(entries, "users.json") {
+    let document = match archive.json(USERS_FILE) {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("users: {}", e.causes()));
@@ -338,7 +352,6 @@ async fn restore_users(
         report.outcome(&format!("role `{name}`"), result);
     }
 
-    let users = array_field(&document, "users");
     if catalog.require(sc_auth::USERS_TABLE).is_err() {
         report.skipped("users: this server has no users table");
         return repointed;
@@ -376,39 +389,61 @@ async fn restore_users(
     };
     let existing = existing_users(catalog).await.unwrap_or_default();
     let mut restored = 0;
-    for user in &users {
-        let email = user
-            .get(sc_auth::COL_EMAIL)
-            .and_then(Json::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let id = user
-            .get(sc_auth::COL_ID)
-            .and_then(Json::as_str)
-            .unwrap_or("");
-        if existing.ids.contains(id) {
-            report.skipped(format!(
-                "user `{email}` is already on this server; kept as it is"
-            ));
-            continue;
+    let mut lines = 0;
+    let mut reader = archive.rows(USER_ROWS_FILE);
+    while let Some(batch) = reader.next_batch().await {
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(e) => {
+                report.skipped(format!("users: {}", e.causes()));
+                break;
+            }
+        };
+        lines += batch.lines;
+        for bad in &batch.bad {
+            report.skipped(format!("a user in `{USER_ROWS_FILE}`, {bad}"));
         }
-        if let Some(here) = existing.by_email.get(&email) {
-            report.skipped(format!(
-                "user `{email}` is already on this server; kept as it is, and the restored \
-                 rows that referred to it refer to it here"
-            ));
-            repointed.insert(id.to_owned(), here.clone());
-            continue;
+        let mut fresh = Vec::with_capacity(batch.rows.len());
+        for user in batch.rows {
+            let email = user
+                .get(sc_auth::COL_EMAIL)
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let id = user
+                .get(sc_auth::COL_ID)
+                .and_then(Json::as_str)
+                .unwrap_or("");
+            if existing.ids.contains(id) {
+                report.skipped(format!(
+                    "user `{email}` is already on this server; kept as it is"
+                ));
+                continue;
+            }
+            if let Some(here) = existing.by_email.get(&email) {
+                report.skipped(format!(
+                    "user `{email}` is already on this server; kept as it is, and the restored \
+                     rows that referred to it refer to it here"
+                ));
+                repointed.insert(id.to_owned(), here.clone());
+                continue;
+            }
+            fresh.push(user);
         }
-        let (inserted, problems) = insert_rows(catalog, &table, std::slice::from_ref(user)).await;
+        let (inserted, problems) = insert_rows(catalog, &table, &fresh).await;
         restored += inserted;
-        for problem in problems {
+        for (index, problem) in problems {
+            let email = fresh[index]
+                .get(sc_auth::COL_EMAIL)
+                .and_then(Json::as_str)
+                .unwrap_or("");
             report.skipped(format!("user `{email}`: {problem}"));
         }
     }
     if restored > 0 {
         report.did(format!("{restored} users"));
     }
+    check_count(report, USER_ROWS_FILE, "users", Some(expected), lines);
     repointed
 }
 
@@ -506,10 +541,10 @@ async fn restore_role(catalog: &Catalog, value: &Json) -> Result<String> {
 /// apply (a new table with neither).
 async fn restore_table(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     name: &str,
 ) -> Result<(String, Option<schema_edit::TableSettings>)> {
-    let document = json_entry(entries, &format!("tables/{name}/table.json"))?;
+    let document = archive.json(&format!("tables/{name}/table.json"))?;
     let table = document
         .get("table")
         .and_then(Json::as_object)
@@ -584,11 +619,11 @@ impl FieldPass {
 /// table has not got, with their names.
 fn missing_fields(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     name: &str,
     pass: FieldPass,
 ) -> Result<Vec<(String, Map<String, Json>)>> {
-    let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
+    let Ok(document) = archive.json(&format!("tables/{name}/table.json")) else {
         return Ok(Vec::new());
     };
     let live = catalog.require(name)?;
@@ -613,12 +648,12 @@ fn missing_fields(
 /// be a migration nobody asked for.
 async fn restore_fields(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     name: &str,
     pass: FieldPass,
     report: &mut RestoreReport,
 ) {
-    let missing = match missing_fields(catalog, entries, name, pass) {
+    let missing = match missing_fields(catalog, archive, name, pass) {
         Ok(missing) => missing,
         Err(e) => {
             report.skipped(format!("columns of `{name}`: {}", e.causes()));
@@ -642,13 +677,13 @@ async fn restore_fields(
 /// is still refused then is reported, with the reason the last attempt gave.
 async fn restore_calc_fields(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     tables: &[String],
     report: &mut RestoreReport,
 ) {
     let mut pending = Vec::new();
     for name in tables {
-        match missing_fields(catalog, entries, name, FieldPass::Calc) {
+        match missing_fields(catalog, archive, name, FieldPass::Calc) {
             Ok(missing) => pending.extend(
                 missing
                     .into_iter()
@@ -695,11 +730,11 @@ async fn restore_calc_fields(
 /// over no columns, which is not the index the backup described.
 async fn restore_constraints(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     name: &str,
     report: &mut RestoreReport,
 ) {
-    let Ok(document) = json_entry(entries, &format!("tables/{name}/table.json")) else {
+    let Ok(document) = archive.json(&format!("tables/{name}/table.json")) else {
         return;
     };
     for value in array_field(&document, "constraints") {
@@ -871,10 +906,6 @@ fn order_by_references(catalog: &Catalog, tables: &[String]) -> Vec<String> {
     done
 }
 
-/// Insert rows as they were backed up — primary keys included, so a foreign key
-/// pointing at one still points at it.
-///
-/// Not through [`rows::create_row`], and that is the substance of this function:
 /// Wind every identity column of `table` past the keys the restore just wrote.
 ///
 /// A backup carries its rows' keys and they are inserted as given — the identity
@@ -910,49 +941,177 @@ async fn rewind_identities(catalog: &Catalog, table: &Table, report: &mut Restor
     }
 }
 
+/// Read one table's rows out of the backup a batch at a time and put them in,
+/// reporting what went in, every row that did not, and a count that does not
+/// match the manifest's.
+async fn restore_table_rows(
+    catalog: &Catalog,
+    table: &Table,
+    mut reader: RowReader,
+    path: &str,
+    expected: Option<i64>,
+    user_ids: &BTreeMap<String, String>,
+    report: &mut RestoreReport,
+) {
+    let name = &table.name;
+    let mut inserted = 0;
+    let mut lines = 0;
+    while let Some(batch) = reader.next_batch().await {
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(e) => {
+                report.skipped(format!("rows of `{name}`: {}", e.causes()));
+                break;
+            }
+        };
+        lines += batch.lines;
+        for bad in &batch.bad {
+            report.skipped(format!("a row of `{name}` in `{path}`, {bad}"));
+        }
+        let rows = repoint_users(table, batch.rows, user_ids);
+        let (count, problems) = insert_rows(catalog, table, &rows).await;
+        inserted += count;
+        for (_, problem) in problems {
+            report.skipped(format!("a row of `{name}`: {problem}"));
+        }
+    }
+    report.did(format!("{inserted} rows into `{name}`"));
+    check_count(report, path, &format!("`{name}`"), expected, lines);
+}
+
+/// Say so when an entry holds a different number of rows from the number the
+/// manifest recorded for it: a file cut short, or edited by hand.
+fn check_count(
+    report: &mut RestoreReport,
+    path: &str,
+    what: &str,
+    expected: Option<i64>,
+    read: u64,
+) {
+    if let Some(expected) = expected
+        && i64::try_from(read).ok() != Some(expected)
+    {
+        report.skipped(format!(
+            "the backup says it holds {expected} rows of {what}, but `{path}` has {read} — the \
+             file may be damaged"
+        ));
+    }
+}
+
+/// Insert rows as they were backed up — primary keys included, so a foreign key
+/// pointing at one still points at it.
+///
+/// Not through [`rows::create_row`], and that is the substance of this function:
 /// that path raises the table's insert **triggers** (§10.2), which during a
 /// restore would fire an installation's automation for every historical row it
 /// ever had. A restore puts data back; it does not replay it.
 ///
-/// Returns how many rows went in, and one message per row that did not.
-async fn insert_rows(catalog: &Catalog, table: &Table, values: &[Json]) -> (usize, Vec<String>) {
+/// One multi-row `INSERT` per run of rows with the same columns (every run, for
+/// rows this system wrote), so a table goes back in at hundreds of rows a
+/// statement rather than one. A statement inserts all its rows or none, so when
+/// one fails its rows are tried again one at a time, and the one bad row is
+/// reported and skipped as it always was rather than taking the batch with it.
+///
+/// Returns how many rows went in, and for each that did not, its index in
+/// `rows` and why.
+async fn insert_rows(
+    catalog: &Catalog,
+    table: &Table,
+    rows: &[Json],
+) -> (usize, Vec<(usize, String)>) {
     let mut inserted = 0;
     let mut problems = Vec::new();
-    for value in values {
-        match insert_row(catalog, table, value).await {
-            Ok(()) => inserted += 1,
-            Err(e) => problems.push(e.causes()),
+    for (start, run) in runs(rows) {
+        match insert_batch(catalog, table, run).await {
+            Ok(()) => inserted += run.len(),
+            Err(e) if run.len() == 1 => problems.push((start, e.causes())),
+            Err(_) => {
+                for (offset, value) in run.iter().enumerate() {
+                    match insert_row(catalog, table, value).await {
+                        Ok(()) => inserted += 1,
+                        Err(e) => problems.push((start + offset, e.causes())),
+                    }
+                }
+            }
         }
     }
     (inserted, problems)
 }
 
+/// `values` cut into runs of at most [`super::archive::BATCH_ROWS`] rows with
+/// the same columns, each with the index it starts at.
+///
+/// The same columns, because one `INSERT` names one column list: a row without
+/// a column must leave it to its default, which a `NULL` in a shared statement
+/// would not. Rows this system wrote all carry every column; a Saltcorn 1
+/// import's need not.
+fn runs(values: &[Json]) -> Vec<(usize, &[Json])> {
+    let same = |a: &Json, b: &Json| match (a.as_object(), b.as_object()) {
+        (Some(a), Some(b)) => a.len() == b.len() && a.keys().eq(b.keys()),
+        _ => false,
+    };
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < values.len() {
+        let mut end = start + 1;
+        while end < values.len()
+            && end - start < super::archive::BATCH_ROWS
+            && same(&values[start], &values[end])
+        {
+            end += 1;
+        }
+        out.push((start, &values[start..end]));
+        start = end;
+    }
+    out
+}
+
+/// One row, alone — what [`insert_rows`] falls back to.
 async fn insert_row(catalog: &Catalog, table: &Table, value: &Json) -> Result<()> {
-    let obj = value
+    insert_batch(catalog, table, std::slice::from_ref(value)).await
+}
+
+/// One `INSERT` of rows that carry the same columns — the first row's, less
+/// the ones this table has nowhere to put:
+///
+/// - a **calculated** field has no column to write (§3.4); it is computed on
+///   read, and the backup carries the value it had;
+/// - a column **this server has not got**: the backup is from an installation
+///   whose table had more in it. Skipped rather than failing the row, because
+///   the row is still worth having.
+async fn insert_batch(catalog: &Catalog, table: &Table, batch: &[Json]) -> Result<()> {
+    let Some(first) = batch.first() else {
+        return Ok(());
+    };
+    let first = first
         .as_object()
         .ok_or_else(|| Error::invalid("a row must be an object"))?;
-    let mut columns = Vec::with_capacity(obj.len());
-    let mut literals = Vec::with_capacity(obj.len());
-    for (column, json) in obj {
-        match table.field(column) {
-            // A calculated field has no column to write (§3.4); it is computed
-            // on read, and the backup carries the value it had.
-            Some(field) if field.is_calc() => continue,
-            // A column this server has not got: the backup is from an
-            // installation whose table had more in it. Skipped rather than
-            // failing the row, because the row is still worth having.
-            None => continue,
-            Some(_) => {}
-        }
-        columns.push(column.clone());
-        literals.push(Expr::lit(rows::column_value(table, column, json)?));
-    }
+    let columns: Vec<String> = first
+        .keys()
+        .filter(|c| table.field(c).is_some_and(|f| !f.is_calc()))
+        .cloned()
+        .collect();
     if columns.is_empty() {
         return Err(Error::invalid(
             "no column of this row matches the table's columns",
         ));
     }
-    let insert = Insert::row(table.name.clone(), columns, literals);
+    let mut rows = Vec::with_capacity(batch.len());
+    for value in batch {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| Error::invalid("a row must be an object"))?;
+        let mut row = Vec::with_capacity(columns.len());
+        for column in &columns {
+            let json = obj.get(column).unwrap_or(&Json::Null);
+            row.push(Expr::lit(values::column_value(table, column, json)?));
+        }
+        rows.push(row);
+    }
+    let insert = Insert {
+        rows,
+        ..Insert::row(table.name.clone(), columns, Vec::new())
+    };
     catalog
         .primary()
         .query(&Statement::from(insert))
@@ -988,11 +1147,11 @@ async fn insert_row(catalog: &Catalog, table: &Table, value: &Json) -> Result<()
 /// over it would corrupt it rather than restore it.
 async fn restore_file_store(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     name: &str,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, &format!("file-stores/{name}/store.json")) {
+    let document = match archive.json(&format!("file-stores/{name}/store.json")) {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("file store `{name}`: {}", e.causes()));
@@ -1000,20 +1159,21 @@ async fn restore_file_store(
         }
     };
     let prefix = format!("file-stores/{name}/files/");
-    let files: Vec<(&str, &Vec<u8>)> = entries
-        .iter()
-        .filter_map(|(entry, bytes)| Some((entry.strip_prefix(&prefix)?, bytes)))
-        .filter(|(path, _)| !path.is_empty())
+    let files: Vec<String> = archive
+        .names_under(&prefix)
+        .into_iter()
+        .filter_map(|entry| entry.strip_prefix(&prefix).map(str::to_owned))
+        .filter(|path| !path.is_empty())
         .collect();
     // A backup written before `node_modules` was left out still carries it, and
     // a copy of it does not run here ([`super::is_installed_dependency`]).
     let installed = files
         .iter()
-        .filter(|(path, _)| super::is_installed_dependency(path))
+        .filter(|path| super::is_installed_dependency(path))
         .count();
-    let files: Vec<(&str, &Vec<u8>)> = files
+    let files: Vec<String> = files
         .into_iter()
-        .filter(|(path, _)| !super::is_installed_dependency(path))
+        .filter(|path| !super::is_installed_dependency(path))
         .collect();
     if installed > 0 {
         report.skipped(format!(
@@ -1022,7 +1182,7 @@ async fn restore_file_store(
             counted(installed, "file", "files")
         ));
     }
-    let carries_checkout = files.iter().any(|(path, _)| is_git_path(path));
+    let carries_checkout = files.iter().any(|path| is_git_path(path));
 
     // Set when this restore defined a git store whose checkout is in the backup:
     // the store is connected once that checkout has been written.
@@ -1080,7 +1240,8 @@ async fn restore_file_store(
         }
     }
     let mut kept_git = false;
-    for (path, bytes) in files {
+    for path in &files {
+        let path = path.as_str();
         // The store itself refuses a path that escapes its root, and this refuses
         // it before the bytes are read: a zip is a file somebody can hand us, and
         // `..` in an entry name is the oldest trick there is.
@@ -1102,8 +1263,11 @@ async fn restore_file_store(
         if mode.is_some() {
             make_writable(store.as_ref(), path);
         }
-        match store.write(path, bytes.clone().into()).await {
-            Ok(()) => written += 1,
+        match archive
+            .copy_into(&format!("{prefix}{path}"), store.as_ref(), path)
+            .await
+        {
+            Ok(_) => written += 1,
             Err(e) => {
                 report.skipped(format!("file `{path}` of `{name}`: {}", e.causes()));
                 continue;
@@ -1290,13 +1454,13 @@ async fn define_store(
 async fn restore_application(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     key: &str,
     selection: &Selection,
     report: &mut RestoreReport,
 ) {
     let saved = async {
-        let document = json_entry(entries, &format!("applications/{key}.json"))?;
+        let document = archive.json(&format!("applications/{key}.json"))?;
         match document
             .get("id")
             .and_then(Json::as_str)
@@ -1326,8 +1490,8 @@ async fn restore_application(
     let subdomain = app.subdomain.clone();
 
     // Before the build: mounting a Saltcorn UI application is reading its views.
-    restore_views_and_pages(catalog, entries, key, &app, selection, report).await;
-    restore_translations(catalog, entries, key, &app, report).await;
+    restore_views_and_pages(catalog, archive, key, &app, selection, report).await;
+    restore_translations(catalog, archive, key, &app, report).await;
 
     // A framework constructed from a factory (Saltcorn UI) has no build and no
     // Build button, so "build it once its source is in place" would send the
@@ -1454,7 +1618,7 @@ async fn free_subdomain(catalog: &Catalog, wanted: &str) -> Result<String> {
 /// leads nowhere before somebody clicks it.
 async fn restore_views_and_pages(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     key: &str,
     app: &sc_app::Application,
     selection: &Selection,
@@ -1462,12 +1626,12 @@ async fn restore_views_and_pages(
 ) {
     let wanted = |kind: &str, chosen: bool| {
         let path = format!("applications/{key}/{kind}.json");
-        (chosen && entries.contains_key(&path)).then_some(path)
+        (chosen && archive.contains(&path)).then_some(path)
     };
     let mut library = Vec::new();
     if let Some(path) = wanted("library", selection.views) {
         let replaced = async {
-            let document = json_entry(entries, &path)?;
+            let document = archive.json(&path)?;
             for item in sc_viewpattern::list_library(catalog, app.id).await? {
                 sc_viewpattern::delete_library_item(catalog, app.id, item.id).await?;
             }
@@ -1519,7 +1683,7 @@ async fn restore_views_and_pages(
     let mut views = Vec::new();
     if let Some(path) = wanted("views", selection.views) {
         let replaced = async {
-            let document = json_entry(entries, &path)?;
+            let document = archive.json(&path)?;
             for view in sc_viewpattern::list_views(catalog, app.id).await? {
                 sc_viewpattern::delete_view(catalog, app.id, &view.name).await?;
             }
@@ -1560,7 +1724,7 @@ async fn restore_views_and_pages(
     let mut pages = Vec::new();
     if let Some(path) = wanted("pages", selection.pages) {
         let replaced = async {
-            let document = json_entry(entries, &path)?;
+            let document = archive.json(&path)?;
             for page in sc_viewpattern::list_pages(catalog, app.id).await? {
                 sc_viewpattern::delete_page(catalog, app.id, &page.name).await?;
             }
@@ -1737,8 +1901,8 @@ fn counted(count: usize, one: &str, many: &str) -> String {
 /// overwrite them. Models of the backup's that it lacks are still added to it,
 /// never as its default, so an agent naming one of them can be restored; a model
 /// it already has is left alone.
-async fn restore_llm_providers(catalog: &Catalog, entries: &Entries, report: &mut RestoreReport) {
-    let document = match json_entry(entries, "llm-providers.json") {
+async fn restore_llm_providers(catalog: &Catalog, archive: &Archive, report: &mut RestoreReport) {
+    let document = match archive.json("llm-providers.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("LLM providers: {}", e.causes()));
@@ -1851,8 +2015,8 @@ async fn restore_llm_model(
 /// Restore the code libraries (TODO F3). One already defined here under the
 /// same name and scope is kept, as a stream is: restore only adds. Each is
 /// compile-checked as an admin's save is.
-async fn restore_code_libraries(catalog: &Catalog, entries: &Entries, report: &mut RestoreReport) {
-    let document = match json_entry(entries, "code-libraries.json") {
+async fn restore_code_libraries(catalog: &Catalog, archive: &Archive, report: &mut RestoreReport) {
+    let document = match archive.json("code-libraries.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("code libraries: {}", e.causes()));
@@ -1897,10 +2061,10 @@ async fn restore_code_libraries(catalog: &Catalog, entries: &Entries, report: &m
 async fn restore_agents(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "agents.json") {
+    let document = match archive.json("agents.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("agents: {}", e.causes()));
@@ -1940,11 +2104,11 @@ async fn restore_agents(
 async fn restore_triggers(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     selection: &Selection,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "triggers.json") {
+    let document = match archive.json("triggers.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("triggers: {}", e.causes()));
@@ -2009,8 +2173,8 @@ async fn restore_triggers(
 /// The SSL settings, checked against their declarations on the way in like any
 /// other save. Not applied to the running listener: a certificate takes effect
 /// when the server restarts, which is what the settings screen says too.
-async fn restore_ssl(catalog: &Catalog, entries: &Entries) -> Result<String> {
-    match restore_settings_section(catalog, entries, SSL_SECTION).await? {
+async fn restore_ssl(catalog: &Catalog, archive: &Archive) -> Result<String> {
+    match restore_settings_section(catalog, archive, SSL_SECTION).await? {
         detail if detail.is_empty() => Ok("they take effect when the server restarts".to_owned()),
         detail => Ok(detail),
     }
@@ -2021,10 +2185,10 @@ async fn restore_ssl(catalog: &Catalog, entries: &Entries) -> Result<String> {
 /// nothing to restore, or when keys this host pins were kept.
 async fn restore_settings_section(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     section: &str,
 ) -> Result<String> {
-    let document = json_entry(entries, &format!("settings/{section}.json"))?;
+    let document = archive.json(&format!("settings/{section}.json"))?;
     let values = document
         .as_object()
         .ok_or_else(|| Error::invalid(format!("the {section} settings must be an object")))?;
@@ -2117,10 +2281,10 @@ async fn restore_workflow(
 async fn restore_modules(
     apps: &AppMounts,
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "modules.json") {
+    let document = match archive.json("modules.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("modules: {}", e.causes()));
@@ -2187,11 +2351,11 @@ async fn restore_modules(
 /// repair.
 async fn restore_db_connections(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     sqlite: bool,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "db-connections.json") {
+    let document = match archive.json("db-connections.json") {
         Ok(document) => document,
         Err(e) => {
             // Said once, by the first pass.
@@ -2278,10 +2442,10 @@ async fn restore_db_connections(
 async fn restore_streams(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "streams.json") {
+    let document = match archive.json("streams.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("streams: {}", e.causes()));
@@ -2345,17 +2509,17 @@ async fn restore_streams(
 /// translations its visitors are reading.
 async fn restore_translations(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     key: &str,
     app: &sc_app::Application,
     report: &mut RestoreReport,
 ) {
     let path = format!("applications/{key}/translations.json");
-    if !entries.contains_key(&path) || sc_app::app_source_from_config(&app.framework).is_ok() {
+    if !archive.contains(&path) || sc_app::app_source_from_config(&app.framework).is_ok() {
         return;
     }
     let result = async {
-        let document = json_entry(entries, &path)?;
+        let document = archive.json(&path)?;
         let catalogues = document
             .as_object()
             .ok_or_else(|| Error::invalid("translations must be an object of locales"))?;
@@ -2397,35 +2561,35 @@ async fn restore_translations(
 async fn restore_analytics(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     selection: &Selection,
     report: &mut RestoreReport,
 ) {
     // The backup's dataset ids, as the ids they have here.
     let mut datasets: BTreeMap<String, String> = BTreeMap::new();
-    if entries.contains_key("analytics/datasets.json") {
-        restore_datasets(catalog, entries, &mut datasets, report).await;
+    if archive.contains("analytics/datasets.json") {
+        restore_datasets(catalog, archive, &mut datasets, report).await;
     }
     // The backup's model ids, for the models this restore created.
     let mut models: BTreeMap<String, uuid::Uuid> = BTreeMap::new();
-    if entries.contains_key("analytics/models.json") {
-        restore_models(catalog, apps, entries, &datasets, &mut models, report).await;
+    if archive.contains("analytics/models.json") {
+        restore_models(catalog, apps, archive, &datasets, &mut models, report).await;
     }
-    if selection.fits && entries.contains_key("analytics/fits.json") {
-        restore_fits(catalog, entries, &models, report).await;
+    if selection.fits && archive.contains("analytics/fits.json") {
+        restore_fits(catalog, archive, &models, report).await;
     }
-    if entries.contains_key("analytics/workspaces.json") {
-        restore_workspaces(catalog, entries, report).await;
+    if archive.contains("analytics/workspaces.json") {
+        restore_workspaces(catalog, archive, report).await;
     }
 }
 
 async fn restore_datasets(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     ids: &mut BTreeMap<String, String>,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "analytics/datasets.json") {
+    let document = match archive.json("analytics/datasets.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("datasets: {}", e.causes()));
@@ -2479,12 +2643,12 @@ async fn restore_datasets(
 async fn restore_models(
     catalog: &Catalog,
     apps: &AppMounts,
-    entries: &Entries,
+    archive: &Archive,
     datasets: &BTreeMap<String, String>,
     created: &mut BTreeMap<String, uuid::Uuid>,
     report: &mut RestoreReport,
 ) {
-    let document = match json_entry(entries, "analytics/models.json") {
+    let document = match archive.json("analytics/models.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("models: {}", e.causes()));
@@ -2574,12 +2738,12 @@ async fn restore_models(
 /// in one after another and a failure is reported against the fit.
 async fn restore_fits(
     catalog: &Catalog,
-    entries: &Entries,
+    archive: &Archive,
     models: &BTreeMap<String, uuid::Uuid>,
     report: &mut RestoreReport,
 ) {
     let result = async {
-        let document = json_entry(entries, "analytics/fits.json")?;
+        let document = archive.json("analytics/fits.json")?;
         let instances = catalog.require(sc_model::INSTANCES_TABLE)?;
         let outputs = catalog.require(sc_model::OUTPUTS_TABLE)?;
         let draws = catalog.require(sc_model::DRAWS_TABLE)?;
@@ -2611,10 +2775,16 @@ async fn restore_fits(
                 {
                     insert_row(catalog, &outputs, output).await?;
                 }
-                let path = format!("analytics/draws/{id}.json");
-                if entries.contains_key(&path) {
-                    let rows = array_list(&json_entry(entries, &path)?);
-                    insert_rows_batched(catalog, &draws, &rows).await?;
+                let path = format!("analytics/draws/{id}.ndjson");
+                if archive.contains(&path) {
+                    let mut reader = archive.rows(&path);
+                    while let Some(batch) = reader.next_batch().await {
+                        let batch = batch?;
+                        if let Some(bad) = batch.bad.first() {
+                            return Err(Error::invalid(format!("`{path}`, {bad}")));
+                        }
+                        insert_rows_strictly(catalog, &draws, &batch.rows).await?;
+                    }
                 }
                 Ok::<(), Error>(())
             }
@@ -2630,50 +2800,19 @@ async fn restore_fits(
     report.outcome("model fits", result);
 }
 
-/// Rows into a table a batch at a time — a posterior's draws, which one
-/// `INSERT` a row would take minutes over. Every row must carry the same
-/// columns, which rows written by [`super::write`] do.
-async fn insert_rows_batched(catalog: &Catalog, table: &Table, values: &[Json]) -> Result<()> {
-    const BATCH: usize = 250;
-    for chunk in values.chunks(BATCH) {
-        let Some(first) = chunk.first().and_then(Json::as_object) else {
-            continue;
-        };
-        let columns: Vec<String> = first
-            .keys()
-            .filter(|c| table.field(c).is_some_and(|f| !f.is_calc()))
-            .cloned()
-            .collect();
-        let mut rows = Vec::with_capacity(chunk.len());
-        for value in chunk {
-            let obj = value
-                .as_object()
-                .ok_or_else(|| Error::invalid("a row must be an object"))?;
-            let mut row = Vec::with_capacity(columns.len());
-            for column in &columns {
-                let json = obj.get(column).unwrap_or(&Json::Null);
-                row.push(Expr::lit(rows::column_value(table, column, json)?));
-            }
-            rows.push(row);
-        }
-        let insert = Insert {
-            rows,
-            ..Insert::row(table.name.clone(), columns, Vec::new())
-        };
-        catalog
-            .primary()
-            .query(&Statement::from(insert))
-            .await?
-            .try_collect()
-            .await?;
+/// Rows into a table a batch at a time, all or an error — a posterior's draws,
+/// which belong to their fit and are not worth having in part.
+async fn insert_rows_strictly(catalog: &Catalog, table: &Table, rows: &[Json]) -> Result<()> {
+    for (_, run) in runs(rows) {
+        insert_batch(catalog, table, run).await?;
     }
     Ok(())
 }
 
 /// Analytics workspaces. One already here — by id — is kept: workspace names
 /// are not unique, so the id is the only thing that says it is the same one.
-async fn restore_workspaces(catalog: &Catalog, entries: &Entries, report: &mut RestoreReport) {
-    let document = match json_entry(entries, "analytics/workspaces.json") {
+async fn restore_workspaces(catalog: &Catalog, archive: &Archive, report: &mut RestoreReport) {
+    let document = match archive.json("analytics/workspaces.json") {
         Ok(document) => document,
         Err(e) => {
             report.skipped(format!("workspaces: {}", e.causes()));
@@ -2738,44 +2877,26 @@ async fn restore_workspaces(catalog: &Catalog, entries: &Entries, report: &mut R
 
 // --- reading the file ----------------------------------------------------------
 
-/// The entries to restore from: the zip's own, or — for a **Saltcorn 1** backup —
-/// what [`super::v1::convert`] makes of them.
+/// The archive to restore from: the zip itself, or — for a **Saltcorn 1**
+/// backup — what [`super::v1::convert`] makes of it.
 ///
 /// The one place the two kinds of file meet. Everything downstream reads this
 /// system's layout and cannot tell which it was handed, which is the point: a v1
 /// import is inspected, chosen from, restored and reported by the same code as
-/// any other backup.
-fn read_backup(archive: &[u8]) -> Result<Entries> {
-    let entries = read_zip(archive)?;
-    if !entries.contains_key(MANIFEST_FILE) && super::v1::is_v1_backup(&entries) {
-        return super::v1::convert(&entries);
+/// any other backup. A v1 backup is told apart by its entry *names*, before any
+/// of it is read, and only then expanded into memory for the conversion (as v1
+/// imports always were); a Feldspar backup is read from the file as the restore
+/// goes.
+fn read_backup(path: &Path) -> Result<Archive> {
+    let archive = Archive::open_zip(path)?;
+    let names = archive.names();
+    if !names.iter().any(|n| n == MANIFEST_FILE)
+        && super::v1::is_v1_backup(names.iter().map(String::as_str))
+    {
+        let converted = super::v1::convert(&archive.expand()?)?;
+        return Ok(Archive::Memory(Arc::new(converted)));
     }
-    Ok(entries)
-}
-
-/// Expand a zip into path → bytes, refusing anything that is not a zip.
-fn read_zip(archive: &[u8]) -> Result<Entries> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|e| {
-        Error::invalid(format!(
-            "this file is not a zip archive, so it is not a Saltcorn backup: {e}"
-        ))
-    })?;
-    let mut out = Entries::new();
-    for index in 0..zip.len() {
-        let mut entry = zip.by_index(index).map_err(|e| {
-            Error::invalid(format!("the backup's entry {index} cannot be read: {e}"))
-        })?;
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name().to_owned();
-        let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|e| Error::invalid(format!("`{name}` cannot be read from the backup: {e}")))?;
-        out.insert(name, bytes);
-    }
-    Ok(out)
+    Ok(archive)
 }
 
 /// The manifest, with the format and version it declares checked.
@@ -2783,12 +2904,14 @@ fn read_zip(archive: &[u8]) -> Result<Entries> {
 /// Refused by name rather than by the confusing absence of everything else: a zip
 /// of holiday photographs and a backup from a future version are different
 /// mistakes, and both deserve to be told apart from "nothing was restored".
-fn manifest_of(entries: &Entries) -> Result<Map<String, Json>> {
-    let manifest = json_entry(entries, MANIFEST_FILE).map_err(|_| {
-        Error::invalid(format!(
-            "this zip has no `{MANIFEST_FILE}` and is not a Saltcorn 1 backup either,              so it is not a backup this server can read"
-        ))
-    })?;
+fn manifest_of(archive: &Archive) -> Result<Map<String, Json>> {
+    if !archive.contains(MANIFEST_FILE) {
+        return Err(Error::invalid(format!(
+            "this zip has no `{MANIFEST_FILE}` and is not a Saltcorn 1 backup either, \
+             so it is not a backup this server can read"
+        )));
+    }
+    let manifest = archive.json(MANIFEST_FILE)?;
     let obj = manifest
         .as_object()
         .ok_or_else(|| Error::invalid(format!("`{MANIFEST_FILE}` is not an object")))?;
@@ -2818,27 +2941,6 @@ fn manifest_of(entries: &Entries) -> Result<Map<String, Json>> {
     Ok(obj.clone())
 }
 
-/// One entry, parsed as JSON.
-fn json_entry(entries: &Entries, path: &str) -> Result<Json> {
-    let bytes = entries
-        .get(path)
-        .ok_or_else(|| Error::invalid(format!("the backup has no `{path}`")))?;
-    serde_json::from_slice(bytes)
-        .map_err(|e| Error::invalid(format!("`{path}` in the backup is not valid JSON: {e}")))
-}
-
-/// A table's rows entry — absent means "no rows were backed up", which is not an
-/// error: a table can be backed up with its metadata alone.
-fn table_rows(entries: &Entries, path: &str) -> Result<Vec<Json>> {
-    if !entries.contains_key(path) {
-        return Ok(Vec::new());
-    }
-    match json_entry(entries, path)? {
-        Json::Array(values) => Ok(values),
-        _ => Err(Error::invalid(format!("`{path}` must be an array of rows"))),
-    }
-}
-
 /// A named array of objects in a document, or nothing.
 fn array_field(document: &Json, key: &str) -> Vec<Json> {
     document
@@ -2861,4 +2963,45 @@ async fn rows_of(catalog: &Catalog, table: &Table) -> Result<Vec<Json>> {
         Json::Array(values) => values,
         _ => Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rows_are_batched_by_the_columns_they_carry() {
+        let rows = vec![
+            json!({ "id": 1, "a": 1 }),
+            json!({ "id": 2, "a": 2 }),
+            json!({ "id": 3 }),
+            json!({ "a": 4, "id": 4 }),
+        ];
+        let found: Vec<(usize, usize)> = runs(&rows)
+            .iter()
+            .map(|(at, run)| (*at, run.len()))
+            .collect();
+        assert_eq!(found, vec![(0, 2), (2, 1), (3, 1)]);
+
+        let many: Vec<Json> = (0..600).map(|i| json!({ "id": i })).collect();
+        let sizes: Vec<usize> = runs(&many).iter().map(|(_, run)| run.len()).collect();
+        assert_eq!(sizes, vec![250, 250, 100]);
+        assert!(runs(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_row_count_that_does_not_match_the_manifest_is_reported() {
+        let mut report = RestoreReport::default();
+        check_count(&mut report, "tables/t/rows.ndjson", "`t`", Some(3), 3);
+        check_count(&mut report, "tables/t/rows.ndjson", "`t`", None, 7);
+        assert!(report.warnings.is_empty());
+        check_count(&mut report, "tables/t/rows.ndjson", "`t`", Some(3), 2);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(
+            report.warnings[0].contains("holds 3 rows of `t`"),
+            "{report:?}"
+        );
+        assert!(report.warnings[0].contains("has 2"), "{report:?}");
+    }
 }

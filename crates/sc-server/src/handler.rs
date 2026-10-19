@@ -72,6 +72,12 @@ pub struct HandlerCtx {
     /// than giving that route its own catalog handle is what keeps one code path
     /// for "write a file", however the bytes arrived.
     pub raw_body: Option<bytes::Bytes>,
+    /// An unparsed request body that was **streamed to disk** rather than read
+    /// into memory — an uploaded backup — for the routes that take one. Shared,
+    /// because the context is cloneable; the file is deleted when the last
+    /// holder lets go of it, which is how a handler keeps one (an upload waiting
+    /// to be restored) or lets it be cleaned up (anything else).
+    pub raw_file: Option<std::sync::Arc<crate::backup::SpoolFile>>,
     /// The address the request came from (TODO F4.2): what login throttling
     /// counts per IP. `None` where there was no socket.
     pub client_ip: Option<std::net::IpAddr>,
@@ -129,13 +135,75 @@ impl HandlerCtx {
 /// every typed endpoint.
 #[derive(Debug, Clone)]
 pub struct Download {
-    /// The bytes to serve.
-    pub bytes: bytes::Bytes,
+    /// What to serve.
+    pub body: DownloadBody,
     /// The `Content-Type` to serve them under.
     pub content_type: String,
     /// The name the browser should save it as, carried in `Content-Disposition`;
     /// empty for bytes a page fetches rather than a person saves.
     pub filename: String,
+}
+
+/// What a [`Download`] serves: bytes already in memory, or a file on disk that
+/// is streamed and never read whole.
+#[derive(Debug, Clone)]
+pub enum DownloadBody {
+    Bytes(bytes::Bytes),
+    File(SpooledFile),
+}
+
+/// A file a response streams from — a backup, written to the spool directory
+/// and served from there.
+///
+/// The file is open and, on Unix, already unlinked, so nothing is left on disk
+/// once the response that takes it is dropped, however it ends. Cloneable only
+/// because a [`HandlerResponse`] is; the first response built from it takes the
+/// file, and a clone finds it gone.
+#[derive(Debug, Clone)]
+pub struct SpooledFile {
+    file: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    len: u64,
+    /// Deletes the file once the response is done with it, where the platform
+    /// would not let it be unlinked while open.
+    guard: Option<std::sync::Arc<crate::backup::SpoolFile>>,
+}
+
+impl SpooledFile {
+    /// Serve the file `spool` names, `len` bytes long: open it, and let go of
+    /// its name.
+    pub fn open(spool: crate::backup::SpoolFile, len: u64) -> sc_error::Result<SpooledFile> {
+        let file = std::fs::File::open(spool.path()).map_err(|e| {
+            sc_error::Error::file(format!("opening `{}`: {e}", spool.path().display()))
+        })?;
+        // Unlinked while open: the data lives as long as the handle.
+        let guard = if cfg!(unix) {
+            drop(spool);
+            None
+        } else {
+            Some(std::sync::Arc::new(spool))
+        };
+        Ok(SpooledFile {
+            file: std::sync::Arc::new(std::sync::Mutex::new(Some(file))),
+            len,
+            guard,
+        })
+    }
+
+    /// The file's length in bytes.
+    pub fn size(&self) -> u64 {
+        self.len
+    }
+
+    /// The open file and what keeps it alive, once.
+    pub(crate) fn take(
+        &self,
+    ) -> Option<(
+        std::fs::File,
+        Option<std::sync::Arc<crate::backup::SpoolFile>>,
+    )> {
+        let file = self.file.lock().ok()?.take()?;
+        Some((file, self.guard.clone()))
+    }
 }
 
 /// A handler's result: a JSON body, an HTTP status, and an optional session

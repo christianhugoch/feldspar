@@ -85,13 +85,50 @@ impl S3Client {
     /// or not at all — so there is no temporary name to rename from.
     pub async fn put(&self, key: &str, body: Vec<u8>) -> Result<()> {
         let hash = hex(&Sha256::digest(&body));
+        self.send("PUT", Some(key), &[], body.into(), &hash).await?;
+        Ok(())
+    }
+
+    /// Store the local file `from` as `key`, without reading it into memory.
+    ///
+    /// Read twice: once through SHA-256, because a signed request names its
+    /// payload's hash before the payload, and once as the request body, with
+    /// its length declared so the body goes as it is rather than chunked. A
+    /// single `PUT` takes up to 5 GB; past that S3 wants a multipart upload,
+    /// which this does not do yet.
+    pub async fn put_file(&self, key: &str, from: &std::path::Path) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let open = || async {
+            tokio::fs::File::open(from)
+                .await
+                .map_err(|e| Error::file(format!("opening `{}`: {e}", from.display())))
+        };
+        let reading = |e: std::io::Error| Error::file(format!("reading `{}`: {e}", from.display()));
+        let mut file = open().await?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut length: u64 = 0;
+        loop {
+            let read = file.read(&mut buffer).await.map_err(reading)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            length += read as u64;
+        }
+        let hash = hex(&hasher.finalize());
+        let reader: sc_files::BoxAsyncRead = Box::new(open().await?);
+        let body = Payload {
+            body: reqwest::Body::wrap_stream(crate::file_response::chunks(reader)),
+            length: Some(length),
+        };
         self.send("PUT", Some(key), &[], body, &hash).await?;
         Ok(())
     }
 
     /// Delete `key`. Deleting a key that is not there is not an error in S3.
     pub async fn delete(&self, key: &str) -> Result<()> {
-        self.send("DELETE", Some(key), &[], Vec::new(), EMPTY_SHA256)
+        self.send("DELETE", Some(key), &[], Vec::new().into(), EMPTY_SHA256)
             .await?;
         Ok(())
     }
@@ -110,7 +147,7 @@ impl S3Client {
                 query.push(("continuation-token".to_owned(), token.clone()));
             }
             let body = self
-                .send("GET", None, &query, Vec::new(), EMPTY_SHA256)
+                .send("GET", None, &query, Vec::new().into(), EMPTY_SHA256)
                 .await?;
             let page = ListPage::parse(&body);
             keys.extend(page.keys);
@@ -142,7 +179,7 @@ impl S3Client {
         method: &str,
         key: Option<&str>,
         query: &[(String, String)],
-        body: Vec<u8>,
+        body: Payload,
         payload_hash: &str,
     ) -> Result<String> {
         let path = self.path(key);
@@ -176,13 +213,19 @@ impl S3Client {
             Some(key) => format!("{method} {}", self.url_of(key)),
             None => format!("{method} {}{}", self.origin, self.path(None)),
         };
-        let response = self
+        let mut request = self
             .http
             .request(method_value, &url)
             .header("x-amz-content-sha256", payload_hash)
             .header("x-amz-date", amz_date)
-            .header("authorization", auth)
-            .body(body)
+            .header("authorization", auth);
+        // A streamed body has no length of its own, and S3 refuses a `PUT`
+        // sent chunked: the length is said up front.
+        if let Some(length) = body.length {
+            request = request.header(reqwest::header::CONTENT_LENGTH, length);
+        }
+        let response = request
+            .body(body.body)
             .send()
             .await
             .map_err(|e| Error::file(format!("{what}: {}", sc_error::format_chain(&e))))?;
@@ -198,6 +241,21 @@ impl S3Client {
             "{what}: the server answered {status}{}",
             error_detail(&text)
         )))
+    }
+}
+
+/// A request body, and its length when it is a stream that cannot say.
+struct Payload {
+    body: reqwest::Body,
+    length: Option<u64>,
+}
+
+impl From<Vec<u8>> for Payload {
+    fn from(bytes: Vec<u8>) -> Payload {
+        Payload {
+            body: bytes.into(),
+            length: None,
+        }
     }
 }
 

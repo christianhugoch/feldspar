@@ -144,3 +144,53 @@ async fn usable_through_the_database_driver_trait() -> sc_error::Result<()> {
 
     Ok(())
 }
+
+/// What a backup reads through: every statement sees the moment the first one
+/// ran — a row committed afterwards on another connection is not there — and
+/// nothing can be written.
+#[tokio::test]
+async fn a_snapshot_reads_one_moment_and_writes_nothing() -> sc_error::Result<()> {
+    let db = TestDb::new().await?;
+    let driver = PgDriver::from_pool(db.pool().clone());
+    driver.apply_schema(&create_table("sc_tx_snap")).await?;
+    driver
+        .query(&insert("sc_tx_snap", 1))
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut tx = DatabaseDriver::begin_snapshot(&driver)
+        .await?
+        .expect("Postgres has snapshots");
+    let before = tx
+        .query(&select_all("sc_tx_snap"))
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(before.len(), 1);
+
+    // Committed elsewhere, after the snapshot was taken.
+    driver
+        .query(&insert("sc_tx_snap", 2))
+        .await?
+        .try_collect()
+        .await?;
+    let after = tx
+        .query(&select_all("sc_tx_snap"))
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(after.len(), 1, "the snapshot does not see the later row");
+
+    let refused = tx.query(&insert("sc_tx_snap", 3)).await;
+    assert!(refused.is_err(), "a snapshot is read-only");
+    tx.rollback().await?;
+
+    let rows = driver
+        .query(&select_all("sc_tx_snap"))
+        .await?
+        .try_collect()
+        .await?;
+    assert_eq!(rows.len(), 2);
+    Ok(())
+}

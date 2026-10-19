@@ -1596,34 +1596,67 @@ async fn backup_command(args: &[String]) -> Result<()> {
         ssl: false,
         ..sc_server::BackupSelection::everything(&available)
     };
-    let bytes = sc_server::write_backup(&catalog, &selection).await?;
-    write_whole(&file, &bytes)?;
+    let size = write_whole(&file, |out| {
+        sc_server::write_backup_to(&catalog, &selection, out)
+    })
+    .await?;
     eprintln!(
-        "feldspar: wrote {} ({} tables, {} applications, {} file stores, {} bytes)",
+        "feldspar: wrote {} ({} tables, {} applications, {} file stores, {})",
         file.display(),
         selection.tables.len(),
         selection.applications.len(),
         selection.file_stores.len(),
-        bytes.len()
+        human_size(size)
     );
     Ok(())
 }
 
-/// Write `bytes` to `path` by way of a sibling file and a rename, so an
-/// interrupted backup leaves the previous file at `path` rather than half of a
-/// new one — the automated backups' arrangement.
-fn write_whole(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+/// Write the file at `path` by way of a sibling `.partial` file that `write`
+/// streams into, then a rename, so an interrupted backup leaves the previous
+/// file at `path` rather than half of a new one — the automated backups'
+/// arrangement. The partial file is removed when anything fails.
+async fn write_whole<F, Fut>(path: &std::path::Path, write: F) -> Result<u64>
+where
+    F: FnOnce(std::fs::File) -> Fut,
+    Fut: std::future::Future<Output = Result<u64>>,
+{
     let name = path
         .file_name()
         .ok_or_else(|| sc_error::Error::config(format!("`{}` is not a file name", path.display())))?
         .to_string_lossy();
     let partial = path.with_file_name(format!(".{name}.partial"));
-    std::fs::write(&partial, bytes)
+    let out = std::fs::File::create(&partial)
         .map_err(|e| sc_error::Error::file(format!("writing `{}`: {e}", partial.display())))?;
+    let written = match write(out).await {
+        Ok(size) => size,
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial);
+            return Err(e);
+        }
+    };
     std::fs::rename(&partial, path).map_err(|e| {
         let _ = std::fs::remove_file(&partial);
         sc_error::Error::file(format!("writing `{}`: {e}", path.display()))
-    })
+    })?;
+    Ok(written)
+}
+
+/// A file size as a person reads it: `812 bytes`, `4.2 MB`, `1.3 GB`.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} bytes");
+    }
+    let mut size = bytes as f64;
+    let mut unit = "";
+    for next in UNITS {
+        size /= 1000.0;
+        unit = next;
+        if size < 1000.0 {
+            break;
+        }
+    }
+    format!("{size:.1} {unit}")
 }
 
 /// `feldspar restore FILE [database flags] [server flags]` — everything FILE
@@ -1643,10 +1676,9 @@ async fn restore_command(args: &[String]) -> Result<()> {
     let config = ServerConfig::from_args(serving_defaults(&db).iter().chain(&rest))?;
 
     // The file before the database: one that is not a backup is refused before
-    // anything has been connected to, let alone written.
-    let archive = std::fs::read(&file)
-        .map_err(|e| sc_error::Error::file(format!("reading `{}`: {e}", file.display())))?;
-    let (contents, manifest) = sc_server::inspect_backup(&archive)?;
+    // anything has been connected to, let alone written. It is read from where
+    // it is as the restore goes, never into memory whole.
+    let (contents, manifest) = sc_server::inspect_backup(&file)?;
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
@@ -1674,7 +1706,7 @@ async fn restore_command(args: &[String]) -> Result<()> {
             .unwrap_or("at an unrecorded time"),
     );
     let selection = sc_server::BackupSelection::everything(&contents);
-    let report = sc_server::restore_backup(&catalog, &apps, &archive, &selection).await?;
+    let report = sc_server::restore_backup(&catalog, &apps, &file, &selection).await?;
     for line in &report.restored {
         println!("restored {line}");
     }

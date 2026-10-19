@@ -2,6 +2,61 @@
 
 Changes in reverse chronological order.
 
+## Backups and restores stream, in backup format 2
+
+A nightly `feldspar backup` was killed at its 2 GB memory limit. By hand it peaked at 3.4 GB to
+write a 100 MB zip of 73 MB of database and 177 MB of files. The writer turned each byte of a
+`bytea` column into a JSON number (about 32 bytes each), held every table as one JSON array,
+pretty-printed it, built the whole zip in memory and read every store file whole. A restore held
+the upload and every expanded entry in memory too. Backups and restores now stream from the CLI,
+the Backup dialog and the scheduler (local, SFTP and S3), and memory is bounded by about one page
+of rows plus I/O buffers.
+
+- **Format 2.** Rows are NDJSON, one object per line: `tables/<t>/rows.ndjson`,
+  `users/rows.ndjson` beside `users/users.json` (roles and added columns), and
+  `analytics/draws/<instance>.ndjson`. `store.json` records each file's size. Older Feldspar
+  backups are refused by the version check. Saltcorn 1 backups still import, converted to the
+  new layout.
+- **Values are written by type** (`backup/values.rs`). Bytes are base64. `NaN`, `Infinity` and
+  `-Infinity` are written as those strings; they used to become `null`. Timestamps are UTC with
+  every sub-second digit. The restore reads values by the restoring column's type, so SQLite and
+  Postgres backups restore into each other.
+- **Integrity.** The restore counts each rows entry's lines against the manifest and warns when
+  they differ. A damaged line loses only its row and is reported with its line number. A zip
+  checksum failure is reported against its entry.
+- **The zip.** Entries that may pass 4 GiB use Zip64. Non-ASCII names carry the UTF-8 flag.
+  Files whose extension shows they are already compressed (images, audio, video, archives,
+  woff/woff2, office documents) are stored without deflating.
+- **Writing.** The writer pages each table by keyset on its primary key: one row first, then
+  pages sized to about 8 MB, at most 1,000 rows. A table without a single key is read in one
+  query. On Postgres every row comes from one `REPEATABLE READ, READ ONLY` snapshot, through the
+  new `DatabaseDriver::begin_snapshot` (SQLite reads directly instead of taking a write lock).
+  Store files are copied in 64 KB chunks.
+- **Spool directory.** The in-app download and uploads waiting to be restored are files in
+  `<data dir>/backup-spool`. This is real disk on purpose, because a tmpfs `/tmp` counts
+  against the cgroup memory limit. Downloads are streamed with a `Content-Length` and the file
+  is deleted when the response ends. An upload is deleted when it is restored, expires or is
+  pushed out. `serve` removes spool files older than a day at startup.
+- **Callers.** `feldspar backup` writes `.FILE.partial` and renames it, and its summary gives
+  the size. `feldspar restore` reads FILE in place. The scheduler writes a local backup next to
+  its destination and renames it. SFTP copies from the spool file. S3 hashes the file first and
+  then sends it as a streamed `PUT` with a `Content-Length`; this turns on reqwest's `stream`
+  feature. The 5 GB single-`PUT` limit still applies.
+- **Restoring.** The restore reads the zip from disk. For each rows entry or store file, a
+  blocking thread passes batches of up to 250 rows or about 4 MB over a two-deep channel. Rows go
+  in with one `INSERT` per 250-row batch. If a batch fails, its rows are retried one at a time,
+  so one bad row is still reported and skipped as before. Store files over 1 MB are appended in
+  chunks.
+- Tests: unit tests in `backup/values.rs` (round trip of every value type), `archive.rs`
+  (batching, damaged lines, checksum failure, copying into a store), `write.rs` (stored or
+  deflated, the UTF-8 flag, builder to archive), `restore.rs` (batch runs, row-count check),
+  `spool.rs` and `mod.rs` (uploads deleted on eviction and take). New integration test
+  `backup_api::large_binary_rows_and_files_stream_through_a_backup_and_restore` (5 MB blobs,
+  2,500 rows past the first page, NaN/±Infinity, microsecond timestamps, a stored mp4 and a
+  non-ASCII file name, byte for byte). `sc-db-postgres`'s
+  `a_snapshot_reads_one_moment_and_writes_nothing`. The CLI backup test now has a `bytea`
+  column.
+
 ## Offline sync: apps work offline
 
 The generated client can keep an application's synced tables on the device. Reads and writes of

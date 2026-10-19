@@ -269,7 +269,7 @@ pub(crate) async fn serve(
 }
 
 /// A reader as a stream of body frames of at most [`CHUNK`] bytes.
-fn chunks(
+pub(crate) fn chunks(
     reader: BoxAsyncRead,
 ) -> impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static {
     futures::stream::try_unfold(reader, |mut reader| async move {
