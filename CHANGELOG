@@ -2,6 +2,57 @@
 
 Changes in reverse chronological order.
 
+## Settings → Authentication: session lifetime and sign-in with external identity providers
+
+User request: a new Authentication tab in the main Settings screen, holding **Share sign-in
+between applications** (moved from Development) and a new **session lifetime**, plus a list of
+OAuth 2.0 identity providers that can be created, edited and deleted. Each provider can be used
+to sign in to the admin UI and to the React applications. The shared cookie and the lifetime
+apply to those sign-ins too.
+
+- **The Authentication section** (`sc_config::authentication`). `shared_session_cookie` moved
+  here from Development, with the same key, so nothing stored needs migrating.
+  `session_ttl_hours` (default 24, from 1 to 8760) is live: the router starts every session with
+  `SessionStore::login_for(user, AppMounts::session_ttl())`, whether it is a password sign-in,
+  a provider sign-in or the admin handoff. A native client's cookie `Max-Age` uses the same
+  value. The setting is read at boot, applied on save and reset by Clear all. Sessions that
+  already exist keep their expiry.
+- **Identity providers** are stored as a list under the internal key `oauth_providers`. Each
+  record is checked against `oauth_provider_spec`. The presets (Google, Microsoft, GitHub,
+  GitLab) supply their endpoints and scopes. A custom provider needs its authorization, token
+  and userinfo URLs. Each provider has switches for enabled, offered on the admin UI, offered to
+  applications, and "create accounts for new addresses" with a role from 2 to 100 (never the
+  admin role). New admin endpoints: `listOAuthProviders`, `getOAuthProviderSpec`,
+  `createOAuthProvider`, `updateOAuthProvider`, `deleteOAuthProvider`. The client secret is
+  redacted when sent out and merged back when saved, the same way as an LLM provider key.
+- **The flow** (`sc-server/src/oauth.rs`) is the authorization code grant with PKCE. It uses
+  four routes under `/_feldspar/oauth` that answer on every host: `providers`,
+  `{name}/start?return_to=`, `callback` and `complete`. The callback is always on the admin UI's
+  host, so each provider is registered with a single redirect URL; the tab shows it. A
+  `SameSite=Lax` binding cookie on the starting host means the sign-in must finish in the
+  browser that started it, and the state can be used only once. Accounts are matched by email.
+  An address the provider marks `email_verified: false` is refused. For GitHub, the verified
+  primary address is read from `/user/emails`. On the admin UI's host only administrators can
+  sign in and no account is ever created. The session is started through `apply_session`, so
+  the shared cookie, the lifetime and the `login` event all behave as they do for a password.
+  `complete` returns a page that refreshes to `return_to` rather than a redirect, because the
+  strict session cookie is not sent at the end of a redirect chain that began at the provider.
+  Failures come back as `?oauth_error=<message>`. Flows are held in process memory, like the
+  admin handoff.
+- **Admin UI.** The Authentication tab adds a provider panel with a list, a generic form in a
+  dialog (choosing a preset fills in the name and label) and a delete confirmation. The sign-in
+  page shows a "Sign in with …" button for each provider and displays a returned error.
+- **Applications.** A generated client that has `login` now also has `oauthProviders()` and
+  `oauthSignInUrl(provider, returnTo)`. The scaffold's `Login.tsx` shows a button for each
+  provider and displays `oauth_error`. The runtime README tells an agent how to use them and
+  that providers are configured in the admin UI. Existing projects keep their `Login.tsx`
+  (it is written once), but their regenerated client gains the two methods.
+- Tests: `sc-config` unit tests (section, lifetime, presets, refused records); `sc-auth`
+  (`login_for`); `sc-server` unit tests for the flow helpers (return path, PKCE per RFC 7636,
+  single use); `oauth_sign_in.rs` end to end against a fake provider on a real port; the app
+  client type-check and the scaffold login type-check; `oauthProviders.test.ts` in the admin
+  UI. TECHNICAL_DESIGN §7.2 and OPERATIONS were updated.
+
 ## MCP tokens get every permission by default
 
 User request: every permission should be on by default on MCP tokens, including listing and

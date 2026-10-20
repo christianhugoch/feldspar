@@ -1025,7 +1025,42 @@ pub struct User {
   new-device login.
 - **OAuth2 server option**: Saltcorn can act as an identity provider (`sc-auth` exposes the
   authorization-code/PKCE endpoints when enabled).
-- Additional providers (OAuth clients, SSO) via an `AuthMethod` extension.
+- **Session lifetime** (`session_ttl_hours`, Settings → Authentication, default 24, 1 to 8760).
+  Live: `AppMounts::session_ttl` is read where the router starts a session
+  (`SessionStore::login_for`), so the next sign-in after a save gets it — a password's, an
+  identity provider's, an admin handoff's — and a native client's cookie `Max-Age` matches it.
+  A session already started keeps the expiry it was given.
+- **External identity providers (OAuth 2.0 clients)**, Settings → Authentication. A list of
+  records under the internal key `oauth_providers`, each declared field by field
+  (`sc_config::oauth_provider_spec`) so the tab's form is generic, its `client_secret`
+  redacted on the way out and merged back on save. A provider has a preset (`google`,
+  `microsoft`, `github`, `gitlab`, which supply the endpoints and scopes) or is `custom`
+  (authorization, token and userinfo URLs given), and flags for whether it is enabled, offered
+  on the admin UI's sign-in, offered to applications, and whether an application sign-in by an
+  unknown address creates an account (with a role from 2 to 100, never the admin's).
+
+  The flow is the authorization-code grant with PKCE (S256), over four routes under
+  `/_feldspar/oauth` that answer on every host (`sc-server/src/oauth.rs`): `providers` lists
+  what this host offers; `{name}/start?return_to=` remembers the flow, sets a `SameSite=Lax`
+  binding cookie on the starting host and redirects to the provider; **`callback` is always on
+  the admin UI's host**, so a provider is registered with one redirect URL however many
+  applications use it; it exchanges the code (client secret and verifier), reads `email` from
+  userinfo (refusing `email_verified: false`; GitHub's verified primary address comes from
+  `/user/emails`), resolves the account, and redirects to `complete?token=` on the starting
+  host. `complete` checks that the binding cookie matches — the flow must finish in the
+  browser that started it, which defeats login CSRF — and starts the session through
+  `apply_session`, so **the shared cookie and the session lifetime apply exactly as they do to
+  a password**. It answers a page that refreshes to `return_to` rather than a redirect, because
+  the `SameSite=Strict` session cookie is not sent on a redirect at the end of a chain that
+  began at the provider. Accounts match by email. On the admin UI's host only an administrator
+  is signed in and no account is created. A failure comes back to `return_to` with
+  `?oauth_error=<message>`. Flows and completion tokens are in the process's memory, like the
+  admin handoff's, so a callback must reach the node that started it.
+
+  An application's generated client has `oauthProviders()` and
+  `oauthSignInUrl(provider, returnTo)` whenever it has `login`, and the scaffold's
+  `Login.tsx` renders a button per provider.
+- Further providers (SAML, SSO) via an `AuthMethod` extension.
 
 ### 7.3 Authorization
 
@@ -7031,8 +7066,8 @@ domain when it was created, is widened for the admin host as it is served
 preview of the `@` application is `<label>.<base domain>`, having no subdomain to put after
 the `--`.
 
-**Sharing the sign-in between applications** (`shared_session_cookie`, Settings → Development,
-off by default). Users and sessions are already the instance's, not an application's: what keeps
+**Sharing the sign-in between applications** (`shared_session_cookie`, Settings →
+Authentication, off by default; it applies to identity-provider sign-ins too, §7.2). Users and sessions are already the instance's, not an application's: what keeps
 a sign-in on one host is only that `sc_session` is host-only. Ticking this gives the session
 cookie `Domain=<base domain>` — the base domain or extra base domain the request's `Host` is
 under; a host under none, an IP address, still gets a host-only one — so one sign-in reaches the

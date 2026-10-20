@@ -971,6 +971,16 @@ fn accounts_section(endpoints: &EndpointSet) -> String {
          The session is a cookie the browser carries; nothing here stores a \
          credential.\n\
          \n\
+         **External identity providers** (Google, Microsoft, GitHub, any OAuth 2.0 \
+         provider) are set up by an administrator in the admin UI's Settings → \
+         Authentication, never in the application. `api.oauthProviders()` lists \
+         the ones this application offers (`{{ name, label, url }}`), and \
+         `api.oauthSignInUrl(provider, returnTo)` is the address that signs in \
+         with one: navigate the browser there (a link, not a `fetch`). It comes \
+         back to `returnTo` signed in — call `api.whoami()` — or with \
+         `?oauth_error=<message>` to show. The scaffold's `src/Login.tsx` already \
+         renders a button per provider.\n\
+         \n\
          {signup}\
          \n\
          ## Passwords: invitations and resets\n\
@@ -2275,7 +2285,9 @@ export function useUser(): AuthState {
 }
 "#;
 
-const LOGIN_TSX: &str = r#"import { useState, type FormEvent } from "react";
+const LOGIN_TSX: &str = r#"import { useEffect, useState, type FormEvent } from "react";
+import type { OAuthProvider } from "./feldspar/client";
+import { api } from "./feldspar/hooks";
 import { useT } from "./feldspar/i18n";
 import { useUser } from "./auth";
 
@@ -2287,8 +2299,19 @@ export default function Login() {
   // "Forgot your password?" swaps the form for one that emails a reset link.
   const [forgot, setForgot] = useState(false);
   const [sent, setSent] = useState(false);
-  const [error, setError] = useState<string | undefined>(undefined);
+  // A sign-in with an identity provider that failed comes back here with
+  // `?oauth_error=…`.
+  const [error, setError] = useState<string | undefined>(
+    () => new URLSearchParams(window.location.search).get("oauth_error") ?? undefined,
+  );
   const [busy, setBusy] = useState(false);
+  // The external identity providers the server offers this application
+  // (Settings → Authentication in the admin UI). Empty: the password form only.
+  const [providers, setProviders] = useState<OAuthProvider[]>([]);
+
+  useEffect(() => {
+    api.oauthProviders().then(setProviders, () => setProviders([]));
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -2356,6 +2379,21 @@ export default function Login() {
       <button type="button" className="sc-link" onClick={toggle}>
         {forgot ? t("Back to sign in") : t("Forgot your password?")}
       </button>
+      {!forgot &&
+        providers.map((provider) => (
+          // A link, not a fetch: the sign-in is a round of redirects through
+          // the provider, and comes back to this page signed in.
+          <a
+            key={provider.name}
+            className="sc-oauth"
+            href={api.oauthSignInUrl(
+              provider,
+              window.location.pathname + window.location.search.replace(/[?&]oauth_error=[^&]*/, ""),
+            )}
+          >
+            {t("Sign in with {provider}", { provider: provider.label })}
+          </a>
+        ))}
     </form>
   );
 }
@@ -3160,6 +3198,16 @@ th {
   color: var(--muted);
   text-decoration: underline;
   cursor: pointer;
+}
+
+.sc-oauth {
+  display: block;
+  text-align: center;
+  padding: 0.5rem;
+  border: 1px solid var(--muted);
+  border-radius: 0.375rem;
+  color: inherit;
+  text-decoration: none;
 }
 "#;
 
@@ -5933,6 +5981,34 @@ export function Board({ id }: { id: number }) {
         assert!(file(&files, "src/App.tsx").contains("useUser"));
         assert!(file(&files, "src/App.tsx").contains("r.public || user ? r.element : <Login />"));
         assert!(file(&files, "src/auth.tsx").contains("api.whoami("));
+    }
+
+    /// The login screen offers the external identity providers the server
+    /// does (Settings → Authentication), and the runtime README tells an agent
+    /// how, and that the providers are not the application's to configure.
+    #[test]
+    fn the_login_screen_offers_the_identity_providers() {
+        let tables = [tasks()];
+        let eps = endpoints(&tables);
+        let app = todo();
+        let files = project_files(&ctx(&app, &tables, &eps, None));
+        let login = file(&files, "src/Login.tsx");
+        assert!(login.contains("api.oauthProviders()"), "{login}");
+        assert!(login.contains("api.oauthSignInUrl("), "{login}");
+        assert!(login.contains("oauth_error"), "{login}");
+        let readme = file(&files, "src/feldspar/README.md");
+        assert!(
+            readme.contains("api.oauthSignInUrl(provider, returnTo)"),
+            "{readme}"
+        );
+        assert!(readme.contains("Settings → Authentication"), "{readme}");
+        type_check_component(
+            &files,
+            "login-oauth",
+            "src/Login.tsx",
+            login,
+            "the login screen",
+        );
     }
 
     #[test]
