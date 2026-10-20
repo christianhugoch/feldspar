@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## MCP tokens get every permission by default
+
+User request: every permission should be on by default on MCP tokens, including listing and
+installing modules, dropping tables and changing access rules.
+
+- **New `sc_api::mcp::token_flags_from_submitted`:** at mint time, any flag the request leaves out
+  is granted. The admin API (`POST /api/api-tokens`) and `feldspar mcp-token create` both use it.
+  A stored token's `grants` stays explicit, with all seven keys.
+- **The admin panel's mint form now starts with all seven boxes ticked** (`defaultGrants`).
+- **The `admin_copilot` agent keeps its cautious defaults:** `allow_drop`,
+  `allow_access_changes` and `allow_modules` stay off unless ticked. Only tokens changed.
+- Tests: a new unit test in `sc-api`. The CLI unit test, the CLI and server integration tests, and
+  the admin UI test were updated. Server tests that need a token without some flags now mint it
+  with those flags set to `false`. OPERATIONS.md, TECHNICAL_DESIGN.md and tutorial-python.md were
+  updated to match.
+
 ## Backups and restores stream, in backup format 2
 
 A nightly `feldspar backup` was killed at its 2 GB memory limit. By hand it peaked at 3.4 GB to
