@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## `new Date()` is accepted in formulas, so a date field can default to today
+
+User request: a date field's default value `new Date()` was refused, because the formula
+parser refused every `new`.
+
+- **`Ast::NewDate`** (`sc-expr`). `new Date(…)` is lowered to its own node and rendered back
+  as `new Date(…)` for the JavaScript evaluator. Every other `new` is still refused by name.
+  The SQL translator reports it as untranslatable, so a formula that uses it runs in JavaScript.
+  Dataset type inference treats it as a timestamp.
+- **A `date` column accepts a full instant** (`sc-types::json_to_value`). It takes the UTC
+  calendar date, which is what a JavaScript `Date` serialises to
+  (`"2026-10-20T17:21:37.641Z"` → `2026-10-20`). A `timestamp` column already accepted it.
+- Tests: `default_values::new_date_is_a_default_for_date_and_timestamp_fields` (date and
+  timestamp defaults on insert, and a fixed `new Date('…')`), together with parse, render and
+  date-coercion unit tests.
+
 ## Settings → Authentication: session lifetime and sign-in with external identity providers
 
 User request: a new Authentication tab in the main Settings screen, holding **Share sign-in

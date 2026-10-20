@@ -327,3 +327,53 @@ async fn a_field_the_insert_leaves_out_is_null_to_the_ownership_formula() -> Res
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn new_date_is_a_default_for_date_and_timestamp_fields() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+    schema_edit::apply(
+        &catalog,
+        &[Operation::CreateTable {
+            name: "events".into(),
+            database: String::new(),
+            settings: TableSettings::default(),
+            fields: vec![
+                FieldSpec {
+                    primary_key: true,
+                    ..field("id", "int")
+                },
+                field("title", "text"),
+                required_with_default("day", "date", "new Date()"),
+                required_with_default("at", "timestamp", "new Date()"),
+                required_with_default("fixed", "date", "new Date('2026-03-04T10:00:00Z')"),
+            ],
+        }],
+        &ApplyOptions::default(),
+    )
+    .await?;
+    let events = catalog.require("events")?;
+    assert_eq!(
+        events.field("day").unwrap().default_expression.as_deref(),
+        Some("new Date()")
+    );
+
+    let before = chrono::Utc::now();
+    let row = sc_api::rows::create_row(&catalog, &events, &json!({ "title": "Launch" })).await?;
+    let after = chrono::Utc::now();
+
+    let day = row["day"].as_str().unwrap();
+    assert!(
+        [before.date_naive(), after.date_naive()]
+            .iter()
+            .any(|d| d.to_string() == day),
+        "day {day} is not today"
+    );
+    let at = chrono::DateTime::parse_from_rfc3339(row["at"].as_str().unwrap()).unwrap();
+    assert!(
+        at >= before - chrono::Duration::seconds(1) && at <= after + chrono::Duration::seconds(1),
+        "at {at} is not now"
+    );
+    assert_eq!(row["fixed"], json!("2026-03-04"));
+    Ok(())
+}
