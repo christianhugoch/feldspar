@@ -2,6 +2,22 @@
 
 Changes in reverse chronological order.
 
+## CI green again: formatting, clippy 1.99 lints, and drifted tests
+
+- `cargo fmt --all` over the files recent work left unformatted.
+- **Clippy 1.99:** `async-trait` 0.1.89 → 0.1.92 (the old expansion tripped
+  `double_must_use` on every `#[async_trait]` trait); `map_err(&f)` → `map_err(f)` for
+  `Copy` closures; `items_after_test_module` in `sc-server::modules`; a `type` alias for a
+  complex tuple in a test; `map_or(.., |r| r)` → `unwrap_or`; `result_large_err` allowed on
+  `builder::document`, whose `Err` is the response itself (as in `sc-api`'s `resolve`).
+- **`admin_copilot::tool_names()` lacked `edit_streams`**, which the shared tool set already
+  publishes, so the name collision check missed it. Added.
+- Regenerated `ui/{ide,builder,analytics}/src/client.ts` (they predated the sync endpoints).
+- Two `sc-server` tests' `PUT /api/tables/…` bodies now send the required `sync_enabled`.
+- Design doc: `sc-ratelimit` added to §2's crate tree, diagram and dependency table (with
+  `sc-api`'s `sc-log` edge); `_fd_changes` and `_fd_sync_clients` added to §9.2's ER diagram.
+- `sc-stream` builds warning-free without its `mqtt` feature (an unused `mut`).
+
 ## `new Date()` is accepted in formulas, so a date field can default to today
 
 User request: a date field's default value `new Date()` was refused, because the formula

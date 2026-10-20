@@ -11,9 +11,7 @@
 use std::sync::Arc;
 
 use sc_api::rows::Executor;
-use sc_api::schema_edit::{
-    self, ApplyOptions, FieldSettings, FieldSpec, Operation, TableSettings,
-};
+use sc_api::schema_edit::{self, ApplyOptions, FieldSettings, FieldSpec, Operation, TableSettings};
 use sc_auth::User;
 use sc_catalog::{Catalog, bootstrap_field_meta, bootstrap_table_meta};
 use sc_db::DatabaseDriver;
@@ -217,7 +215,10 @@ async fn a_default_is_refused_on_a_nullable_field_and_when_it_does_not_validate(
     )
     .await
     .expect_err("unknown field");
-    assert!(err.to_string().contains("default value of `notes.slug`"), "{err}");
+    assert!(
+        err.to_string().contains("default value of `notes.slug`"),
+        "{err}"
+    );
 
     // Altering another setting keeps the default; an empty one clears it.
     schema_edit::apply(

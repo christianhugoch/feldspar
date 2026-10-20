@@ -1686,10 +1686,7 @@ async fn the_module_tools_are_offered_only_to_a_token_given_allow_modules() -> s
     // without module services) answers with its own error.
     let (is_error, answer) = call_tool(&router, &modules, "listModules", json!({})).await;
     assert!(is_error, "{answer}");
-    assert!(
-        answer.to_string().contains("no module support"),
-        "{answer}"
-    );
+    assert!(answer.to_string().contains("no module support"), "{answer}");
 
     // Installing without `allow_create` is refused, naming it, before anything
     // is installed.

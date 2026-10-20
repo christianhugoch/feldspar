@@ -67,6 +67,8 @@ feldspar/
 │  ├─ sc-dns/                     # 0. the process's resolver: a hickory-backed getaddrinfo
 │  │                              #    linked in front of glibc's, so no NSS module is
 │  │                              #    dlopened into the static binary (§13.5)
+│  ├─ sc-ratelimit/               # 0. in-memory token-bucket rate limiter keyed by string,
+│  │                              #    and the client-IP rule (queries, logins, code bodies)
 │  ├─ sc-i18n/                    # 0. Locale, negotiation, the Catalog, the message format,
 │  │                              #    CLDR plurals, `t!`/`tc!`, the `Translator` seam, and the
 │  │                              #    `core` catalogues. Layer 0 because sc-auth and sc-types
@@ -256,6 +258,9 @@ graph TD
   sqlite --> db
   db --> query["sc-query"]
   expr --> query
+  expr --> ratelimit["sc-ratelimit"]
+  api --> ratelimit
+  server --> ratelimit
   python --> expr
   files --> types["sc-types"]
   types --> query
@@ -274,6 +279,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-log` | `sc-error` |
 | `sc-config-file` | `sc-error` |
 | `sc-dns` | `sc-error` |
+| `sc-ratelimit` | — (nothing in the workspace) |
 | `sc-query` | `sc-error` |
 | `sc-repomap` | — (nothing in the workspace) |
 | `sc-i18n` | `sc-error` |
@@ -281,7 +287,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
 | `sc-db-sqlite` | `sc-db` `sc-error` `sc-log` `sc-query` |
-| `sc-expr` | `sc-error` `sc-query` |
+| `sc-expr` | `sc-error` `sc-query` `sc-ratelimit` |
 | `sc-files` | `sc-error` `sc-types` |
 | `sc-catalog` | `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
@@ -296,7 +302,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-stan` | `sc-catalog` `sc-error` `sc-files` `sc-model` `sc-types` |
 | `sc-agent` | `sc-action` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-llm` `sc-log` `sc-query` `sc-types` |
 | `sc-workflow` | `sc-action` `sc-agent` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
-| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-dataset` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-model` `sc-query` `sc-types` |
+| `sc-api` | `sc-action` `sc-auth` `sc-catalog` `sc-dataset` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-model` `sc-query` `sc-ratelimit` `sc-types` |
 | `sc-app` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-stream` `sc-types` |
 | `sc-live` | `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
@@ -304,7 +310,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-ratelimit` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
@@ -1862,6 +1868,27 @@ erDiagram
     text key PK "digest of domains + CA directory URL"
     text data
   }
+  CHANGES["_fd_changes"] {
+    int seq PK "identity; the log's order"
+    text table_name "the synced table, by name"
+    text row_key "the primary key as text"
+    text op "insert | update | delete"
+    json fields "an update's changed columns; null otherwise"
+    int txid "the writing transaction, checked against pull watermarks"
+    uuid client_id "the uploading device; null for any other writer"
+    int mutation "the device's own number for the change"
+    timestamp at
+  }
+  SYNCCLIENTS["_fd_sync_clients"] {
+    uuid id PK "the device"
+    uuid user_id "deliberately NOT a foreign key"
+    uuid application "by value"
+    text name
+    text watermark "what the device last said it has"
+    int last_mutation "highest upload already handled"
+    timestamp created_at
+    timestamp last_seen
+  }
 
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
@@ -1902,6 +1929,10 @@ erDiagram
   USERS |o--o{ WORKSPACES : "created_by -- by value"
   APPS }o--o{ STREAMS : "streams[] -- by name"
   MODULES |o--o{ STREAMS : "provider -- by name, a stream provider the module supplies"
+  TABLES ||--o{ CHANGES : "table_name -- by name, when attributes.sync is enabled"
+  SYNCCLIENTS |o--o{ CHANGES : "client_id -- by value, an uploaded change"
+  USERS ||--o{ SYNCCLIENTS : "user_id -- by value"
+  APPS ||--o{ SYNCCLIENTS : "application -- by value"
 ```
 
 Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _fd_roles.role`

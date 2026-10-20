@@ -8887,9 +8887,7 @@ pub(crate) async fn install_module_json(
     // time it is written — a module that has to be reloaded to be
     // allowed to work is not one click.
     let bundled = match source {
-        sc_module::ModuleSource::Bundled => {
-            Some(services.bundled().require(&location)?)
-        }
+        sc_module::ModuleSource::Bundled => Some(services.bundled().require(&location)?),
         _ => None,
     };
     let language = bundled.map_or(language, |entry| entry.language);
