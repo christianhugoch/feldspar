@@ -18,6 +18,14 @@ Changes in reverse chronological order.
   `sc-api`'s `sc-log` edge); `_fd_changes` and `_fd_sync_clients` added to §9.2's ER diagram.
 - `sc-stream` builds warning-free without its `mqtt` feature (an unused `mut`).
 
+## Test: a boolean literal is a default for a required bool field
+
+User question: are `true` / `false` accepted as default expressions on a `NOT NULL` field?
+They are — no code change needed. A default is filled only when the field is left out or
+sent as `null`, so a `false` result is kept and a given `false` is never overwritten.
+
+- Test: `default_values::a_boolean_literal_is_a_default_for_a_bool_field`.
+
 ## `new Date()` is accepted in formulas, so a date field can default to today
 
 User request: a date field's default value `new Date()` was refused, because the formula

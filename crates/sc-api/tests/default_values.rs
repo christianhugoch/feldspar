@@ -378,3 +378,49 @@ async fn new_date_is_a_default_for_date_and_timestamp_fields() -> Result<()> {
     assert_eq!(row["fixed"], json!("2026-03-04"));
     Ok(())
 }
+
+#[tokio::test]
+async fn a_boolean_literal_is_a_default_for_a_bool_field() -> Result<()> {
+    let db = TestDb::new().await?;
+    let catalog = setup(&db).await?;
+    schema_edit::apply(
+        &catalog,
+        &[Operation::CreateTable {
+            name: "flags".into(),
+            database: String::new(),
+            settings: TableSettings::default(),
+            fields: vec![
+                FieldSpec {
+                    primary_key: true,
+                    ..field("id", "int")
+                },
+                field("title", "text"),
+                required_with_default("active", "bool", "true"),
+                required_with_default("archived", "bool", "false"),
+            ],
+        }],
+        &ApplyOptions::default(),
+    )
+    .await?;
+    let flags = catalog.require("flags")?;
+    assert_eq!(
+        flags.field("archived").unwrap().default_expression.as_deref(),
+        Some("false")
+    );
+
+    // Left out: each takes its default — `false` is a value, not a missing one.
+    let row = sc_api::rows::create_row(&catalog, &flags, &json!({ "title": "a" })).await?;
+    assert_eq!(row["active"], json!(true));
+    assert_eq!(row["archived"], json!(false));
+
+    // Given: the body's value wins, including a `false` over a `true` default.
+    let row = sc_api::rows::create_row(
+        &catalog,
+        &flags,
+        &json!({ "title": "b", "active": false, "archived": true }),
+    )
+    .await?;
+    assert_eq!(row["active"], json!(false));
+    assert_eq!(row["archived"], json!(true));
+    Ok(())
+}
