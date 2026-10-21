@@ -10684,7 +10684,14 @@ document stream: `openDocument(stream, key)` → `{doc, awareness, field, root, 
 error, onChange, close}`, `docs.<stream>.open(key)`, and React's `useDocument(docs.<stream>, key)`.
 It applies `doc_sync` and answers it with what the server lacks
 (`encodeStateAsUpdate(doc, encodeStateVectorFromUpdate(sync))`), so edits made while disconnected
-arrive; sends local edits while synced and allowed; reports `reconnecting` as soon as the socket
+arrive; sends local edits while synced and allowed — **coalesced**, the edits of one
+`editInterval` (100 ms) merged with `Y.mergeUpdates` into one `doc_update`, and its own awareness
+throttled to one presence per `presenceInterval` (150 ms, the latest winning), so a fast typist
+stays well under the 20-a-second rates; answers a `rate_limited` refusal (which does not say which
+frame it refused) by sending again, after a backoff from `retryDelay` (1 s, doubling to 8 s while
+refusals keep coming), everything it sent in the last 5 s and everything pending, merged — Yjs
+ignores what the server has — and its awareness, and never shows `rate_limited` as the page's
+`error` (the options are `openDocument(stream, key, options)`'s third argument); reports `reconnecting` as soon as the socket
 drops; and carries the awareness as the page's presence state — `encodeAwarenessUpdate` in
 base64, applied with `applyAwarenessUpdate`, dropped with `removeAwarenessStates` when a member
 leaves — so the server never looks inside it. **Deviation:** the plan's `live.<doc>.open(key)` is

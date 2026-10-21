@@ -2,7 +2,34 @@
 
 Changes in reverse chronological order.
 
-## CI green again: formatting, clippy 1.99 lints, and drifted tests
+## Fix: document edits refused `rate_limited` were lost
+
+Bug report: with TipTap's Collaboration, every keystroke was its own `doc_update`, so a fast
+(or scripted) typist passed the server's 20 edits a second; the server answered
+`rate_limited … send it again`, and the generated `live-doc.ts` never did — the text stayed in
+the typist's browser only, and was gone after a reload. The `rate_limited` also stayed on the
+document as its `error`, which looked like lost access. (Presence was never counted against the
+edit rate — it has its own bucket — but it was close to its own.) The server is unchanged.
+
+- `live-doc.ts` (`openCore`): local edits are **coalesced** — one `doc_update` per
+  `editInterval` (100 ms), merged with `Y.mergeUpdates`; edits made out of sync are left to the
+  next `doc_sync`'s diff, as before.
+- Its awareness goes out at most every `presenceInterval` (150 ms), the latest winning.
+- On `rate_limited` it waits (`retryDelay` 1 s, doubling to 8 s while refusals keep coming) and
+  sends everything sent in the last 5 s and everything pending, merged, as one frame (Yjs
+  ignores duplicates), plus its awareness. `rate_limited` is no longer the page's `error`;
+  every other refusal still is.
+- `openDocument(stream, key, options?)`, `docs.<stream>.open(key, options?)` and
+  `openQueryDocument(open, connection?, options?)` take `DocumentOptions`
+  `{ editInterval, presenceInterval, retryDelay }`.
+- Design doc (L5.6 client) and tutorial part 5's limits say so.
+- Test: `live_doc::quick_edits_are_coalesced_and_rate_limited_ones_are_sent_again` — 200
+  keystrokes are at most two frames, 20 cursor moves at most three presences, a refused edit
+  is sent again after the delay (twice refused: after a longer one) and all 251 characters
+  arrive, and `too_large` is still the page's error. The existing drivers wait for the
+  coalesced frame.
+
+: formatting, clippy 1.99 lints, and drifted tests
 
 - `cargo fmt --all` over the files recent work left unformatted.
 - **Clippy 1.99:** `async-trait` 0.1.89 → 0.1.92 (the old expansion tripped
