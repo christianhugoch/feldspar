@@ -90,6 +90,25 @@ pub trait Action: Send + Sync {
         Ok(())
     }
 
+    /// What a direct run's payload carries — the body of `POST
+    /// {mount}/actions/<trigger>` — in a code query's `returns` type language
+    /// (`sc_api::parse_returns`), always an `{ "object": … }`. It types the
+    /// generated `api.run<Name>()` argument, as the declared part of an open
+    /// object. `None`, the default, is untyped: the argument is `unknown`.
+    ///
+    /// Raw JSON rather than a schema because the type language lives in
+    /// `sc-api`, above this crate; it is lowered, and a bad one refused, there.
+    fn payload_type(&self) -> Option<Json> {
+        None
+    }
+
+    /// What [`run`](Action::run) answers, in the same type language: the
+    /// response type of `api.run<Name>()`. A contract for the client, never
+    /// checked against an answer. `None`, the default, is `unknown`.
+    fn returns_type(&self) -> Option<Json> {
+        None
+    }
+
     /// Run against `ctx`, returning the action's result.
     ///
     /// The result is the response body of a directly-run trigger, and will be a

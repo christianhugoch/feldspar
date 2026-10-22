@@ -51,6 +51,10 @@ pub struct ModuleAction {
     /// Where the module may keep files (TODO-imap M6): what its declared file
     /// fields name, and what `files` in the argument object reaches.
     areas: Arc<Vec<FileArea>>,
+    /// What a direct run takes and answers, as the module declared them
+    /// ([`Action::payload_type`], [`Action::returns_type`]).
+    payload: Option<Json>,
+    returns: Option<Json>,
 }
 
 impl ModuleAction {
@@ -79,7 +83,19 @@ impl ModuleAction {
             host,
             surfaces,
             areas: Arc::new(Vec::new()),
+            payload: None,
+            returns: None,
         }
+    }
+
+    /// The same action, typed: what its payload carries and what it answers,
+    /// in a code query's `returns` type language. Checked by whoever registers
+    /// it ([`sc_api::action_types`]), which says what is wrong with one.
+    #[must_use]
+    pub fn with_types(mut self, payload: Option<Json>, returns: Option<Json>) -> ModuleAction {
+        self.payload = payload;
+        self.returns = returns;
+        self
     }
 
     /// The same action, able to keep files in its module's `areas`.
@@ -107,6 +123,14 @@ impl Action for ModuleAction {
 
     fn config_spec(&self) -> Vec<FormField> {
         self.config_spec.clone()
+    }
+
+    fn payload_type(&self) -> Option<Json> {
+        self.payload.clone()
+    }
+
+    fn returns_type(&self) -> Option<Json> {
+        self.returns.clone()
     }
 
     async fn run(&self, ctx: &mut ActionContext<'_>) -> Result<Json> {

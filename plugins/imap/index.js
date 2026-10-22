@@ -24,27 +24,98 @@
 // installed package, so the server (and `bundled_catalog`'s test) can read its tables without
 // `npm install` having run.
 
-/** The actions (`actions.js`), by name, with what the trigger editor says of each. */
+/** What the action types say, in a code query's `returns` type language (tutorial-modules): a
+ * payload is the declared part of what an application sends, a `returns` what it gets back. They
+ * type the application's generated `api.runMail…()` methods. */
+const opt = (t) => ({ optional: t });
+const IDS = { message_ids: opt({ array: "int" }), message_id: opt("int") };
+const MOVED = { missing: { array: "int" }, not_on_server: { array: "int" } };
+const ADDRESSES = opt({ union: ["string", { array: { union: ["string", { object: { name: opt("string"), address: "string" } }] } }] });
+const ATTACHMENTS = opt({
+  array: {
+    union: [
+      { object: { store: "string", path: "string", filename: opt("string"), content_type: opt("string"), cid: opt("string") } },
+      { object: { attachment_id: "int", filename: opt("string"), cid: opt("string") } },
+    ],
+  },
+});
+const MESSAGE = {
+  account_id: "int", to: ADDRESSES, cc: ADDRESSES, bcc: ADDRESSES, subject: opt("string"),
+  text: opt("string"), html: opt("string"), attachments: ATTACHMENTS, in_reply_to: opt("int"),
+};
+const ACCOUNT = Object.fromEntries(
+  ["email", "imap_host", "imap_security", "imap_user", "imap_password", "smtp_host", "smtp_security", "smtp_user", "smtp_password"]
+    .map((k) => [k, opt("string")])
+    .concat([["imap_port", opt("int")], ["smtp_port", opt("int")], ["account_id", opt("int")]]),
+);
+
+/** The actions (`actions.js`), by name, with what the trigger editor says of each and their types. */
 const ACTIONS = {
-  mail_test_account: "Log in to an account's IMAP and SMTP servers with the settings given (saved or not). Answers { imap, smtp, error }.",
-  mail_sync_now: "Sync an account now. Payload: { account_id, wait }.",
-  mail_set_flags: "Mark messages read or unread, flagged or not, on the server and in the table. Payload: { message_ids, seen, flagged }.",
-  mail_attachment: "Store an attachment's file if it is not stored yet, and answer its File path. Payload: { attachment_id }.",
-  mail_fetch_body: "Fetch the body of a message stored with its headers only (mirror mode's older mail). Payload: { message_id }.",
-  mail_move: "Move messages to another folder of their account, on the server and in the table. Payload: { message_ids, target } (a path, or role:trash, role:archive, …).",
-  mail_delete: "Delete messages: to Trash, or for good when permanent (or already in Trash). Mirror accounts. Payload: { message_ids, permanent }.",
-  mail_create_folder: "Create a folder on a mirror account's server. Payload: { account_id, name, parent }.",
-  mail_save_draft: "Save a draft in the account's Drafts folder, replacing an earlier one. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, replaces }.",
-  mail_send: "Send a message through the account's SMTP server and keep a copy in Sent. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id }.",
+  mail_test_account: {
+    description: "Log in to an account's IMAP and SMTP servers with the settings given (saved or not). Answers { imap, smtp, error }.",
+    payload: { object: ACCOUNT },
+    returns: { object: { imap: "bool", smtp: opt("bool"), error: opt("string") } },
+  },
+  mail_sync_now: {
+    description: "Sync an account now. Payload: { account_id, wait }.",
+    payload: { object: { account_id: "int", wait: opt("bool") } },
+    returns: { object: { queued: "bool", status: opt("string"), error: opt("string") } },
+  },
+  mail_set_flags: {
+    description: "Mark messages read or unread, flagged or not, on the server and in the table. Payload: { message_ids, seen, flagged }.",
+    payload: { object: { ...IDS, seen: opt("bool"), flagged: opt("bool") } },
+    returns: { object: { updated: { array: "int" }, ...MOVED } },
+  },
+  mail_attachment: {
+    description: "Store an attachment's file if it is not stored yet, and answer its File path. Payload: { attachment_id }.",
+    payload: { object: { attachment_id: "int" } },
+    returns: { object: { file: "string", stored: "bool" } },
+  },
+  mail_fetch_body: {
+    description: "Fetch the body of a message stored with its headers only (mirror mode's older mail). Payload: { message_id }.",
+    payload: { object: { message_id: "int" } },
+    returns: { object: { id: "int", body_state: "string", fetched: "bool" } },
+  },
+  mail_move: {
+    description: "Move messages to another folder of their account, on the server and in the table. Payload: { message_ids, target } (a path, or role:trash, role:archive, …).",
+    payload: { object: { ...IDS, target: "string" } },
+    returns: { object: { moved: { array: "int" }, ...MOVED } },
+  },
+  mail_delete: {
+    description: "Delete messages: to Trash, or for good when permanent (or already in Trash). Mirror accounts. Payload: { message_ids, permanent }.",
+    payload: { object: { ...IDS, permanent: opt("bool") } },
+    returns: { object: { trashed: { array: "int" }, deleted: { array: "int" }, ...MOVED } },
+  },
+  mail_create_folder: {
+    description: "Create a folder on a mirror account's server. Payload: { account_id, name, parent }.",
+    payload: { object: { account_id: "int", name: "string", parent: opt("string") } },
+    returns: { object: { id: "int", path: "string" } },
+  },
+  mail_save_draft: {
+    description: "Save a draft in the account's Drafts folder, replacing an earlier one. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, replaces }.",
+    payload: { object: { ...MESSAGE, replaces: opt("int") } },
+    returns: { object: { id: opt("int"), uid: opt("int"), message_id: "string", replaced: opt("int") } },
+  },
+  mail_send: {
+    description: "Send a message through the account's SMTP server and keep a copy in Sent. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id }.",
+    payload: { object: { ...MESSAGE, draft_id: opt("int") } },
+    returns: {
+      object: {
+        message_id: "string", id: opt("int"), saved: "bool", save_error: opt("string"),
+        accepted: { array: "string" }, rejected: { array: "string" },
+        draft_deleted: opt("bool"), warnings: opt({ array: "string" }),
+      },
+    },
+  },
 };
 
 /** v1's `actions(configuration)`: the module's settings reach an action this way, because the
  * `configuration` in an action's argument is its trigger's, not the module's. */
 const actions = (configuration) =>
   Object.fromEntries(
-    Object.entries(ACTIONS).map(([name, description]) => [
+    Object.entries(ACTIONS).map(([name, { description, payload, returns }]) => [
       name,
-      { description, run: (args) => require("./actions.js").actions[name]({ ...args, settings: configuration || {} }) },
+      { description, payload, returns, run: (args) => require("./actions.js").actions[name]({ ...args, settings: configuration || {} }) },
     ]),
   );
 

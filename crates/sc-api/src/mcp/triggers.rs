@@ -429,6 +429,14 @@ async fn describe_action(ctx: &ToolContext<'_>, args: &Json) -> Result<Json> {
         "table": table,
         "settings": spec.iter().map(setting_json).collect::<Vec<_>>(),
     });
+    // What a direct run takes and answers, where the action says: the types of
+    // `api.run<Name>()` once a `none` trigger over it is exposed on an app.
+    if let Some(payload) = action.payload_type() {
+        out["payload"] = payload;
+    }
+    if let Some(returns) = action.returns_type() {
+        out["returns"] = returns;
+    }
     // A JavaScript body is the one setting whose *contents* the model must be
     // taught: it is keyed on the declaration's own language hint rather than on
     // the action's name, so a plugin's code-taking action gets it too.

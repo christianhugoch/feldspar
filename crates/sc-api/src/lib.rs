@@ -90,6 +90,7 @@ pub use provider::{
     StreamOpening,
 };
 pub use resource::{ResourceField, ResourceFile, ResourceModel, ResourceOps};
+pub use rest::action_types::{ActionTypes, action_types};
 pub use rest::custom::{
     BodyType, CFG_QUERIES as REST_CFG_QUERIES, CustomParam, CustomQuery, DEFAULT_PUBLIC_RATE,
     EffectiveRateLimit, QueryColumn, QueryLanguage, QueryRateLimit, ResponseType, custom_queries,

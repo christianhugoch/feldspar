@@ -1768,6 +1768,27 @@ async fn a_trigger_is_exposed_on_an_app_and_removed_over_mcp() -> sc_error::Resu
     .await;
     mount_shop(&catalog, &apps, &["audit"]).await?;
 
+    // The section is advertised, not only accepted: an agent reads the schema.
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (_, listed) = McpRequest::new(&builder, list).send(&router).await;
+    let update = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == json!("update_application"))
+        .expect("update_application is offered");
+    assert!(
+        update["inputSchema"]["properties"]["triggers"]["properties"]["add"].is_object(),
+        "{update}"
+    );
+    assert!(
+        update["description"]
+            .as_str()
+            .unwrap()
+            .contains("`triggers` — the **triggers** it exposes"),
+        "{update}"
+    );
+
     let insert = json!({ "table": "audit", "values": { "title": "payload.what" } });
     for (name, when, min_role) in [
         ("log_visit", "none", Some(80)),

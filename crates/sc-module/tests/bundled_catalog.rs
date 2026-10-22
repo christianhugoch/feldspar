@@ -268,6 +268,49 @@ fn the_mail_module_ships_and_declares_the_tables_its_card_lists() {
     assert_eq!(names, imap.tables);
 }
 
+/// Every mail action declares what an application sends it and gets back, and
+/// each declaration lowers — so `api.runMailSend()` and the rest are typed, and
+/// no declaration is dropped as "not a type" when the module loads.
+#[test]
+fn the_mail_actions_declare_types_that_lower() {
+    let imap = catalog()
+        .get("imap")
+        .expect("the mail module ships")
+        .clone();
+    let script = "const a = require(process.argv[1]).actions({}); \
+                  console.log(JSON.stringify(Object.fromEntries(Object.entries(a) \
+                  .map(([n, x]) => [n, { payload: x.payload, returns: x.returns }]))))";
+    let output = match std::process::Command::new("node")
+        .args(["-e", script])
+        .arg(imap.directory.join("index.js"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("the mail actions' types: skipped, there is no `node` to evaluate index.js");
+            return;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("the actions' types are JSON");
+    assert_eq!(actions.len(), 10, "{actions:?}");
+    for (name, types) in &actions {
+        match sc_api::parse_returns(&types["payload"]) {
+            Ok(sc_api::TypeSchema::Struct(_)) => {}
+            other => panic!("{name}'s payload: {other:?}"),
+        }
+        if let Err(e) = sc_api::parse_returns(&types["returns"]) {
+            panic!("{name}'s returns: {e}");
+        }
+    }
+}
+
 /// TODO-imap M10.1: the catalog the Modules tab shows is the one
 /// `plugins/README.md` documents — each bundled module has its row there, with
 /// its directory and its package's name, so a module added to `plugins/` is

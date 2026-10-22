@@ -205,6 +205,36 @@ Nothing was restarted. Installing a module rebuilds the action set the trigger d
 from and revalidates every stored trigger against it, so a trigger you saved *before* installing
 the module (and which was refused as "unknown action") starts working the moment it is there.
 
+### Typing an action an application calls
+
+An action is also callable from an application: a trigger with event **None** over it, exposed
+on the app (the app's **Triggers** tick boxes, or `update_application` with `triggers`), is
+`api.run<Name>(payload)` in the generated client. By default that method takes and answers
+`unknown`. A module can say what the action takes and answers, beside `run`, in the type
+language a code query's `returns` uses (`"string"`, `"int"`, `"bool"`, `"json"`, …,
+`{ object: { … } }`, `{ array: T }`, `{ optional: T }`, `{ union: [T, …] }`):
+
+```js
+mail_test_account: {
+  description: "Log in to an account's IMAP and SMTP servers with the settings given.",
+  payload: { object: { account_id: { optional: "int" }, email: { optional: "string" } } },
+  returns: { object: { imap: "bool", smtp: { optional: "bool" }, error: { optional: "string" } } },
+  run: async ({ payload, user }) => { … },
+},
+```
+
+```ts
+runMailTestAccount(body?: RunMailTestAccountRequest): Promise<RunMailTestAccountResponse>;
+// RunMailTestAccountRequest = { account_id?: number | null; email?: string | null } & Record<string, unknown>
+// RunMailTestAccountResponse = { imap: boolean; smtp?: boolean | null; error?: string | null }
+```
+
+`payload` is always an `object`: the fields the action reads. They are the typed part of an open
+object, so a caller may still send more. Both declarations are a contract for the client and are
+not checked when the action runs. One that is not a type is reported on the module's card, and
+that action's method stays `unknown`. `describe_action` shows both to an agent. The bundled mail
+module declares them for all ten of its actions.
+
 ## Step 5 — Call its functions
 
 A v1 plugin can supply **functions** as well as actions — `@saltcorn/markdown`'s `md_to_html`,

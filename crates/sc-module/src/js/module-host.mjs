@@ -2102,11 +2102,25 @@ async function loadModule({ module: name, dir, configuration }) {
     } catch (e) {
       issues.push(`the action "${actionName}" could not declare its settings: ${e.message}`);
     }
+    // `payload` and `returns`: what a direct run takes and answers, in a code
+    // query's `returns` type language. Data, so they are passed as they are and
+    // checked by the server; anything that is not JSON is dropped here.
+    const declared = (value) => {
+      if (value === undefined || value === null) return undefined;
+      try {
+        return JSON.parse(JSON.stringify(value));
+      } catch (e) {
+        issues.push(`the action "${actionName}" declares a type that is not JSON: ${e.message}`);
+        return undefined;
+      }
+    };
     actions.push({
       name: actionName,
       description: impl.description || "",
       requireRow: !!impl.requireRow,
       configFields,
+      payload: declared(impl.payload),
+      returns: declared(impl.returns),
     });
   }
 

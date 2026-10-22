@@ -2,6 +2,37 @@
 
 Changes in reverse chronological order.
 
+## Typed `api.run<Name>()` methods: actions declare their payload and answer
+
+An exposed trigger's client method used to take and answer `unknown`. An action can now declare
+what a direct run takes (`payload`) and answers (`returns`), in the type language a code query's
+`returns` already uses. The generated method is typed from that, for example
+`runMailTestAccount(body?: { account_id?: number | null; … } & Record<string, unknown>):
+Promise<{ imap: boolean; smtp?: boolean | null; error?: string | null }>`.
+
+- `sc-action`: `Action::payload_type` and `Action::returns_type`, both defaulting to `None`
+  (untyped). They return the raw declaration, because the type language lives in `sc-api`.
+- `sc-api`: `rest::action_types` with `ActionTypes` and `action_types(&dyn Action)`. It lowers both
+  through `parse_returns`; a payload must be an `{ object: … }`, and an error names the
+  declaration and where it is wrong. `RestProvider::with_trigger_types` types the exposed
+  triggers' endpoints. The payload becomes the input as an open object (`open_args`, so a caller
+  may send more), and `returns` becomes the output. Nothing is checked at run time.
+  `describe_action` now includes `payload` and `returns` when declared.
+- `sc-app`: `app_providers_with` looks each exposed trigger's action up in the dispatcher's
+  registry and applies its types. A declaration that does not lower leaves that method untyped
+  and does not fail the mount.
+- `sc-module`: an action object's `payload` and `returns` are passed through by the JS host
+  (`ActionManifest`) and held by `ModuleAction` (`with_types`). One that does not lower is
+  reported as a module issue and dropped, and the action still runs. Python modules
+  (`PyModuleAction`) do not read declarations yet.
+- `plugins/imap`: all ten mail actions declare their payload and answer, read from what
+  `actions.js` takes and returns.
+- Docs: `tutorial-modules.md` Step 4, "Typing an action an application calls".
+- Tests: `sc-api` unit tests (lowering and the error wording; a typed trigger's generated
+  TypeScript method beside an untyped one). `sc-module`: the echo fixture's `echo_row` declares
+  both and they reach the registry, while an undeclared action stays untyped. The mail module's
+  ten declarations all lower (evaluated with node).
+
 ## Agents can expose triggers on an application: `update_application`'s `triggers` section and `feldspar app triggers`
 
 Before, only the admin form's tick box could expose a trigger, so an agent could create a

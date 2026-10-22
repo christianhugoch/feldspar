@@ -171,6 +171,14 @@ pub struct ActionManifest {
     /// [`crate::spec`], never interpreted here.
     #[serde(default, rename = "configFields")]
     pub config_fields: Vec<Json>,
+    /// What a direct run's payload carries, in a code query's `returns` type
+    /// language — an `{ "object": … }` — when the module declared it
+    /// (`sc_action::Action::payload_type`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Json>,
+    /// What the action answers, in the same language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns: Option<Json>,
 }
 
 /// One argument of a module function, as v1 declares it.

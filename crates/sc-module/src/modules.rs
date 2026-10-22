@@ -371,7 +371,7 @@ async fn load_one(
             &format!("the action `{}`", action.name),
         );
         issues.extend(action_issues);
-        let registered = ModuleAction::new(
+        let mut registered = ModuleAction::new(
             &module.name,
             &action.name,
             &action.description,
@@ -379,7 +379,18 @@ async fn load_one(
             Arc::clone(host),
             Arc::clone(surfaces),
         )
-        .with_file_areas(Arc::clone(&areas));
+        .with_file_areas(Arc::clone(&areas))
+        .with_types(action.payload.clone(), action.returns.clone());
+        // A type that does not lower is reported and dropped: the action still
+        // runs, and its client method is `unknown` rather than wrong.
+        if let Err(e) = sc_api::action_types(&registered) {
+            issues.push(format!(
+                "the action `{}` declares a type that is not one ({e}); its client \
+                 method is untyped",
+                action.name
+            ));
+            registered = registered.with_types(None, None);
+        }
         if let Err(e) = registry.register(Arc::new(registered)) {
             // The built-in — or the module that got there first — keeps the
             // name. Which implementation answers to `insert_row` must not
@@ -513,6 +524,8 @@ mod tests {
                 description: String::new(),
                 require_row: false,
                 config_fields: Vec::new(),
+                payload: None,
+                returns: None,
             }],
             functions: Vec::new(),
             table_providers: Vec::new(),

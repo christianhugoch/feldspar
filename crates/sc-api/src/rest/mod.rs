@@ -70,6 +70,7 @@ use sc_query::Value;
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::{Value as Json, json};
 
+pub mod action_types;
 pub mod custom;
 pub mod password;
 mod query;
@@ -918,6 +919,30 @@ impl RestProvider {
     /// symbolically and fails closed on the rest.
     pub fn with_evaluator(mut self, evaluator: Arc<dyn JsEvaluator>) -> RestProvider {
         self.evaluator = Some(evaluator);
+        self
+    }
+
+    /// Type the exposed triggers' endpoints from what their actions declare,
+    /// keyed by trigger name ([`action_types::action_types`]). A trigger not in `types`, or
+    /// whose action declared nothing, stays `json` in and out.
+    pub fn with_trigger_types(
+        mut self,
+        types: &HashMap<String, action_types::ActionTypes>,
+    ) -> RestProvider {
+        for (endpoint, trigger) in &self.trigger_routes {
+            let (Some(declared), Some(ep)) =
+                (types.get(trigger), self.endpoints.find_mut(endpoint))
+            else {
+                continue;
+            };
+            if let Some(payload) = &declared.payload {
+                ep.input = payload.clone();
+                ep.open_args = true;
+            }
+            if let Some(returns) = &declared.returns {
+                ep.output = returns.clone();
+            }
+        }
         self
     }
 
@@ -2810,5 +2835,50 @@ mod tests {
         // And the setting the spec declares is the setting this reads.
         let spec = rest_config_spec();
         assert!(spec.iter().any(|f| f.name() == CFG_ROW_CAP));
+    }
+
+    #[test]
+    fn a_declaring_action_types_its_run_method_and_the_rest_stay_unknown() {
+        use sc_action::{EventKind, Trigger};
+
+        let typed = Trigger::new("mail_test_account", EventKind::None, "mail_test_account");
+        let plain = Trigger::new("send_digest", EventKind::None, "fetch");
+        let declared = action_types::ActionTypes {
+            payload: Some(
+                super::returns::parse_returns(&serde_json::json!({ "object": {
+                    "email": { "optional": "string" },
+                    "account_id": { "optional": "int" },
+                } }))
+                .unwrap(),
+            ),
+            returns: Some(
+                super::returns::parse_returns(&serde_json::json!({ "object": {
+                    "imap": "bool",
+                    "smtp": { "optional": "bool" },
+                    "error": { "optional": "string" },
+                } }))
+                .unwrap(),
+            ),
+        };
+        let types = HashMap::from([("mail_test_account".to_owned(), declared)]);
+        let p = RestProvider::project_with("/api", &[], &[typed, plain]).with_trigger_types(&types);
+
+        let ep = p.endpoints().find("runMailTestAccount").unwrap();
+        assert!(ep.open_args, "the action still reads whatever arrives");
+        assert!(matches!(ep.output, TypeSchema::Struct(ref f) if f.len() == 3));
+        let untyped = p.endpoints().find("runSendDigest").unwrap();
+        assert_eq!(untyped.output, TypeSchema::json());
+
+        let client = crate::generate_client(p.endpoints());
+        let method = client
+            .lines()
+            .find(|l| l.contains("runMailTestAccount("))
+            .unwrap_or_else(|| panic!("no runMailTestAccount in:\n{client}"));
+        assert!(!method.contains("unknown"), "{method}");
+        assert!(
+            client.contains("imap: boolean") && client.contains("error?: string | null"),
+            "{client}"
+        );
+        assert!(client.contains("email?: string | null"), "{client}");
     }
 }

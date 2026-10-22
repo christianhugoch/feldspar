@@ -50,6 +50,9 @@ module.exports = {
         { name: "times", label: "Times", type: "Integer", default: 1 },
         { name: "loud", type: "Bool" },
       ],
+      // What a direct run takes and answers, for the client's `runEchoRow`.
+      payload: { object: { what: { optional: "string" } } },
+      returns: { object: { greeting: "string", row: "json", mode: { optional: "string" } } },
       run: async ({ row, table, configuration, user, mode }) => ({
         greeting: configuration.greeting,
         row,
