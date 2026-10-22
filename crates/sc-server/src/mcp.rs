@@ -525,8 +525,11 @@ fn tool_result(outcome: Result<Json>) -> Json {
 /// the catalog behind the descriptions is live — a set built at boot would list
 /// yesterday's tables in `describe_schema`'s prose.
 fn tool_set(state: &AppState, caller: &ApiCaller) -> ToolSet {
-    let grants = grants_from_attrs(&caller.token.grants);
-    let areas = areas_from_attrs(&caller.token.grants);
+    // `token_flags` first: a token stored with `allow_all` holds every flag,
+    // including one added after it was minted.
+    let flags = sc_api::mcp::token_flags(&caller.token.grants);
+    let grants = grants_from_attrs(&flags);
+    let areas = areas_from_attrs(&flags);
     sc_app::mcp::tool_set(grants, areas).with(state.mcp_endpoint_tools.iter().cloned())
 }
 

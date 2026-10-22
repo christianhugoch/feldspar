@@ -1198,7 +1198,7 @@ async fn mcp_token_command(args: &[String]) -> Result<()> {
 }
 
 /// `feldspar mcp-token create --label L (--email E | --admin) [--expires-in-days N]
-/// [--allow-…|--no-allow-…]… [--url ORIGIN] [--name NAME]`.
+/// [--allow-all] [--allow-…|--no-allow-…]… [--url ORIGIN] [--name NAME]`.
 ///
 /// Prints the secret, alone, on stdout — the one time it exists anywhere — and
 /// everything else on stderr.
@@ -2261,6 +2261,7 @@ fn print_usage() {
     eprintln!(
         "  feldspar mcp-token create --label TEXT (--email EMAIL | --admin) [--expires-in-days N]"
     );
+    eprintln!("                      [--allow-all]");
     eprintln!(
         "                      [--allow-create|--no-allow-create] [--allow-edit|--no-allow-edit]"
     );
@@ -2348,9 +2349,10 @@ fn print_usage() {
   mcp-token: mints, lists and revokes the bearer tokens the administration MCP
        server (POST /mcp) accepts — the same tokens Settings → Development
        mints. A token runs as an administrator: name one with --email, or
-       --admin for the first. Each of the six grants has a flag and its --no-
-       form; one left out takes its default (create, edit, triggers and
-       applications on; drop and access changes off). The secret is printed
+       --admin for the first. Each of the seven grants has a flag and its --no-
+       form; one left out is granted. --allow-all also grants every grant a
+       later version adds, stored on the token, and --no-allow-… still takes
+       single ones out (--allow-all --no-allow-drop). The secret is printed
        once, alone on stdout; the id to revoke it by and the `claude mcp add`
        line go to stderr. Turn the server on with `set-cfg mcp_enabled true`.
 

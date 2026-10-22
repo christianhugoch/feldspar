@@ -4301,10 +4301,14 @@ pub fn admin_endpoints() -> EndpointSet {
 /// Every field is optional on the way *in* and present on the way *out*: a
 /// client may leave a flag to its default, and a stored credential records what
 /// was actually agreed to rather than what a later default would say.
+///
+/// `allow_all` beside them holds every flag, including those a later version
+/// adds (`crate::mcp::ALLOW_ALL`).
 fn api_token_grants_schema() -> TypeSchema {
     TypeSchema::struct_of(
         crate::mcp::FLAG_KEYS
             .into_iter()
+            .chain([crate::mcp::ALLOW_ALL])
             .map(|key| StructField::new(key, TypeSchema::optional(TypeSchema::bool()))),
     )
 }

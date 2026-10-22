@@ -6802,7 +6802,7 @@ pub fn admin_handlers_with(
                     Some(Json::Object(map)) => map.clone(),
                     Some(_) => return Err(Error::invalid("`grants` must be an object")),
                 };
-                sc_api::mcp::validate_flags(&submitted)?;
+                sc_api::mcp::validate_token_flags(&submitted)?;
                 let grants = sc_api::mcp::token_flags_from_submitted(&submitted);
 
                 let expires_at = match obj.get("expires_in_days") {

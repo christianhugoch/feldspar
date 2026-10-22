@@ -1061,8 +1061,9 @@ about proxies first — behind a reverse proxy every peer looks local.
 
 ### 7.2 Minting a token
 
-The panel below those switches. A label, an expiry in days, and seven grants — all
-seven ticked on a fresh form, so untick what this agent should not have:
+The panel below those switches. A label, an expiry in days, an **All grants** switch
+and seven grants — all seven ticked on a fresh form, so untick what this agent should
+not have:
 
 | Grant | What it allows |
 |---|---|
@@ -1078,6 +1079,14 @@ seven ticked on a fresh form, so untick what this agent should not have:
 user of the deployment can reach. `allow_drop` at least announces itself.
 `allow_modules` is the other one: an installed package runs its own code with the
 server's privileges, and a Python one has no sandbox at all.
+
+**All grants** (off on a fresh form) is stored on the token as `allow_all`. A token
+with it also holds every grant a later version of Feldspar adds, without being minted
+again: the token already acts as the administrator who minted it, so a long-lived
+personal token or an agent launcher's token keeps working when a grant appears.
+Without it, a grant added after the mint is not held. A box left unticked beside
+**All grants** stays denied — "everything except dropping" is the switch on and
+`allow_drop` off.
 
 The token is shown **once**, prefixed `fspk_` — which is what makes it
 recognisable in a paste and greppable by a secret scanner — with the registration
@@ -1108,6 +1117,7 @@ feldspar mcp-token create --label "claude-code on my laptop" --admin \
 | `--email EMAIL` | the administrator the token runs as |
 | `--admin` | …or the first administrator. One of the two is required |
 | `--expires-in-days N` | lapse after N days; leave it out for a token that does not expire |
+| `--allow-all` | every grant this binary knows **and every grant a later version adds**, stored on the token as `allow_all` (the panel's **All grants**). Combine with `--no-allow-…` to leave single grants out |
 | `--allow-create` / `--no-allow-create` | create tables, fields, triggers and queries (default **on**) |
 | `--allow-edit` / `--no-allow-edit` | change existing ones (default **on**) |
 | `--allow-drop` / `--no-allow-drop` | drop and delete (default **on**) |
@@ -1120,7 +1130,16 @@ feldspar mcp-token create --label "claude-code on my laptop" --admin \
 
 plus the usual database flags. A grant left out is **granted** — the same as an
 untouched panel, where every box starts ticked; say `--no-allow-…` for each one
-the token should not have. The user must be an administrator; any other user
+the token should not have. A script or launcher that mints tokens for an agent
+should pass `--allow-all` (and `--no-allow-…` for what it withholds) rather than
+naming grants one by one, so it neither breaks nor silently under-grants when a
+release adds one:
+
+```bash
+token=$(feldspar mcp-token create --label agent --admin --allow-all --no-allow-drop)
+```
+
+ The user must be an administrator; any other user
 is refused, since the server would refuse every call the token made.
 
 The **secret is the only thing on stdout**, so it can be captured:
@@ -1364,7 +1383,8 @@ credential names a **user**, and it is checked against that user on every call.
 
 ### 7.7 Installing modules over MCP
 
-A token minted with `allow_modules` (on by default for a token, on the panel and as `--allow-modules`) is
+A token minted with `allow_modules` (on by default for a token: ticked on the panel, and granted
+unless `--no-allow-modules` is given; `--allow-all` includes it) is
 offered two more tools:
 
 | Tool | What it does |

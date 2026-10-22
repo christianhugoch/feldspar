@@ -2,6 +2,32 @@
 
 Changes in reverse chronological order.
 
+## MCP tokens: `allow_all`, stored on the token, and `--allow-all`
+
+A token can now hold every grant, including grants a later version adds, so scripts and launchers
+that mint tokens for agents (such as feldspar-hosted's `feldspar-claude`) no longer have to name
+each grant and no longer under-grant when one is added. Mints already defaulted every grant on;
+this adds the "and future ones" part.
+
+- `sc-api::mcp`: new `ALLOW_ALL` key (`"allow_all"`), stored in the token's `grants` beside the
+  seven explicit flags. `token_flags_from_submitted` always writes it (false unless asked for);
+  `validate_token_flags` accepts it on a mint; `token_flags` reads a stored row so that, with
+  `allow_all` on, a flag the row does not mention is granted. A flag stored `false` stays denied.
+  An `admin_copilot` agent's configuration does not take the key. The admin API's token-grants
+  schema has the field, and `client.ts` is regenerated.
+- `sc-server`: the MCP route reads a token through `token_flags` before building its tool set;
+  `createApiToken` validates with `validate_token_flags`.
+- `sc-cli`: `feldspar mcp-token create --allow-all` (combine with `--no-allow-…`, e.g.
+  `--allow-all --no-allow-drop`). `describe_grants` lists `allow_all` first. The help text no
+  longer says drop and access changes default off.
+- Admin panel (Settings → Development): an **All grants** switch above the seven boxes (off on a
+  fresh form; the boxes still start ticked), sent as `allow_all`; the token list shows an "all"
+  badge, and `grantedKeys` counts a flag the row lacks as held when `allow_all` is on.
+- Docs: OPERATIONS §7.2 (the switch, the `--allow-all` row and a launcher example) and §7.7, and
+  the token paragraph in TECHNICAL_DESIGN.
+- Tests: `sc-api` unit test for a row missing a flag under `allow_all`, CLI parse/describe test,
+  admin API test minting with `allow_all` and refusing a non-boolean one, and panel model tests.
+
 ## F9: who may use an application — `min_role`, `max_role`, `access_if`
 
 Every application gets three settings that sit in front of every other rule it has.
