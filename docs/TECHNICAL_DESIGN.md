@@ -5807,6 +5807,42 @@ on any OS, and stores a dated profile in the file store. The worker cannot see t
 it chooses the certificate from App Store Connect alone, and the keychain check is left to the
 build.
 
+**Build hosts: a target built on another machine (planned, `TODO-build-hosts.md`).** iOS needs
+macOS, and the server usually runs on Linux. A Mac can be registered as a **build host** for
+some targets. It runs the same binary as `feldspar build-agent --server <url> --token <token>`
+and asks the server for work, rather than the server sending work to it. That way the Mac needs
+only outbound HTTPS (it is often behind NAT), exposes no endpoint of its own, and the server
+stays the one place that holds jobs, logs and artifacts. A second Mac is just another agent.
+
+*The build host never generates code, it only builds.* Before a job is handed out the server
+regenerates the client and runtime from its own catalog, as for a local build, and packs the
+project. The generated app names tables (`/api/persons`, sync specs by table name), never their
+ids, and talks to the server at runtime. So a build host needs no database, and nothing on it
+can drift from the server's schema. That is what Saltcorn 1's restored schema on a build
+machine got wrong: its table ids could differ from the server's.
+
+A job goes like this:
+
+1. The build button finds that the target's `requires` do not hold here, but an online build
+   host builds it. The job is queued in `_fd_build_jobs`, so it survives a restart.
+2. The server packs the project as a `tar.gz`, leaving out `node_modules` and what the build
+   makes (`android`, `ios`, `*-output`, `build-logs`), and Android signing keys from an iOS job.
+3. The agent claims the job by long-polling `/build-agent/*`. It gets the archive and the
+   rendered target: command, arguments, environment and artifact path.
+4. It builds in a workspace it keeps per application (so `node_modules` and the Pods stay), with
+   the local build's own code. The log goes back in chunks and is written to `build-logs/`. The
+   artifact is uploaded into the store at the usual path, so it is downloaded from Files as
+   before.
+5. A heartbeat renews the job's lease and carries a cancel back. A job whose lease runs out
+   fails, and every job has a timeout.
+
+A build host is a row in `_fd_build_hosts`: its name, its targets, the hash of its token, when
+it was last seen and what it last reported (OS, version, readiness per target). Its token opens
+the `/build-agent/*` routes and nothing else. Readiness then says where a target builds: here,
+on a named build host, or nowhere. The distribution certificate's private key stays in the
+Mac's keychain, as it does for a local build. The profile travels in the archive, and the App
+Store Connect key in the job's environment, only to an agent that holds a valid token.
+
 **A target's own settings are application settings, shown under the target.** A target may
 declare `options`, fields in the same vocabulary as `config_fields`. They configure that target
 for one application (an APK's build type and signing, an iOS app's provisioning profile), so they are not the
