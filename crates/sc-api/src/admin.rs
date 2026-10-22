@@ -5778,6 +5778,12 @@ fn application_fields() -> Vec<StructField> {
         StructField::new("uploads", TypeSchema::array(upload_slot_schema())),
         StructField::new("csp", TypeSchema::json()),
         StructField::new("attributes", TypeSchema::json()),
+        // Who may use the application at all (TODO F9): the least privileged
+        // role let in, the most privileged role held while using it, and a
+        // formula over `user` that must hold (empty for none).
+        StructField::new("min_role", TypeSchema::int()),
+        StructField::new("max_role", TypeSchema::int()),
+        StructField::new("access_if", TypeSchema::text()),
     ]
 }
 

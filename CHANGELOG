@@ -2,6 +2,64 @@
 
 Changes in reverse chronological order.
 
+## F9: who may use an application — `min_role`, `max_role`, `access_if`
+
+Every application gets three settings that sit in front of every other rule it has.
+
+- **`min_role`**: a user whose role number is higher may not use the application at all. Their
+  sign-in is refused before a session exists, and a session started elsewhere (a shared cookie)
+  is refused every request. Anonymous callers hold role 100, so they are refused too, except for
+  the sign-in itself.
+- **`max_role`**: a caller who is let in holds at most this role. The cap is applied to the
+  `User` before anything sees it, so endpoint floors, ownership formulas, RLS, code queries and
+  the live socket all see the capped role. An admin on an app with `max_role` 20 gets `role: 20`
+  from `whoami` and a 403 from an admin-only table.
+- **`access_if`**: a formula in the ownership-formula language, with `user` in scope (`null`
+  when nobody is signed in) and no row, such as `user.department === "Finance"` or a condition on
+  `new Date()`. It sees the user's real role. It fails closed (no evaluator, a throw or a timeout
+  refuses). On save it is validated against the users table's fields; a bare identifier, a
+  module function and `predict` are refused.
+
+How it is wired:
+
+- `sc-app`: the fields on `Application`, three nullable `_fd_applications` columns (NULL reads
+  as 100 / 1 / none; `TABLES_RENAME.sql` has the `ALTER TABLE`s), and a new `access` module with
+  `admit`, `cap_role` and `validate_access`, called from `save_application`. A `max_role` less
+  privileged than `min_role` is allowed: only staff get in, and all of them are served as that
+  role.
+- `sc-server`: `router::app_caller` now takes the application, applies the settings and
+  returns an `AppCaller { session, user, refused }`. Every application surface goes through it.
+  - API providers: a refused caller reaches only the sign-in endpoints
+    (`sc_api::SIGN_IN_ENDPOINTS`, through the new `ApiProvider::is_sign_in`), as nobody. They
+    are matched by name, not by `AuthRequirement::Public`, because tables with an ownership
+    formula and GraphQL are `Public` too.
+  - Frameworks: the bundle is served as nobody with the new `AppRequest::admitted = false`.
+    Saltcorn UI then serves only `/auth/*` and its assets, and sends everything else to sign in.
+  - Static directories: served as nobody, so only files open to the public role.
+  - Upload slots and the live socket refuse the caller. The socket's periodic re-check applies
+    the settings again and closes it with `signed_out` when they stop holding.
+  - The Analytics API: only its sign-in endpoints.
+  - `apply_session` refuses `SessionAction::Start` for an account the application refuses
+    (`SessionClient::for_app`). This covers the REST login, Saltcorn UI's form and the OAuth
+    completion; the OAuth completion checks first so it can redirect back with a reason.
+  - An application with none of the settings skips all of this.
+- Admin API: `min_role`, `max_role` and `access_if` on the application schema, create, update,
+  list, and therefore backup and restore. The four checked-in admin clients were regenerated;
+  the builder, IDE and analytics clients also picked up module-type drift that was already
+  there.
+- Admin UI: a "Who may use this application" section on the application form, with two role
+  selects and the formula.
+- MCP: `describe_applications` shows `access`, and `update_application` has an `access` section
+  that needs `allow_access_changes`, as `csp` does.
+- Tests: `sc-app` unit tests (admission, cap, fail-closed, ranges, the MCP section keeping keys
+  it was not given), and `sc-server/tests/app_access.rs`. The server test covers a sign-in
+  refused with no session started, a session from elsewhere refused, an anonymous caller
+  refused a role-100 table but reaching the login, an admin capped to 20, `access_if` on a
+  department column, and save-time refusal of an out-of-scope formula.
+  `saltcorn_ui_render.rs` checks that once `access_if` refuses everybody, a signed-in admin is
+  sent to sign in, the form is still served, and the sign-in is refused with a 403 and no
+  session.
+
 ## Mail module M10.1–M10.2: the client tutorial, the catalog, and the live-server matrix
 
 - **M10.1** [docs/tutorial-mail.md](docs/tutorial-mail.md) gets two steps.

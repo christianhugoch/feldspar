@@ -5223,6 +5223,9 @@ pub struct Application {
     pub apis: Vec<ApiConfig>,            // any number, each on a sub-path, each with its own config
     pub static_dirs: Vec<StaticDir>,     // any number, each served at a sub-path
     pub csp: CspPolicy,                  // strict by default
+    pub min_role: u8,                    // least privileged role let in at all (100: everybody)
+    pub max_role: u8,                    // most privileged role held while using it (1: no cap)
+    pub access_if: String,               // formula over `user` that must hold ("" : none)
     pub attributes: Attrs,               // sparse per-app values (§9 rule)
 }
 
@@ -5296,6 +5299,43 @@ file stores** rather than a text field (`ApplicationForm.tsx`): the set is short
 already on the screen, and a typo in a text field is silent until a 404. A stored value the list
 no longer offers is still shown and still selected, the pattern the framework picker on the same
 form uses, because a form must never silently discard what it was given to edit.
+
+**Who may use an application at all** (TODO F9). Three settings sit in front of every other rule
+an application has, and every surface of it applies them through one function,
+`router::app_caller` → `sc_app::admit`:
+
+- **`min_role`**: a caller whose role number is higher is not let in. Anonymous callers hold
+  the public role (100), so any `min_role` below 100 refuses them too.
+- **`access_if`**: a formula that must hold, in the ownership-formula language with `user` in
+  scope (`null` when nobody is signed in) and no row — so `new Date()` and the like work, and a
+  bare identifier is refused on save. It is validated against the users table's fields, may not
+  call a module function or `predict` (it fails closed, so a module that is down would lock
+  everybody out), and is evaluated per request on the formula isolate. It sees the caller's
+  **real** role: it is a question about the person.
+- **`max_role`**: a caller who is let in holds at most this role. The cap is applied to the
+  `User` value itself before anything else sees it, so endpoint floors, ownership formulas, RLS,
+  code queries, triggers and the live socket all see the capped role without knowing a cap exists.
+
+A caller who is not let in is served as nobody, and reaches only the **sign-in surface**:
+
+| Surface | Refused caller |
+|---|---|
+| API provider | only `SIGN_IN_ENDPOINTS` (`login`, `signup`, `forgotPassword`, `setPassword`), as nobody; anything else is 401 (anonymous) or 403 (signed in). Named rather than read off `AuthRequirement::Public`, which a table with an ownership formula and GraphQL also have. |
+| Framework | served as nobody with `AppRequest::admitted = false`. A bundle is served (it draws the sign-in); Saltcorn UI serves `/auth/*` and its assets and sends everything else to `/auth/login`. |
+| Static directory | served as nobody, so only a file open to the public role. |
+| Live socket, upload slots | refused. The socket's periodic re-check re-applies all three, so a role taken away or an `access_if` that stops holding closes it (`signed_out`). |
+| Analytics API | only its sign-in endpoints. |
+
+**A sign-in as an account the application refuses is refused before a session exists**:
+`apply_session` checks `SessionClient::app` on `SessionAction::Start`, which covers the REST
+login, a rendered Saltcorn UI form and an identity provider's completion alike (the OAuth
+completion checks first, to redirect back with a reason). Because a session cookie may be shared
+across applications, the gate is per request, not per session: a session started on another
+application is refused here as soon as it arrives.
+
+An application with none of the three set (`min_role` 100, `max_role` 1, empty `access_if`) does
+no work for them at all. The columns are nullable because the bootstrap adds them to existing
+rows; `NULL` reads back as those defaults.
 
 **Request bodies and upload slots** (TODO F2.5–F2.7). Every body the server reads into memory
 is bounded by `--max-request-body` (default 2 MiB, an explicit `DefaultBodyLimit` plus the

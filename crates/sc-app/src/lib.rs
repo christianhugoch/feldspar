@@ -42,6 +42,7 @@
 //! record itself is created by the server, which is the layer that knows agents
 //! exist.
 
+mod access;
 mod api;
 mod application;
 mod applications;
@@ -73,6 +74,7 @@ mod streams;
 mod target_ops;
 mod uploads;
 
+pub use access::{Admission, admit, cap_role};
 pub use api::{
     ApiProviderInfo, AppGraphql, api_provider_config_spec, app_client, app_client_with,
     app_endpoints, app_endpoints_with, app_graphql, app_providers, app_providers_with,

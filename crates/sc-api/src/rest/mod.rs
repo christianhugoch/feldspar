@@ -256,6 +256,13 @@ const INVITE: &str = "invite";
 const FORGOT_PASSWORD: &str = "forgotPassword";
 const SET_PASSWORD: &str = "setPassword";
 
+/// The endpoints that make up an application's **sign-in**: how a caller who
+/// is nobody yet becomes somebody, or gets back to being able to. A caller an
+/// application does not let in at all reaches these and nothing else (TODO
+/// F9) — named rather than read off [`AuthRequirement::Public`], which a table
+/// with an ownership formula has too.
+pub const SIGN_IN_ENDPOINTS: [&str; 4] = [LOGIN, SIGNUP, FORGOT_PASSWORD, SET_PASSWORD];
+
 /// Offline sync's endpoints (§14.11): `POST {mount}/sync/register`, `…/pull`
 /// and `…/push`, projected when one of the app's tables is synced.
 const SYNC_SEGMENT: &str = "sync";

@@ -18,6 +18,8 @@
 //!   socket. The streams themselves are instance-wide and written by
 //!   `edit_streams`; exposing one is an edit, like connecting a table, since
 //!   the stream's own `min_role` and row checks still decide who receives it.
+//! - **`access`**: who may use the application at all — `min_role`,
+//!   `max_role` and `access_if` (TODO F9).
 //!
 //! ## A grant per section, checked before anything changes
 //!
@@ -30,7 +32,7 @@
 //! `serve_static_dir`). A CSP **is** a security boundary — it decides what a
 //! page may load and who may frame it — so the `csp` section needs
 //! `allow_access_changes`, the grant that also guards a table's roles and a
-//! query's `min_role`.
+//! query's `min_role`. So does `access`, for the same reason.
 //!
 //! ## Through the admin's own update
 //!
@@ -79,6 +81,10 @@ const ARG_PATH: &str = "path";
 const ARG_LOCALES: &str = "locales";
 const ARG_DEFAULT_LOCALE: &str = "default_locale";
 const ARG_STREAMS: &str = "streams";
+const ARG_ACCESS: &str = "access";
+const ARG_MIN_ROLE: &str = "min_role";
+const ARG_MAX_ROLE: &str = "max_role";
+const ARG_ACCESS_IF: &str = "access_if";
 
 struct UpdateApp;
 
@@ -119,8 +125,8 @@ fn update_description(grants: &Grants) -> String {
                  widen, and why, before you do it."
         }
         false => {
-            " You may **not** change `csp`: it needs `allow_access_changes`. Tell \
-                  the person which directive the app needs instead."
+            " You may **not** change `csp` or `access`: they need \
+                  `allow_access_changes`. Tell the person what the app needs instead."
         }
     };
     format!(
@@ -176,7 +182,16 @@ fn update_description(grants: &Grants) -> String {
          app's live socket (`live.<stream>` in the generated client). `{ARG_ADD}`, \
          `{ARG_REMOVE}` and `{ARG_SET}` as for tables; create or change the streams \
          themselves with `{TOOL_EDIT_STREAMS}`. A `table_changes` or `document` \
-         stream needs its table connected too.\n\n\
+         stream needs its table connected too.\n\
+         - `{ARG_ACCESS}` — **who may use the application at all**, in front of \
+         every other rule. `{ARG_MIN_ROLE}`: a user whose role number is higher \
+         (less privileged) cannot sign in to it or call any endpoint; 100 lets \
+         everybody in. `{ARG_MAX_ROLE}`: the most privileged role anyone holds \
+         while using it — an admin on an app with `{ARG_MAX_ROLE}` 20 is served as \
+         role 20 by its endpoints, ownership formulas and code queries; 1 caps \
+         nobody. `{ARG_ACCESS_IF}`: a formula that must hold, with `user` in scope \
+         as in an ownership formula (`user.department === \"Finance\"`), or a \
+         condition on the time; empty for none. Give only the keys you change.\n\n\
          `{TOOL_DESCRIBE_APPS}` shows what each application has now. The running \
          app serves the change at once; a bundle written against tables it did \
          not have still needs a rebuild.{edit}{csp}"
@@ -299,6 +314,25 @@ fn update_parameters() -> Json {
                 },
                 "additionalProperties": false,
             },
+            ARG_ACCESS: {
+                "type": "object",
+                "description": "Change who may use the application at all.",
+                "properties": {
+                    ARG_MIN_ROLE: {
+                        "type": "integer",
+                        "description": "The least privileged role let in: 1 (admin) to 100 (public, everybody).",
+                    },
+                    ARG_MAX_ROLE: {
+                        "type": "integer",
+                        "description": "The most privileged role held while using it: 1 (no cap) to 100.",
+                    },
+                    ARG_ACCESS_IF: {
+                        "type": "string",
+                        "description": "A formula over `user` that must hold; empty for none.",
+                    },
+                },
+                "additionalProperties": false,
+            },
             ARG_LOCALES: {
                 "type": "object",
                 "description": "Change the languages it is served in.",
@@ -329,7 +363,13 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
             ARG_CSP,
             ARG_LOCALES,
             ARG_STREAMS,
+            ARG_ACCESS,
         ],
+    )?;
+    let access = section(
+        &args,
+        ARG_ACCESS,
+        &[ARG_MIN_ROLE, ARG_MAX_ROLE, ARG_ACCESS_IF],
     )?;
     let streams = section(&args, ARG_STREAMS, &[ARG_ADD, ARG_REMOVE, ARG_SET])?;
     let uploads = section(&args, ARG_UPLOADS, &[ARG_ADD, ARG_REMOVE])?;
@@ -350,10 +390,12 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         && csp.is_none()
         && locales.is_none()
         && streams.is_none()
+        && access.is_none()
     {
         return Err(Error::invalid(format!(
             "name at least one of `{ARG_TABLES}`, `{ARG_STATIC_DIRS}`, `{ARG_UPLOADS}`, \
-             `{ARG_CSP}`, `{ARG_LOCALES}` and `{ARG_STREAMS}`; nothing was changed"
+             `{ARG_CSP}`, `{ARG_LOCALES}`, `{ARG_STREAMS}` and `{ARG_ACCESS}`; nothing was \
+             changed"
         )));
     }
     // Every grant before any change: a refused section refuses the call.
@@ -396,6 +438,13 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         require_grant(
             grants.access_changes,
             "change an application's Content-Security-Policy",
+            GRANT_ACCESS_CHANGES,
+        )?;
+    }
+    if access.is_some() {
+        require_grant(
+            grants.access_changes,
+            "change who may use an application",
             GRANT_ACCESS_CHANGES,
         )?;
     }
@@ -446,6 +495,10 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
         was.insert(ARG_STREAMS.to_owned(), streams_json(&app));
         change_streams(ctx.catalog, &mut app, streams).await?;
     }
+    if let Some(access) = &access {
+        was.insert(ARG_ACCESS.to_owned(), access_json(&app));
+        change_access(&mut app, access)?;
+    }
 
     let saved = save(ctx, &app, &mut out).await?;
     if tables.is_some() {
@@ -467,6 +520,9 @@ async fn update_app(ctx: &ToolContext<'_>, grants: &Grants, args: &Json) -> Resu
     if streams.is_some() {
         out[ARG_STREAMS] = streams_json(&saved);
         out["live_socket"] = json!(crate::live_socket_path(&saved));
+    }
+    if access.is_some() {
+        out[ARG_ACCESS] = access_json(&saved);
     }
     out["was"] = Json::Object(was);
     Ok(out)
@@ -544,6 +600,52 @@ fn locales_json(app: &Application) -> Result<Json> {
         ARG_LOCALES: app_locales(app)?.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
         ARG_DEFAULT_LOCALE: app_default_locale(app)?.map(|l| l.as_str().to_owned()),
     }))
+}
+
+// --- access -------------------------------------------------------------------
+
+/// Set the keys of the `access` section that were given; the rest are kept.
+/// The ranges and the formula are checked by the save.
+fn change_access(app: &mut Application, section: &Map<String, Json>) -> Result<()> {
+    let role = |key: &str| -> Result<Option<u8>> {
+        match section.get(key) {
+            None | Some(Json::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|r| u8::try_from(r).ok())
+                .map(Some)
+                .ok_or_else(|| {
+                    Error::invalid(format!(
+                        "`{ARG_ACCESS}.{key}` should be a role number, 1 to 100, got {value}"
+                    ))
+                }),
+        }
+    };
+    if let Some(min) = role(ARG_MIN_ROLE)? {
+        app.min_role = min;
+    }
+    if let Some(max) = role(ARG_MAX_ROLE)? {
+        app.max_role = max;
+    }
+    match section.get(ARG_ACCESS_IF) {
+        None => {}
+        Some(Json::Null) => app.access_if.clear(),
+        Some(Json::String(formula)) => app.access_if = formula.trim().to_owned(),
+        Some(other) => {
+            return Err(Error::invalid(format!(
+                "`{ARG_ACCESS}.{ARG_ACCESS_IF}` should be a formula or empty, got {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn access_json(app: &Application) -> Json {
+    json!({
+        ARG_MIN_ROLE: app.min_role,
+        ARG_MAX_ROLE: app.max_role,
+        ARG_ACCESS_IF: app.access_if,
+    })
 }
 
 // --- tables -------------------------------------------------------------------
@@ -900,6 +1002,9 @@ async fn save(ctx: &ToolContext<'_>, app: &Application, out: &mut Json) -> Resul
     body["uploads"] = crate::upload_slots_json(&app.uploads);
     body["csp"] = csp_json(&app.csp);
     body["streams"] = streams_json(app);
+    body["min_role"] = json!(app.min_role);
+    body["max_role"] = json!(app.max_role);
+    body["access_if"] = json!(app.access_if);
     // Where the locales live (§9's column-vs-attributes rule).
     body["attributes"] = Json::Object(app.attributes.clone());
     let updated = host
@@ -1030,8 +1135,29 @@ mod tests {
             "{none}"
         );
         assert!(
-            none.contains("**not** change `csp`: it needs `allow_access_changes`"),
+            none.contains("**not** change `csp` or `access`: they need `allow_access_changes`"),
             "{none}"
         );
+    }
+
+    #[test]
+    fn access_keys_not_given_are_kept() {
+        let mut app = Application::new(
+            "Ledger",
+            "ledger",
+            crate::FrameworkRef {
+                name: "none".into(),
+                config: Default::default(),
+            },
+        )
+        .min_role(40)
+        .access_if("user.department === \"Finance\"");
+        change_access(&mut app, &section(json!({ "max_role": 20 }))).unwrap();
+        assert_eq!((app.min_role, app.max_role), (40, 20));
+        assert_eq!(app.access_if, "user.department === \"Finance\"");
+        change_access(&mut app, &section(json!({ "access_if": "" }))).unwrap();
+        assert!(app.access_if.is_empty());
+        assert!(change_access(&mut app, &section(json!({ "min_role": 400 }))).is_err());
+        assert!(change_access(&mut app, &section(json!({ "min_role": "admin" }))).is_err());
     }
 }

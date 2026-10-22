@@ -7187,6 +7187,9 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "uploads": sc_app::upload_slots_json(&app.uploads),
         "csp": csp_json(&app.csp),
         "attributes": Json::Object(app.attributes.clone()),
+        "min_role": app.min_role,
+        "max_role": app.max_role,
+        "access_if": app.access_if,
         "source": app_source_json(app),
         // A framework constructed from `sc-app`'s factory registry has nothing
         // to build: saving is its deployment (TODO "Saltcorn UI" 9.3).
@@ -7752,6 +7755,26 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         Some(Json::Object(o)) => o.clone(),
         Some(_) => return Err(Error::invalid("`attributes` must be an object")),
     };
+    // Absent is "let everybody in, as they are": the defaults a new application
+    // has. The ranges and the formula are checked on save.
+    let app_role = |key: &str, default: u8| -> Result<u8> {
+        match obj.get(key) {
+            None | Some(Json::Null) => Ok(default),
+            Some(value) => value
+                .as_u64()
+                .and_then(|r| u8::try_from(r).ok())
+                .ok_or_else(|| {
+                    Error::invalid(format!("`{key}` should be a role number, 1 to 100"))
+                }),
+        }
+    };
+    let min_role = app_role("min_role", sc_auth::ROLE_PUBLIC)?;
+    let max_role = app_role("max_role", sc_auth::ROLE_ADMIN)?;
+    let access_if = match obj.get("access_if") {
+        None | Some(Json::Null) => String::new(),
+        Some(Json::String(formula)) => formula.trim().to_owned(),
+        Some(_) => return Err(Error::invalid("`access_if` should be a formula, as text")),
+    };
 
     Ok(Application {
         id,
@@ -7768,6 +7791,9 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         static_dirs,
         uploads,
         csp,
+        min_role,
+        max_role,
+        access_if,
         attributes,
     })
 }
