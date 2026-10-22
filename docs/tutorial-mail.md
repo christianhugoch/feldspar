@@ -335,7 +335,9 @@ shown without letting it run anything or phone home, and a reply.
 - **Triggers:** one trigger per action, event **None**, minimum role user, named like the action
   (`mail_fetch_body`, `mail_set_flags`, `mail_attachment`, `mail_send`, and the others of Step 7
   you use), and tick them. The client then has `api.runMailFetchBody(…)`, `api.runMailSend(…)`
-  and so on.
+  and so on. An agent does the same with `save_trigger` (`when: "none"`, `min_role: 80`) and then
+  `update_application` with `triggers: { add: ["mail_fetch_body", …] }`; from a terminal it is
+  `feldspar app triggers add --app SUBDOMAIN mail_fetch_body …`.
 
 Build the app, so `src/feldspar/` is regenerated with the tables, `live` and the `run…` methods.
 

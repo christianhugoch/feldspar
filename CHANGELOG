@@ -2,6 +2,43 @@
 
 Changes in reverse chronological order.
 
+## Agents can expose triggers on an application: `update_application`'s `triggers` section and `feldspar app triggers`
+
+Before, only the admin form's tick box could expose a trigger, so an agent could create a
+`none` trigger over a module action (`mail_test_account`, `mail_send`, …) but could not make it
+`api.run<Name>()` in its app. Now it can, without anyone using the admin UI.
+
+- `sc-app`: new `exposed_triggers` module. `change_app_triggers` applies `add`/`remove`/`set` to
+  `Application::triggers`. It refuses, naming the trigger and changing nothing, when a newly
+  exposed trigger is missing or not usable (the live set's own reason), has an event other than
+  `none` ("it runs on `daily`…"), or would clash with another exposed trigger's client method. It
+  also refuses a `remove` of a trigger the app does not expose. A trigger that is already exposed
+  is kept as it is, so one deleted since can still be removed. `app_triggers_json` reports each
+  exposed trigger's `name`, `action`, `min_role`, `method` (`runMailSend`) and `route`
+  (`POST /api/actions/mail_send`), with a `note` when `min_role` is unset (admin-only) or the
+  trigger is not callable. `public_triggers` picks out the newly exposed ones with `min_role` 100.
+- MCP `update_application`: a `triggers` section (`add`, `remove`, `set`), saved together with the
+  other sections through the admin's `updateApplication`, which also remounts the app and rewrites
+  `src/feldspar/` at once. The section needs `allow_edit`, the same grant as `tables` and
+  `streams`. Exposing a public trigger (`min_role` 100) also needs `allow_access_changes`. The
+  answer includes `triggers` as above and `was.triggers`. The tool description explains the
+  section and lists what the token's grants refuse.
+- CLI: `feldspar app triggers (add|remove|list) --app SUBDOMAIN [NAME…] [--json]`. It installs the
+  services as `restore` does, so triggers over module actions are in the live set. It applies the
+  same rule, saves, and rewrites the client. A running server serves the change from its next
+  start. The help text and usage line include it.
+- Docs: the generated `SKILL.md` and the external-agent playbook (`sc-server` MCP instructions) now
+  say that a trigger must be exposed with `update_application` before the client has `run…`.
+  Also: `tutorial-mail.md` Step 10 (the agent and CLI routes) and OPERATIONS §7.3.
+- Not done: `save_trigger`'s `applications` shortcut (proposal 3) and typed answers for module
+  actions. The generated `run…` method is still typed `unknown → unknown`.
+- Tests: `sc-app` unit tests (method, route and role in the answer, the admin-only note,
+  missing/`daily`/`insert` refused by name, the public set, the method clash, removing a deleted
+  trigger, `set`). A `sc-server` MCP test covers the full loop: `save_trigger`, then expose two;
+  stored, mounted, `runLogVisit` in the client, in `describe_applications`; an event trigger and
+  a missing one refused; a public one refused without `allow_access_changes` and accepted with
+  it; removing one takes it out of the mount and the client. Plus a `sc-cli` parse test.
+
 ## MCP tokens: `allow_all`, stored on the token, and `--allow-all`
 
 A token can now hold every grant, including grants a later version adds, so scripts and launchers

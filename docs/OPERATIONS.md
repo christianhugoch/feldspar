@@ -1190,6 +1190,22 @@ still listed, with `project_dir: null` and the reason in `error`. Only the JSON 
 on stdout, so `jq -r '.[] | select(.subdomain=="todo") | .project_dir'` works
 directly on it.
 
+The triggers an application exposes (the admin form's **Triggers** tick boxes) are
+changed from the terminal the same way:
+
+```bash
+feldspar app triggers add    --app shop mail_test_account mail_send
+feldspar app triggers remove --app shop mail_send
+feldspar app triggers list   --app shop [--json]
+```
+
+Each exposed trigger is `POST <api mount>/actions/<name>` and `api.run<Name>()` in
+the generated client, which `add` and `remove` rewrite. Only a trigger with no event
+(`none`) can be added; who may call it is the trigger's own minimum role, and the
+listing notes one left unset (admin-only). A server already running on the database
+serves the change from its next start; an agent's `update_application` with a
+`triggers` section changes a running server at once.
+
 Then:
 
 ```bash

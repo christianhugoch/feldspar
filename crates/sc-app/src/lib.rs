@@ -54,6 +54,7 @@ mod code_libraries;
 // written down as data instead of compiled.
 mod declared;
 mod diagnostics;
+mod exposed_triggers;
 // Frameworks written in Rust above this crate (Saltcorn UI): named constructors.
 mod factory;
 mod framework;
@@ -117,6 +118,9 @@ pub use declared::{
     installed_frameworks,
 };
 pub use diagnostics::{Diagnostic, build_diagnostics, parse_diagnostics};
+pub use exposed_triggers::{
+    TriggerChange, app_triggers_json, change_app_triggers, public_triggers,
+};
 pub use factory::{
     FrameworkFactory, MountContext, framework_factories, framework_factory,
     install_framework_factory,
