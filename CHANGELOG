@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## Field report fixes: `db.sql` casts, trigger scope, `build-app`, module services
+
+From a second round of feedback on the PaddiMail application.
+
+- **`db.sql` string arguments take the SQL's cast.** `where account = $1::bigint` with `["10"]`
+  failed ("cannot convert between … String and … int8"). A text bind into an `int2`, `int4`,
+  `int8`, `float4`, `float8`, `numeric` or `bool` placeholder is now read the way Postgres
+  reads an untyped literal there (`PgParam`). Text that does not parse says so ("\"ten\" is not
+  a int8"). Uuid and date/time placeholders already worked this way.
+- **What a trigger's body has in scope, per event.** The code API reference (`describe_code_api`,
+  and `describe_action`'s `code_api`) has a table: `row`/`old`/`payload` for `insert`, `update`,
+  `delete`, `none`, the scheduled events, `login`/`startup`, `error` and `stream`. A `none`
+  trigger run through `POST /api/actions/<name>` gets the body as `payload`, and naming `row`
+  there is a `ReferenceError`. `describe_action` says this too.
+- **`save_trigger` says a trigger sees instance-wide code libraries only**, not an
+  application's own, even when an application exposes it.
+- **`feldspar build-app` builds an app that exposes triggers.** It loads the live trigger set
+  (with the modules, as `app triggers` does) when the app exposes any, instead of refusing with
+  "no trigger set is available in this context".
+- **Module services run only in `serve`.** Every command that installs the modules (`build-app`,
+  `app triggers`, `restore`) used to start their services too, so an IMAP sync ran beside the
+  server's for as long as the command did. `ModuleServices::start_services` is now called by
+  `serve` once it is up; module reloads restart services only after that.
+- **A module reload with a running service no longer hangs for 120 s and drops the module.**
+  Two causes, both fixed. (1) A call's asks were failed only when its loop ended. A call whose
+  future was dropped (a service whose stop outlasted the 10 s grace) left them unanswered, so
+  the module's promises never settled, and the next load's `stopServicesOf` waited on them
+  until the call timeout. A drop guard (`PendingAsks`) now refuses every outstanding and queued
+  ask. (2) A stop could overtake its start: `service_start` waits a microtask on the module's
+  `loading` promise, so a `service_stop` right behind it found nothing and the service started
+  with nobody to stop it. The stop now waits for a start in flight (`startingServices`), and the
+  supervisor polls the start before the stop.
+- **Module host start (the "Uncaught null" after a reload).** The host script's own start is no
+  longer under the module JS slice (`Watchdog::hold`). A slice trip during a slow start, such as
+  a build and a reload at once, terminated the isolate mid-load, which reads as
+  `Uncaught null at loadExtScript`. The heap is still watched, and a heap trip there is named.
+  `module-host.mjs` is written atomically (temp file and rename) and only when it changed, so a
+  worker starting beside another never reads it half-written. Not reproduced; these are the two
+  causes found in the code.
+- **TODO-imap M10.3 (OAuth2/XOAUTH2)** is no longer "later" and lists what the report asks
+  for: Outlook.com and Microsoft 365 refuse password login (`LOGINDISABLED`, XOAUTH2 only).
+
 ## Mail module: the first real use's field report (TODO-imap M11)
 
 Fixes and additions from moving a six-account mail client onto `@feldspar/imap` (mirror mode).

@@ -962,7 +962,25 @@ and do not commit.
   | Strato | | | | | | | | | not run yet |
   | Exchange on-premises | | | | | | | | | not run yet; needs `configuration` (trusted server, CA) in its entry |
 - [ ] **M10.3** OAuth2 / XOAUTH2 per account (Gmail, Microsoft 365), built on the core OAuth work
-  (`sc-server/src/oauth.rs`). The tokens are Secret fields. *(later)*
+  (`sc-server/src/oauth.rs`). The tokens are Secret fields. **No longer "later"** (field report
+  2026-10-23, PaddiMail): `outlook.office365.com` answers `LOGINDISABLED`, offers only
+  `AUTH=XOAUTH2` and says "Basic authentication is disabled", so **personal Outlook.com /
+  Hotmail / Live mailboxes cannot be used at all** — neither passwords nor app passwords work.
+  PaddiMail lists Outlook.com with a disabled "Add" until this lands. Gmail gains too (no app
+  password needed). What is wanted:
+  - `mail_accounts.auth = "oauth2"` (the column exists, default `password`), with the access
+    token, refresh token and expiry as Secret fields;
+  - `connect.js` passes `auth: { user, accessToken }` to imapflow and nodemailer for such an
+    account; the service refreshes the token before expiry (and on an auth failure, once)
+    and writes the new tokens back; a refresh that is refused sets `auth_failed` with a
+    sentence saying to reconnect the account;
+  - module settings for the provider app: Microsoft (client id, client secret, tenant —
+    `consumers` for personal accounts, `common`/a tenant id for 365) and Google (client id,
+    client secret), with the scopes (`https://outlook.office.com/IMAP.AccessAsUser.All`,
+    `…/SMTP.Send`, `offline_access`; `https://mail.google.com/`);
+  - a consent flow an application can start for one account (owner-checked) that comes back
+    to a `return_to` in the app, reusing `oauth.rs`'s callback-on-the-admin-host, PKCE and
+    binding-cookie design, but storing tokens on the account instead of signing anybody in.
 - [ ] **M10.4** Search: server-side `UID SEARCH` for an action, plus Postgres full-text search over
   `mail_messages`. *(later)*
 - [ ] **M10.5** Risk scoring after `risk.py`'s ideas. CalDAV, and answering invitations. *(later)*

@@ -1196,6 +1196,11 @@ async function evalServices(plugin, configuration) {
  * which is how the server learns to restart it. */
 const services = new Map();
 const serviceKey = (module, service) => `${module}\u0000${service}`;
+/** `service_start` calls still waiting for their module's load, by key. A
+ * start waits a microtask on `loading` even when the load is long done, so a
+ * `service_stop` sent right behind it would otherwise run first, find nothing
+ * to stop, and leave the service to start with nobody left to stop it. */
+const startingServices = new Map();
 
 /** Stop one service: abort its signal, call the `stop` its `start` answered,
  * forget its subscriptions, and answer its call — with `error` when it is being
@@ -1345,7 +1350,12 @@ async function startService({ module: name, service: serviceName }) {
 
 /** `service_stop`. */
 async function stopServiceOp({ module: name, service: serviceName }) {
-  const record = services.get(serviceKey(name, serviceName));
+  const key = serviceKey(name, serviceName);
+  // A start that crossed this stop registers its service first: it was
+  // waiting on the same promise, and its continuation was queued earlier.
+  const starting = startingServices.get(key);
+  if (starting) await starting;
+  const record = services.get(key);
   if (!record) return { stopped: false };
   await stopService(record, null);
   return { stopped: true };
@@ -4448,8 +4458,14 @@ async function handle(request) {
       return await callTargetOperation(request);
     }
     case "service_start": {
-      const pending = loading.get(request.module);
-      if (pending) await pending;
+      const key = serviceKey(request.module, request.service);
+      const pending = loading.get(request.module) || Promise.resolve();
+      startingServices.set(key, pending);
+      try {
+        await pending;
+      } finally {
+        if (startingServices.get(key) === pending) startingServices.delete(key);
+      }
       return await startService(request);
     }
     case "service_stop":

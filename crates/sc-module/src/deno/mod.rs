@@ -1404,7 +1404,7 @@ impl DenoModuleHost {
             }
         }
         let (reply, answer) = oneshot::channel();
-        let (asks, mut asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
+        let (asks, asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
         control
             .send(Control::Job(Box::new(Job {
                 request,
@@ -1426,12 +1426,18 @@ impl DenoModuleHost {
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work. A service has none (`None`).
         let mut left = bounds.budget;
+        // The asks this caller has taken on and not yet answered, and the ones
+        // still queued for it. Kept so that a caller which stops waiting — its
+        // worker died, its wall clock ran out, or **its future was dropped**, as
+        // a service's is when its stop outlasts the grace — fails them by name
+        // on the way out, rather than leaving a module awaiting a promise that
+        // will never settle (and a reload of it waiting on that module's stop).
+        let mut pending_asks = PendingAsks {
+            control: control.clone(),
+            outstanding: BTreeSet::new(),
+            asked,
+        };
         let mut serving = FuturesUnordered::new();
-        // The asks this caller has taken on and not yet answered. Kept so that a
-        // caller which stops waiting — its worker died, or its wall clock ran out
-        // — can fail them **by name** on the way out, rather than leaving a
-        // module awaiting a promise that will never settle.
-        let mut outstanding: BTreeSet<u64> = BTreeSet::new();
         let limit = bounds.clock;
         let clock = async move {
             match limit {
@@ -1461,7 +1467,7 @@ impl DenoModuleHost {
                         limit.unwrap_or_default()
                     )));
                 }
-                Some(ask) = asked.recv() => {
+                Some(ask) = pending_asks.asked.recv() => {
                     if left == Some(0) {
                         let _ = control.send(Control::Answer {
                             ask: ask.id,
@@ -1473,7 +1479,7 @@ impl DenoModuleHost {
                     if let Some(left) = left.as_mut() {
                         *left -= 1;
                     }
-                    outstanding.insert(ask.id);
+                    pending_asks.outstanding.insert(ask.id);
                     let control = control.clone();
                     serving.push(async move {
                         let surfaces = Surfaces {
@@ -1500,14 +1506,42 @@ impl DenoModuleHost {
                     });
                 }
                 Some(answered) = serving.next(), if !serving.is_empty() => {
-                    outstanding.remove(&answered);
+                    pending_asks.outstanding.remove(&answered);
                 }
             }
         };
-        // Nobody is going to answer these now, and a module left awaiting one
-        // would hang until its own worker was restarted for some other reason.
-        for ask in outstanding {
-            let _ = control.send(Control::Answer {
+        // The serving futures go first: an ask one of them was about to answer
+        // is answered by the guard instead, and only once.
+        drop(serving);
+        drop(pending_asks);
+        outcome
+    }
+}
+
+/// The asks one call has taken on and not answered, and the queue of those it
+/// has not taken yet — refused, by name, when the call stops waiting.
+///
+/// A guard rather than a loop after the call's own loop, because the call's
+/// future can be **dropped** before it gets there, and then nobody answers: a
+/// module awaiting one of these would hang until its worker happened to be
+/// restarted, and every `stop` and reload that waited on it would hang too.
+struct PendingAsks {
+    control: tokio::sync::mpsc::UnboundedSender<Control>,
+    outstanding: BTreeSet<u64>,
+    asked: tokio::sync::mpsc::UnboundedReceiver<HostAsk>,
+}
+
+impl Drop for PendingAsks {
+    fn drop(&mut self) {
+        // Closed first, so an ask routed from here on is refused at the worker.
+        self.asked.close();
+        let queued = std::iter::from_fn(|| self.asked.try_recv().ok().map(|ask| ask.id));
+        let unanswered: Vec<u64> = std::mem::take(&mut self.outstanding)
+            .into_iter()
+            .chain(queued)
+            .collect();
+        for ask in unanswered {
+            let _ = self.control.send(Control::Answer {
                 ask,
                 ok: false,
                 text: "the call this request belongs to was given up on before this server \
@@ -1515,7 +1549,6 @@ impl DenoModuleHost {
                     .to_owned(),
             });
         }
-        outcome
     }
 }
 
