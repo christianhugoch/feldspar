@@ -4326,8 +4326,9 @@ grants rather than replacing them: the applications area on with `allow_drop` of
 can write an SQL endpoint and cannot remove one.
 
 **A third area, `allow_modules`, is the exception to "on by default".** It offers the tagged
-`listModules` and `installModule` endpoints — so an agent writing a Python body can install the
-library it imports — and it is **off** unless a token or agent ticks it, because installing a
+`listModules`, `installModule` and `updateModule` endpoints — so an agent writing a Python body
+can install the library it imports, and change an installed module's settings (which reloads
+it; `updateModule` also needs `allow_edit`) — and it is **off** unless a token or agent ticks it, because installing a
 package runs a third party's code with the server's privileges and a Python one has no sandbox at
 all. No existing credential gains it by upgrading. **A fourth, `allow_history`,** is off unless
 ticked for the same kind of reason: its tools (`getRowHistory`, `listDeletedRows`, `getRowAsOf`,

@@ -1638,7 +1638,8 @@ async fn a_document_stream_is_created_exposed_and_deleted_over_mcp() -> sc_error
 
 /// A token gets every flag unless the mint says otherwise — modules, drops and
 /// access changes included. The module tools are offered only to a token with
-/// `allow_modules`, and installing also needs `allow_create`.
+/// `allow_modules`; installing also needs `allow_create`, and changing a
+/// module's settings (`updateModule`) `allow_edit`.
 #[tokio::test]
 async fn the_module_tools_are_offered_only_to_a_token_given_allow_modules() -> sc_error::Result<()>
 {
@@ -1663,12 +1664,12 @@ async fn the_module_tools_are_offered_only_to_a_token_given_allow_modules() -> s
 
     let (_, body) = McpRequest::new(&without, list.clone()).send(&router).await;
     let offered = tool_names(&body);
-    for absent in ["listModules", "installModule"] {
+    for absent in ["listModules", "installModule", "updateModule"] {
         assert!(!offered.contains(&absent.to_owned()), "{offered:?}");
     }
     let (_, body) = McpRequest::new(&modules, list).send(&router).await;
     let offered = tool_names(&body);
-    for present in ["listModules", "installModule"] {
+    for present in ["listModules", "installModule", "updateModule"] {
         assert!(offered.contains(&present.to_owned()), "{offered:?}");
     }
     let install = body["result"]["tools"]

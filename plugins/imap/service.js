@@ -18,6 +18,7 @@
 
 const { AccountRunner } = require("./account.js");
 const { connectionSettings } = require("./connect.js");
+const { headerNames } = require("./sync.js");
 
 /** The running accounts, by id. Shared with the actions. */
 const runners = new Map();
@@ -39,7 +40,7 @@ function fingerprint(account) {
 async function start(ctx) {
   const settings = connectionSettings(ctx.configuration);
   const options = (ctx.configuration && ctx.configuration.runner_options) || {};
-  const host = { db: ctx.db, files: ctx.files, log: ctx.log, settings };
+  const host = { db: ctx.db, files: ctx.files, log: ctx.log, settings, extraHeaders: headerNames(ctx.configuration) };
   const prints = new Map();
   // Changes are applied one at a time, in the order they were committed.
   let chain = Promise.resolve();

@@ -34,7 +34,10 @@ If your mail server *is* inside your network (an Exchange on the LAN), the modul
 has two fields only an admin can fill in: **Trusted servers**, one `host` or `host:port` per
 line, which may resolve to a private address (and use that port), and **Extra CA certificates**:
 your internal CA, which the trusted servers' certificates are checked against instead of the
-public CAs.
+public CAs. A third, **Headers to keep**, names the header fields stored with each message
+(Step 6). Saving the settings reloads the module and restarts its service, so they apply at
+once; a coding agent changes them with the MCP tool `updateModule` (modules area). Writing
+`_fd_modules.configuration` directly does not reload anything.
 
 ## Step 2 — The account
 
@@ -75,7 +78,10 @@ and Archive, and `mail_messages` fills with the mail that is already there, olde
 **Who sees the mail.** The tables carry the module's ownership rule: a shared account's mail is
 readable by every user at or above its `min_role`, and a personal account's (one with an
 `owner`) by its owner only. That holds for REST, GraphQL, live updates and code that uses
-`db.asUser()`. A user can never make a shared account, nor change one: only an admin can.
+`db.asUser()`. A user can never make a shared account, nor change one: only an admin can. The
+owner of a personal account may read and change their own row, through the REST API
+(`PUT /api/mail_accounts/<id>`, with a password left as `••••••••` to keep it) as anywhere
+else.
 
 ## Step 3 — Orders from mail
 
@@ -157,7 +163,7 @@ module's action, and minimum role user, and name it in the application:
 
 | action | payload | does |
 |---|---|---|
-| `mail_sync_now` | `{ account_id, wait }` | sync the account now, rather than at the next notification or 2-minute poll |
+| `mail_sync_now` | `{ account_id, wait }` | list the account's folders again and sync them now, rather than at the next notification or poll. A folder made or deleted by another mail program is seen at once |
 | `mail_set_flags` | `{ message_ids, seen, flagged }` | mark mail read/unread, flagged/not, on the server and in the table |
 | `mail_attachment` | `{ attachment_id }` | the attachment's File path, storing the file first if it is not stored yet |
 | `mail_test_account` | the account's connection fields, or `{ account_id }` | log in to IMAP (and SMTP, if set) and answer `{ imap, smtp, error }`. At most five a minute per user |
@@ -208,6 +214,20 @@ message's own Message-ID, and it is indexed. Group a conversation with
 `where: { account, thread_key }`, across folders: a reply in Sent has the same `thread_key` as the
 question in INBOX.
 
+**Sorting.** `(folder, sent_at)` and `(folder, internal_date)` are indexed, so a folder of tens
+of thousands of messages lists quickly either way. `sent_at` is the mail's `Date` header (when it
+was written), `internal_date` when the server received it. They differ a lot after a mailbox was
+copied or restored: most clients sort by `internal_date`.
+
+**Labels and headers.** `keywords` holds a message's other flags, sorted: Thunderbird's colour
+labels `$label1` … `$label5`, `$Forwarded`, `$Junk`, `NonJunk`, and whatever another client set.
+They follow the server like `seen` and `flagged`. `headers` holds the header fields the module's
+**Headers to keep** names (Step 1), by lower-case name: by default `list-id`,
+`list-unsubscribe`, `list-unsubscribe-post` (one-click unsubscribe), `authentication-results`,
+every `x-spam-*`, `precedence` and `auto-submitted`. A header that appears more than once
+(`Authentication-Results` usually does) has its values joined by a newline. A changed setting
+applies to mail stored from then on.
+
 ## Step 7 — The client's actions
 
 As in Step 5, each action is a trigger with event **None** that the application names. Each reads
@@ -220,12 +240,13 @@ what it touches as the caller, so another user's message is "not found".
 | `mail_set_flags` | `{ message_ids, seen, flagged }` | as in Step 5 | |
 | `mail_move` | `{ message_ids, target }` | moves to `target`: a folder path, or `role:trash`, `role:archive`, `role:spam`, … Also on ingest accounts | `{ moved, missing, not_on_server }` |
 | `mail_delete` | `{ message_ids, permanent }` | moves to Trash; deletes for good when `permanent`, or when the mail is in Trash already | `{ trashed, deleted, missing, not_on_server }` |
-| `mail_create_folder` | `{ account_id, name, parent }` | makes a folder (inside `parent`, a path, if given) | `{ id, path }` |
+| `mail_create_folder` | `{ account_id, name, parent }` | makes a folder (inside `parent`, a path, if given). One named like a role the account has no folder for (`Archive`, `Sent`) gets that role | `{ id, path, role }` |
+| `mail_delete_folder` | `{ folder_id }` or `{ account_id, path }` | deletes the folder on the server, with its messages and their stored attachments. Not INBOX, nor a folder with folders inside it | `{ id, path, deleted }` |
 | `mail_save_draft` | as `mail_send`, plus `replaces` | saves the message in Drafts; `replaces` (a draft's row id) is deleted | `{ id, uid, message_id, replaced }` |
 | `mail_send` | Step 8 | | |
 
-`mail_delete`, `mail_create_folder`, `mail_save_draft` and `mail_fetch_body` are for mirror
-accounts; an ingest account keeps every mail and refuses them. A Trash, Drafts or Sent folder the
+`mail_delete`, `mail_create_folder`, `mail_delete_folder`, `mail_save_draft` and
+`mail_fetch_body` are for mirror accounts; an ingest account keeps every mail and refuses them. A Trash, Drafts or Sent folder the
 server does not have is created when an action first needs it.
 
 An action's changes are on the server and in the rows when it answers, so a live list
@@ -252,6 +273,7 @@ await post("/api/actions/send_mail", {
     { store: "uploads", path: "quotes/q-17.pdf" },   // a file of your application's
     { attachment_id: 89 },                           // a mail attachment, to forward
   ],
+  calendar: { method: "REQUEST", content: ics },  // optional: an invitation, see below
 });
 // → { message_id, id, saved, save_error, accepted, rejected }
 ```
@@ -265,6 +287,13 @@ await post("/api/actions/send_mail", {
   Microsoft 365 file sent mail into Sent themselves, so for an account on those servers the copy
   is left out, unless `save_sent` says otherwise (`true` or `false` decides it for any server). A
   copy that cannot be saved does not undo the send: `saved` is false and `save_error` says why.
+- **Invitations** (`calendar`): `content` is a whole iCalendar object (`BEGIN:VCALENDAR` …) and
+  `method` its iTIP method (`REQUEST` to invite, `REPLY` to accept or decline, `CANCEL`, …),
+  which must match the object's own `METHOD`. It is sent as a `text/calendar; method=…`
+  alternative to the text and HTML, plus an `invite.ics` attachment (`filename` changes the
+  name), which is what makes a mail client offer Accept and Decline.
+- **Addresses** must have a dot in the domain, so a typo like `bob@gmail` is caught before
+  anything is sent; `…@localhost` is allowed too, for a local test server.
 - **Who may send.** From a personal account, its owner. From a shared account (Step 2), a user at
   or above its `send_role`; an admin only, when that is empty. `mail_save_draft` follows the same
   rule.

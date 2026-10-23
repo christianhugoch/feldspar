@@ -2,6 +2,52 @@
 
 Changes in reverse chronological order.
 
+## Mail module: the first real use's field report (TODO-imap M11)
+
+Fixes and additions from moving a six-account mail client onto `@feldspar/imap` (mirror mode).
+
+- **Rows deleted by a sync of the wrong folder (fix, M11.1).** After a reconnect, the old
+  connection's pass carried on with the new connection, while `session()` ran its LIST and
+  SELECT outside the queue. A folder's expunge check could then search another folder, and in
+  mirror mode delete rows that were still on the server. The field report saw this as
+  `mail_attachments_message_fkey` errors on a large Gmail account. Passes, backfill steps and
+  folder syncs are now bound to the connection they started on (`AccountRunner.current`), and
+  the first LIST and SELECT are queued. `sync.js` checks the selected folder before each search
+  and before deleting (`requireSelected`). A message's attachment rows are one insert. A message
+  deleted in the meantime is skipped (its stored files removed), not a failed sync. A pass that
+  a stop interrupted no longer writes `status = error`.
+- **Folders (M11.2).** `mail_sync_now` lists the account's folders again before syncing.
+  `discoverFolders` reads the table again: a folder gone from the server is forgotten, not just
+  deleted, and a folder row somebody deleted is made again. `mail_create_folder` gives a folder
+  named like a role nobody has (`Archive`) that role and answers it. New action
+  `mail_delete_folder` (`{ folder_id }` or `{ account_id, path }`, mirror accounts) deletes on
+  the server, then the messages, stored attachments and row. It refuses INBOX and a folder with
+  folders inside it.
+- **Module settings over MCP (M11.4).** `updateModule` is tagged for MCP in the modules area,
+  needing `allow_edit`. It saves the settings and/or permissions and reloads the module, which
+  restarts its services. Writing `_fd_modules.configuration` directly does not.
+- **Keywords and headers (M11.5).** `mail_messages.keywords` (json): the flags without a
+  backslash (`$label1`, `$Forwarded`, …), sorted, updated with the other flags.
+  `mail_messages.headers` (json): the header fields the new module setting **Headers to keep**
+  names, by lower-case name, with repeats joined by a newline. A trailing `*` is a prefix. The
+  default is `list-id`, `list-unsubscribe`, `list-unsubscribe-post`, `authentication-results`,
+  `x-spam-*`, `precedence` and `auto-submitted`; `-` keeps none.
+- **Invitations (M11.5).** `mail_send` takes `calendar: { method, content, filename? }`, sent as
+  a `text/calendar; method=…` alternative plus an .ics attachment. The method must be an iTIP
+  one and match the calendar's `METHOD`.
+- **Small things (M11.6).** Addresses at `localhost` are accepted. `mail_messages` has indexes
+  on `(folder, sent_at)` and `(folder, internal_date)`. New `plugins/imap/README.md` for
+  application authors (modes, ownership, calling the actions, columns, settings).
+  `docs/tutorial-mail.md` is updated.
+- **Not reproduced (M11.3).** An owner's `PUT /api/mail_accounts/<id>` answering "not found". A
+  new test (`module_tables::an_owner_may_update_their_own_account`) has the owner update their
+  row through the row layer and through `RestProvider`, a single field and the whole row with
+  the password sentinel, and it passes. The account table's description now says owners may
+  edit their accounts.
+- Tests: `plugins/imap/test/field-report.test.mjs` (no server). One new Dovecot test in
+  `mirror.test.mjs`. `fake-host.mjs` now enforces the module's foreign keys and takes
+  array inserts.
+
 ## Row history H6: code, SQLite, documentation
 
 History is now reachable from code bodies in both languages and Saltcorn 1's `Table`, and works

@@ -1,7 +1,7 @@
 // **The actions** (TODO-imap.md §5.6): `mail_test_account`, `mail_sync_now`, `mail_set_flags`
 // and `mail_attachment` for both modes (M8.6); `mail_move` for both; `mail_fetch_body`,
-// `mail_delete`, `mail_create_folder` and `mail_save_draft` for mirror accounts (M9.2); and
-// `mail_send` (§5.7, M9.3).
+// `mail_delete`, `mail_create_folder`, `mail_delete_folder` and `mail_save_draft` for mirror
+// accounts (M9.2); and `mail_send` (§5.7, M9.3).
 //
 // Each is exposed by the application as a trigger with event None, and called with
 // `{ payload, user }`. **Each loads what it touches as the caller first**, through v1's `Table`
@@ -31,9 +31,9 @@ const nodemailer = require("nodemailer");
 const MailComposer = require("nodemailer/lib/mail-composer");
 const addressparser = require("nodemailer/lib/addressparser");
 const { connectionSettings, smtpTarget, smtpOptions, redact, domainOf } = require("./connect.js");
-const { withConnection } = require("./account.js");
+const { withConnection, assignRoles } = require("./account.js");
 const { runners } = require("./service.js");
-const { FILE_STORE, FILE_FOLDER, safeName, downloadable, storeMessage, fetchAndParse, deleteMessages, isMirror } = require("./sync.js");
+const { FILE_STORE, FILE_FOLDER, safeName, downloadable, storeMessage, fetchAndParse, deleteMessages, deleteFolder, isMirror, headerNames } = require("./sync.js");
 const { parse } = require("./parse.js");
 
 /** A Secret field's value as clients see it (`sc-types` `SECRET_SENTINEL`): "keep what is stored". */
@@ -108,10 +108,12 @@ function onAccount(account, configuration, work) {
  * `Table`, with no caller: what an action writes after the caller's read is the module's. */
 function moduleDb() {
   const chain = (name) => {
-    const where = (w) => ({
+    const where = (w, opts = {}) => ({
       first: () => table(name).getRow(w),
-      rows: () => table(name).getRows(w),
-      select: () => where(w),
+      rows: () => table(name).getRows(w, opts),
+      select: () => where(w, opts),
+      limit: (n) => where(w, { ...opts, limit: n }),
+      orderBy: (field) => where(w, { ...opts, orderBy: field }),
       async update(values) {
         const t = table(name);
         const rows = w.id !== undefined && typeof w.id !== "object" ? [{ id: w.id }] : await t.getRows(w);
@@ -126,6 +128,11 @@ function moduleDb() {
     return {
       where,
       async insert(values) {
+        if (Array.isArray(values)) {
+          const out = [];
+          for (const v of values) out.push({ ...v, id: await table(name).insertRow(v) });
+          return out;
+        }
         const id = await table(name).insertRow(values);
         return { ...values, id };
       },
@@ -135,9 +142,9 @@ function moduleDb() {
 }
 
 /** What `sync.js` needs to write rows from an action. */
-function moduleEnv(account, files) {
+function moduleEnv(account, files, configuration) {
   const log = Object.assign((...a) => console.log(...a), { info: console.log, warn: console.warn, error: console.error, debug: () => {} });
-  return { db: moduleDb(), files, account, log, client: null };
+  return { db: moduleDb(), files, account, log, client: null, extraHeaders: headerNames(configuration) };
 }
 
 /** The rows of `ids` the caller may read, those it may not (or that do not exist), and those
@@ -295,7 +302,9 @@ async function testAccount({ payload, user, settings: configuration }) {
 
 // ------------------------------------------------------------------------------ mail_sync_now
 
-/** Wake the service for one account. With `wait`, answers after that sync (up to 60 s). */
+/** Wake the service for one account: its folders listed again (a folder made or deleted by
+ * another client is seen now), then every folder synced. With `wait`, answers after that sync
+ * (up to 60 s). */
 async function syncNow({ payload, user }) {
   caller(user);
   const id = idList(payload && payload.account_id, "account_id")[0];
@@ -303,7 +312,7 @@ async function syncNow({ payload, user }) {
   const runner = runners.get(account.id);
   if (!runner) return { queued: false, status: account.status || null, error: account.enabled ? "the account is not running; see its status" : "the account is disabled" };
   const done = runner.settled();
-  runner.wake();
+  runner.wake({ discover: true });
   if (payload && payload.wait) {
     let timer;
     await Promise.race([done, new Promise((r) => (timer = setTimeout(r, 60_000)))]);
@@ -408,10 +417,10 @@ async function fetchBody({ payload, user, settings: configuration }) {
   const account = await readable("mail_accounts", message.account, user);
   const folder = await folderById(message.folder);
   const meta = { uid: Number(message.uid), size: message.size, internalDate: message.internal_date };
-  const parsed = await onFolder(account, folder.path, configuration, (client) => fetchAndParse(client, meta));
+  const parsed = await onFolder(account, folder.path, configuration, (client) => fetchAndParse(client, meta, { extraHeaders: headerNames(configuration) }));
   if (!parsed) throw new Error("the message is no longer on the server");
   const values = {};
-  for (const key of ["body_text", "body_html", "snippet", "has_attachments", "body_state", "import_error"]) values[key] = parsed.message[key];
+  for (const key of ["body_text", "body_html", "snippet", "has_attachments", "body_state", "import_error", "headers"]) values[key] = parsed.message[key];
   const messages = table("mail_messages");
   const error = await messages.updateRow(values, id);
   if (error) throw new Error(error);
@@ -503,12 +512,55 @@ async function createFolder({ payload, user, settings: configuration }) {
   const row = await onAccount(account, configuration, async (client) => {
     const made = await client.mailboxCreate(path);
     const created = (made && made.path) || path;
-    return moduleDb().mail_folders.insert({ account: account.id, path: created, name, delimiter, role: null, sync: true });
+    // Its role by name (a "Sent" made on a server that had none), unless a folder has it.
+    const others = await folders.getRows({ account: account.id });
+    const role = assignRoles([{ path: created, name, delimiter }]).get(created);
+    const taken = role && others.some((f) => f.role === role);
+    return moduleDb().mail_folders.insert({ account: account.id, path: created, name, delimiter, role: taken ? null : role || null, sync: true });
   });
   // The service syncs it from its next LIST, which this asks for now.
   const runner = runners.get(account.id);
-  if (runner) runner.wake({ quick: true });
-  return { id: row.id, path: row.path };
+  if (runner) runner.wake({ discover: true });
+  return { id: row.id, path: row.path, role: row.role };
+}
+
+// ------------------------------------------------------------------------------ mail_delete_folder
+
+/** Delete a folder of a mirror account: on the server, then its messages (with their stored
+ * attachments) and its row. Not INBOX, and not a folder that has folders inside it. */
+async function removeFolder({ payload, user, settings: configuration, files }) {
+  caller(user);
+  const p = payload || {};
+  const folders = table("mail_folders");
+  let folder;
+  if (p.folder_id !== undefined && p.folder_id !== null && p.folder_id !== "") {
+    folder = await readable("mail_folders", idList(p.folder_id, "folder_id")[0], user);
+  } else {
+    const accountId = idList(p.account_id, "account_id")[0];
+    const path = String(p.path || "").trim();
+    if (!path) throw new Error("say the folder: { folder_id } or { account_id, path }");
+    folder = await folders.getRow({ account: accountId, path }, { forUser: user });
+    if (!folder) throw new Error(`folder ${path} was not found`);
+  }
+  const account = await readable("mail_accounts", folder.account, user);
+  requireMirror(account, "mail_delete_folder");
+  if (folder.role === "inbox" || /^inbox$/i.test(folder.path)) throw new Error("INBOX cannot be deleted");
+  const delimiter = folder.delimiter || "/";
+  const children = (await folders.getRows({ account: account.id })).filter((f) => f.path.startsWith(folder.path + delimiter));
+  if (children.length) throw new Error(`${folder.path} has folders inside it (${children.map((f) => f.path).join(", ")}); delete those first`);
+  const runner = runners.get(account.id);
+  await onAccount(account, configuration, async (client) => {
+    try {
+      await client.mailboxDelete(folder.path);
+    } catch (e) {
+      // Gone from the server already (another client): only the rows are left to delete.
+      if (!/nonexistent|not exist|no such|unknown mailbox|doesn't exist/i.test(`${e.message} ${e.responseText || ""}`)) throw e;
+    }
+    // Inside the queued work, so the service's next pass does not select it.
+    if (runner) runner.forgetFolder(folder.path);
+    await deleteFolder(moduleEnv(account, files, configuration), folder);
+  });
+  return { id: folder.id, path: folder.path, deleted: true };
 }
 
 // ------------------------------------------------------------------------------ composing
@@ -523,7 +575,8 @@ function addressList(value, what) {
     const parsed = typeof item === "string" ? addressparser(item, { flatten: true }) : [{ name: item.name || "", address: item.address }];
     for (const a of parsed) {
       const address = String(a.address || "").trim();
-      if (!/^[^\s@"<>(),;:\\]+@[^\s@"<>(),;:\\]+\.[^\s@"<>(),;:\\]+$/.test(address)) {
+      // A domain with a dot, or `localhost` (a local test server).
+      if (!/^[^\s@"<>(),;:\\]+@([^\s@"<>(),;:\\]+\.[^\s@"<>(),;:\\]+|localhost)$/i.test(address)) {
         throw new Error(`${what}: ${JSON.stringify(a.address || item)} is not a mail address`);
       }
       out.push({ name: String(a.name || "").trim(), address });
@@ -572,6 +625,27 @@ async function attachmentsOf(list, { user, callerFiles, files, configuration }) 
   return out;
 }
 
+/** iTIP methods (RFC 5546) a `calendar` part may carry. */
+const ITIP_METHODS = new Set(["PUBLISH", "REQUEST", "REPLY", "ADD", "CANCEL", "REFRESH", "COUNTER", "DECLINECOUNTER"]);
+const MAX_CALENDAR_BYTES = 1024 * 1024;
+
+/** A payload's `calendar` as nodemailer's `icalEvent`: a `text/calendar; method=…` alternative
+ * next to the text and HTML (and an .ics attachment), which is how a mail client shows an
+ * invitation with Accept and Decline. `content` is the whole VCALENDAR, its METHOD the same. */
+function calendarOf(calendar) {
+  if (calendar === undefined || calendar === null || calendar === "") return undefined;
+  const method = String(calendar.method || "").trim().toUpperCase();
+  if (!ITIP_METHODS.has(method)) throw new Error(`calendar.method must be one of ${[...ITIP_METHODS].join(", ")}`);
+  const content = String(calendar.content || "");
+  if (!/BEGIN:VCALENDAR/i.test(content)) throw new Error("calendar.content must be an iCalendar object (BEGIN:VCALENDAR …)");
+  if (Buffer.byteLength(content) > MAX_CALENDAR_BYTES) throw new Error("calendar.content is larger than 1 MB");
+  const declared = /^METHOD:(.+)$/im.exec(content);
+  if (declared && declared[1].trim().toUpperCase() !== method) {
+    throw new Error(`calendar.method is ${method}, but the calendar says METHOD:${declared[1].trim()}`);
+  }
+  return { method, content, filename: calendar.filename ? String(calendar.filename) : "invite.ics" };
+}
+
 /**
  * The message `mail_send` and `mail_save_draft` build (§5.7): From the account, a Message-ID on
  * its domain, the threading headers of the message answered, and the attachments.
@@ -610,6 +684,7 @@ async function compose(account, p, { user, callerFiles, files, configuration, dr
     inReplyTo,
     references,
     attachments: await attachmentsOf(p.attachments, { user, callerFiles, files, configuration }),
+    icalEvent: calendarOf(p.calendar),
   };
   return { mail, original };
 }
@@ -629,8 +704,8 @@ async function appendCopy(account, folder, source, flags, date, configuration, f
     const appended = await client.append(folder.path, source, flags, date);
     if (!appended) throw new Error(`the server refused to save it in ${folder.path}`);
     if (!appended.uid) return { uid: null, row: null };
-    const parsed = await parse(source, { flags, size: source.length, internalDate: date });
-    const env = moduleEnv(account, files);
+    const parsed = await parse(source, { flags, size: source.length, internalDate: date, extraHeaders: headerNames(configuration) });
+    const env = moduleEnv(account, files, configuration);
     let row;
     try {
       row = await storeMessage(env, folder, { uid: appended.uid }, parsed, null);
@@ -763,10 +838,12 @@ module.exports = {
     mail_move: move,
     mail_delete: remove,
     mail_create_folder: createFolder,
+    mail_delete_folder: removeFolder,
     mail_save_draft: saveDraft,
     mail_send: send,
   },
   SECRET_SENTINEL,
   savesSent,
   addressList,
+  calendarOf,
 };

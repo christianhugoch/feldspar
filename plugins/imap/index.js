@@ -43,6 +43,8 @@ const MESSAGE = {
   account_id: "int", to: ADDRESSES, cc: ADDRESSES, bcc: ADDRESSES, subject: opt("string"),
   text: opt("string"), html: opt("string"), attachments: ATTACHMENTS, in_reply_to: opt("int"),
 };
+/** An iCalendar part (iTIP): a `text/calendar; method=…` alternative to the text and HTML. */
+const CALENDAR = opt({ object: { method: "string", content: "string", filename: opt("string") } });
 const ACCOUNT = Object.fromEntries(
   ["email", "imap_host", "imap_security", "imap_user", "imap_password", "smtp_host", "smtp_security", "smtp_user", "smtp_password"]
     .map((k) => [k, opt("string")])
@@ -57,7 +59,7 @@ const ACTIONS = {
     returns: { object: { imap: "bool", smtp: opt("bool"), error: opt("string") } },
   },
   mail_sync_now: {
-    description: "Sync an account now. Payload: { account_id, wait }.",
+    description: "List an account's folders again and sync them now. Payload: { account_id, wait }.",
     payload: { object: { account_id: "int", wait: opt("bool") } },
     returns: { object: { queued: "bool", status: opt("string"), error: opt("string") } },
   },
@@ -89,7 +91,12 @@ const ACTIONS = {
   mail_create_folder: {
     description: "Create a folder on a mirror account's server. Payload: { account_id, name, parent }.",
     payload: { object: { account_id: "int", name: "string", parent: opt("string") } },
-    returns: { object: { id: "int", path: "string" } },
+    returns: { object: { id: "int", path: "string", role: opt("string") } },
+  },
+  mail_delete_folder: {
+    description: "Delete a folder of a mirror account, on the server and with its messages in the table. Payload: { folder_id } or { account_id, path }.",
+    payload: { object: { folder_id: opt("int"), account_id: opt("int"), path: opt("string") } },
+    returns: { object: { id: "int", path: "string", deleted: "bool" } },
   },
   mail_save_draft: {
     description: "Save a draft in the account's Drafts folder, replacing an earlier one. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, replaces }.",
@@ -97,8 +104,9 @@ const ACTIONS = {
     returns: { object: { id: opt("int"), uid: opt("int"), message_id: "string", replaced: opt("int") } },
   },
   mail_send: {
-    description: "Send a message through the account's SMTP server and keep a copy in Sent. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id }.",
-    payload: { object: { ...MESSAGE, draft_id: opt("int") } },
+    description:
+      "Send a message through the account's SMTP server and keep a copy in Sent. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id, calendar }; calendar is { method, content } for an invitation or a reply to one (iTIP).",
+    payload: { object: { ...MESSAGE, draft_id: opt("int"), calendar: CALENDAR } },
     returns: {
       object: {
         message_id: "string", id: opt("int"), saved: "bool", save_error: opt("string"),
@@ -127,7 +135,8 @@ const tables = [
   {
     name: "mail_accounts",
     label: "Mail accounts",
-    description: "IMAP and SMTP accounts. An account with no owner is shared, and readable by every user at or above its minimum role.",
+    description:
+      "IMAP and SMTP accounts. A personal account is readable and writable by its owner; one with no owner is shared, readable by every user at or above its minimum role, and changed by an admin.",
     fields: [
       { name: "owner", references: "users", label: "Owner", description: "Empty for a shared account" },
       { name: "min_role", type: "int", label: "Minimum role to read", description: "Shared accounts: the least role that can read its mail" },
@@ -219,12 +228,19 @@ const tables = [
       { name: "flagged", type: "bool", label: "Flagged" },
       { name: "answered", type: "bool", label: "Answered" },
       { name: "draft", type: "bool", label: "Draft" },
+      { name: "keywords", type: "json", label: "Keywords", description: "The message's other flags ($label1, $Forwarded, NonJunk, …), sorted" },
+      {
+        name: "headers",
+        type: "json",
+        label: "Headers",
+        description: "The header fields the module's \"Headers to keep\" names, by lower-case name (List-Unsubscribe, Authentication-Results, …)",
+      },
       { name: "body_state", type: "text", label: "Body", description: "full, headers (mirror mode's older mail, until opened) or too_large" },
       { name: "import_error", type: "text", label: "Import error" },
     ],
     unique: [["folder", "uid"]],
-    // A client groups conversations by `thread_key` (M9.4).
-    indexes: [["thread_key"]],
+    // A client groups conversations by `thread_key` (M9.4), and lists a folder by date.
+    indexes: [["thread_key"], ["folder", "sent_at"], ["folder", "internal_date"]],
     ownership: viaAccount("account"),
     min_role_read: 1,
     min_role_write: 1,
@@ -270,6 +286,16 @@ const configuration_workflow = () => ({
             type: "String",
             fieldview: "textarea",
             sublabel: "PEM certificates of your internal CA, used to check the trusted servers above instead of the public ones. Certificates are always checked.",
+          },
+          {
+            name: "extra_headers",
+            label: "Headers to keep",
+            type: "String",
+            fieldview: "textarea",
+            sublabel:
+              "Header fields stored in each message's headers column, one per line; a name ending in * keeps every header that starts so. " +
+              "Empty: List-Id, List-Unsubscribe, List-Unsubscribe-Post, Authentication-Results, X-Spam-*, Precedence and Auto-Submitted. A single - keeps none. " +
+              "Applies to mail stored from then on.",
           },
         ],
       },

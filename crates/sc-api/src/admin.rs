@@ -1509,6 +1509,10 @@ pub fn admin_endpoints() -> EndpointSet {
     // A save reloads the module, so the next run of any of its actions uses the
     // new value; a permissions save also *moves* it, onto a worker built with
     // the new set, because a permission set belongs to an isolate.
+    //
+    // Tagged in the modules area: a setting written straight into `_fd_modules`
+    // reaches neither the module's actions nor its services, which read it
+    // when the module is loaded — this endpoint is the one way that reloads.
     set.register(
         Endpoint::new(
             "updateModule",
@@ -1523,6 +1527,21 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("permissions", TypeSchema::optional(TypeSchema::json())),
         ]))
         .output(module_schema())
+        .mcp(
+            McpTag::new(
+                "Change an installed module's settings (`configuration`, an object of \
+                 the fields its settings form has — `listModules` shows each module's \
+                 current values, secrets as `••••••••`) and/or its `permissions` \
+                 (`{ net, read, write, env }`, lists of what its worker may reach). \
+                 `id` is the module's id from `listModules`. Each part is changed only \
+                 when sent, and `configuration` replaces the whole object: send every \
+                 setting, with a secret left as `••••••••` to keep it. The module is \
+                 reloaded and its services restarted, so its actions and services use \
+                 the new values at once.",
+            )
+            .in_area(Area::Modules)
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -7305,6 +7324,7 @@ mod tests {
                 // and asking a human to click Install is the gap this closes.
                 "listModules",
                 "installModule",
+                "updateModule",
                 "listAgents",
                 "createAgent",
                 "updateAgent",
@@ -7402,6 +7422,7 @@ mod tests {
         // Installing a package is its own area, off unless granted.
         assert_eq!(area_of("listModules"), Some(Area::Modules));
         assert_eq!(area_of("installModule"), Some(Area::Modules));
+        assert_eq!(area_of("updateModule"), Some(Area::Modules));
         for name in [
             "getRowHistory",
             "listDeletedRows",

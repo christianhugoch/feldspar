@@ -966,3 +966,32 @@ and do not commit.
 - [ ] **M10.4** Search: server-side `UID SEARCH` for an action, plus Postgres full-text search over
   `mail_messages`. *(later)*
 - [ ] **M10.5** Risk scoring after `risk.py`'s ideas. CalDAV, and answering invitations. *(later)*
+
+## M11 — Field report: the first real use (PaddiMail, 2026-10-22)
+
+Six real accounts (IONOS, Hetzner, Gmail) moved from a Python bridge to the module, mirror mode.
+
+- [x] **M11.1** (1) `mail_attachments_message_fkey` during a large Gmail sync. Cause: after a
+  reconnect, a pass of the old connection went on with the new one, while `session()` ran its
+  LIST and SELECT outside the queue; a folder's expunge check could then search another folder
+  and delete the rows (a just-inserted message among them) as expunged. Now a pass, a backfill
+  step and a folder's sync are bound to their connection; the first LIST and SELECT are queued;
+  every sync step checks the selected folder before it searches and before it deletes
+  (`requireSelected`); a message's attachment rows are one insert, and a message deleted
+  meanwhile is skipped rather than failing the sync. A stopped runner no longer writes `error`
+  from a pass the stop interrupted.
+- [x] **M11.2** (2) `mail_sync_now` lists the folders again; the runner forgets folders gone from
+  the server and from the table, and makes a deleted folder row again; `mail_create_folder`
+  gives a folder named like a free role that role at once; new action `mail_delete_folder`.
+- [ ] **M11.3** (3) "not found" for an owner's `PUT /api/mail_accounts/<id>`. Not reproduced:
+  the row layer and `RestProvider` both let the owner update their row with the module's full
+  declaration (`module_tables::an_owner_may_update_their_own_account`). Needs the request (body,
+  user, app) that failed.
+- [x] **M11.4** (4) Module settings: `updateModule` is MCP-tagged in the modules area (needs
+  `allow_edit`); it saves and reloads. Writing `_fd_modules` directly reloads nothing.
+- [x] **M11.5** (6) `mail_messages.keywords` (non-system flags, kept up to date with the flags)
+  and `mail_messages.headers` (the module setting "Headers to keep", with defaults for
+  unsubscribe, authentication and spam headers); `mail_send`'s `calendar` (iTIP
+  `text/calendar; method=…` alternative).
+- [x] **M11.6** (7) `…@localhost` addresses; indexes on `(folder, sent_at)` and
+  `(folder, internal_date)`; `plugins/imap/README.md` for application authors.
