@@ -47,6 +47,7 @@ sha2.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 uuid.workspace = true
 # `process` only: the build step spawns the bundler (design §13.3).
 tokio = { workspace = true, features = ["process"] }

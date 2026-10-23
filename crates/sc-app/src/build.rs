@@ -772,6 +772,17 @@ pub fn target_readiness(spec: &TargetSpec) -> TargetReadiness {
     readiness_in(spec, |name| std::env::var(name).ok(), std::env::consts::OS)
 }
 
+/// Whether this machine meets `requires`, against its own environment: what a
+/// build host checks for the targets it builds, which come to it as
+/// requirements alone (`TODO-build-hosts.md`).
+pub fn requirements_readiness(requires: &[TargetRequirement]) -> TargetReadiness {
+    readiness_of(
+        requires,
+        |name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()),
+        std::env::consts::OS,
+    )
+}
+
 /// [`target_readiness`] of target `target` of `app`.
 pub fn app_target_readiness(app: &Application, target: &str) -> Result<TargetReadiness> {
     Ok(target_readiness(&app_target_spec(app, target)?))
@@ -807,9 +818,17 @@ fn readiness_in(
             .or_else(|| server_env(name))
             .filter(|v| !v.trim().is_empty())
     };
+    readiness_of(&spec.requires, var, os)
+}
+
+/// What of `requires` is missing, with `var` as the environment the build sees.
+fn readiness_of(
+    requires: &[TargetRequirement],
+    var: impl Fn(&str) -> Option<String>,
+    os: &str,
+) -> TargetReadiness {
     TargetReadiness {
-        missing: spec
-            .requires
+        missing: requires
             .iter()
             .filter_map(|requirement| why_missing(requirement, &var, os))
             .collect(),

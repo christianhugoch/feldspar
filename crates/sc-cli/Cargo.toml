@@ -69,6 +69,8 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-db-sqlite.workspace = true
 tokio.workspace = true
+# `build-agent` talks to its server over HTTPS (`TODO-build-hosts.md`).
+reqwest.workspace = true
 tokio-postgres.workspace = true
 serde_json.workspace = true
 # `auth token` writes a session row and mints the cookies that carry it: a UUID
@@ -107,9 +109,6 @@ libc.workspace = true
 # harness's self-test drives two whole runs, and §13 says no test may spend a
 # token — least of all the test of the thing whose job is to spend them.
 sc-agent = { workspace = true, features = ["testing"] }
-# The end-to-end test presents the session this command writes to a real running
-# server, which needs an HTTP client; nothing in the command itself does any more.
-reqwest.workspace = true
 sc-test-harness.workspace = true
 # The status report's tests build a `CmdStan` and a `Toolchain` by hand.
 sc-stan.workspace = true

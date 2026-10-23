@@ -226,6 +226,12 @@ export type ListApiTokensResponse = Array<{ id: string; user_id: string; label: 
 export type CreateApiTokenRequest = { label: string; grants?: { allow_create?: boolean | null; allow_edit?: boolean | null; allow_drop?: boolean | null; allow_access_changes?: boolean | null; allow_triggers?: boolean | null; allow_applications?: boolean | null; allow_modules?: boolean | null; allow_all?: boolean | null } | null; expires_in_days?: number | null };
 export type CreateApiTokenResponse = { token: { id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }; secret: string };
 export type RevokeApiTokenResponse = { revoked: boolean };
+export type ListBuildHostsResponse = Array<{ id: string; name: string; targets: Array<string>; created_at: string; last_seen_at?: string | null; online: boolean; report?: unknown | null }>;
+export type CreateBuildHostRequest = { name: string; targets: Array<string> };
+export type CreateBuildHostResponse = { host: { id: string; name: string; targets: Array<string>; created_at: string; last_seen_at?: string | null; online: boolean; report?: unknown | null }; token: string };
+export type UpdateBuildHostRequest = { name: string; targets: Array<string> };
+export type UpdateBuildHostResponse = { id: string; name: string; targets: Array<string>; created_at: string; last_seen_at?: string | null; online: boolean; report?: unknown | null };
+export type DeleteBuildHostResponse = { deleted: boolean };
 export type ListTriggersResponse = Array<{ id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null }>;
 export type CreateTriggerRequest = { name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null };
 export type CreateTriggerResponse = { id: string; name: string; description: string; when: string; channel?: string | null; only_if?: string | null; body?: string | null; action?: string | null; configuration?: unknown | null; min_role?: number | null; enabled: boolean; minute?: number | null; hour?: number | null; day_of_week?: number | null; error?: string | null; last_run_at?: string | null; workflow_version?: number | null; workflow_steps?: number | null };
@@ -554,6 +560,10 @@ export interface ApiClient {
   listApiTokens(): Promise<ListApiTokensResponse>;
   createApiToken(body: CreateApiTokenRequest): Promise<CreateApiTokenResponse>;
   revokeApiToken(id: string): Promise<RevokeApiTokenResponse>;
+  listBuildHosts(): Promise<ListBuildHostsResponse>;
+  createBuildHost(body: CreateBuildHostRequest): Promise<CreateBuildHostResponse>;
+  updateBuildHost(id: string, body: UpdateBuildHostRequest): Promise<UpdateBuildHostResponse>;
+  deleteBuildHost(id: string): Promise<DeleteBuildHostResponse>;
   listTriggers(): Promise<ListTriggersResponse>;
   createTrigger(body: CreateTriggerRequest): Promise<CreateTriggerResponse>;
   updateTrigger(id: string, body: UpdateTriggerRequest): Promise<UpdateTriggerResponse>;
@@ -1961,6 +1971,40 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("revokeApiToken", res);
       return (await res.json()) as RevokeApiTokenResponse;
+    },
+    async listBuildHosts() {
+      const res = await doFetch(`${baseUrl}/api/build-hosts`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listBuildHosts", res);
+      return (await res.json()) as ListBuildHostsResponse;
+    },
+    async createBuildHost(body) {
+      const res = await doFetch(`${baseUrl}/api/build-hosts`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createBuildHost", res);
+      return (await res.json()) as CreateBuildHostResponse;
+    },
+    async updateBuildHost(id, body) {
+      const res = await doFetch(`${baseUrl}/api/build-hosts/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateBuildHost", res);
+      return (await res.json()) as UpdateBuildHostResponse;
+    },
+    async deleteBuildHost(id) {
+      const res = await doFetch(`${baseUrl}/api/build-hosts/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteBuildHost", res);
+      return (await res.json()) as DeleteBuildHostResponse;
     },
     async listTriggers() {
       const res = await doFetch(`${baseUrl}/api/triggers`, {

@@ -2,6 +2,29 @@
 
 Changes in reverse chronological order.
 
+## Build hosts: a Mac can be registered to build native apps for the server
+
+The server usually runs on Linux and iOS builds need macOS. A Mac can now be registered as a
+build host (`TODO-build-hosts.md` B1). This first step connects it: jobs follow in B2.
+
+- Settings → Build hosts: add a host with a name and the targets it builds (`ios`,
+  `ios_simulator`). Its token is shown once, with the command that starts the agent. Hosts can be
+  renamed, given other targets, or removed, which revokes the token. The list shows whether each
+  host is online and what each of its targets still lacks.
+- `feldspar build-agent --server <url> --token-file <path>` runs on the Mac. It asks the server
+  for work, so the Mac needs only outbound HTTPS and no database. The token is read from a file
+  or `FELDSPAR_BUILD_TOKEN`, never from the command line.
+- Every 30 seconds the agent sends a heartbeat to `POST /build-agent/heartbeat`. The server
+  answers with the targets and their requirements, and the agent checks those on its own machine.
+  An agent speaking another protocol version is refused with the `feldspar` version to install.
+- The route takes the build host's bearer token and nothing else. A build host token opens no
+  other endpoint.
+- New system table `_fd_build_hosts`, created at boot. Only the token's hash is stored.
+- A target's `requires` are now parsed by `sc_app::target_requires`, which the module manifest
+  and the agent share.
+- Tests: the store against Postgres, the routes through the router, the agent against a real
+  server on a port, and the tab's helpers.
+
 ## Offline sync: rows with integer keys can be created offline
 
 Tables whose integer key the server hands out (`serial`, identity) can now get new rows on a

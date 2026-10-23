@@ -161,6 +161,8 @@ pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
     crate::i18n::bootstrap_translations(catalog).await?;
     // …and so are its uploads in progress (TODO F2, §2.3).
     crate::uploads::bootstrap_uploads(catalog).await?;
+    // …and the machines that build its native apps (`TODO-build-hosts.md`).
+    crate::build_hosts::bootstrap_build_hosts(catalog).await?;
     Ok(table)
 }
 

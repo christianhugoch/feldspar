@@ -1910,6 +1910,21 @@ erDiagram
     timestamp created_at
     timestamp last_seen
   }
+  SYNCKEYS["_fd_sync_keys"] {
+    uuid client_id PK "the device"
+    int mutation PK "the change that created the row"
+    text table_name "by name"
+    text row_key "the real key the server made"
+  }
+  BUILDHOSTS["_fd_build_hosts"] {
+    uuid id PK
+    text name UK
+    json targets "the targets it builds: ios, ios_simulator"
+    text token_hash UK "SHA-256 of its token, never the token"
+    timestamp created_at
+    timestamp last_seen_at "its last heartbeat"
+    json report "what its agent last said"
+  }
 
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
@@ -1954,6 +1969,7 @@ erDiagram
   SYNCCLIENTS |o--o{ CHANGES : "client_id -- by value, an uploaded change"
   USERS ||--o{ SYNCCLIENTS : "user_id -- by value"
   APPS ||--o{ SYNCCLIENTS : "application -- by value"
+  SYNCCLIENTS ||--o{ SYNCKEYS : "client_id -- by value, a row created offline"
 ```
 
 Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _fd_roles.role`
@@ -5809,7 +5825,7 @@ build.
 
 **Build hosts: a target built on another machine (planned, `TODO-build-hosts.md`).** iOS needs
 macOS, and the server usually runs on Linux. A Mac can be registered as a **build host** for
-some targets. It runs the same binary as `feldspar build-agent --server <url> --token <token>`
+some targets. It runs the same binary as `feldspar build-agent --server <url> --token-file <path>`
 and asks the server for work, rather than the server sending work to it. That way the Mac needs
 only outbound HTTPS (it is often behind NAT), exposes no endpoint of its own, and the server
 stays the one place that holds jobs, logs and artifacts. A second Mac is just another agent.
@@ -5838,7 +5854,12 @@ A job goes like this:
 
 A build host is a row in `_fd_build_hosts`: its name, its targets, the hash of its token, when
 it was last seen and what it last reported (OS, version, readiness per target). Its token opens
-the `/build-agent/*` routes and nothing else. Readiness then says where a target builds: here,
+the `/build-agent/*` routes and nothing else, and is read from a file or `FELDSPAR_BUILD_TOKEN`
+on the build host, never from its command line. Every 30 seconds the agent sends a heartbeat
+(`POST /build-agent/heartbeat`): who it is, and what each target still lacks on its machine. The
+answer is the targets and their `requires`, in the module manifest's format, so the agent checks
+them where the build will run. An agent speaking another protocol version is refused, and the
+reason is kept on the host for the admin to see. Readiness then says where a target builds: here,
 on a named build host, or nowhere. The distribution certificate's private key stays in the
 Mac's keychain, as it does for a local build. The profile travels in the archive, and the App
 Store Connect key in the job's environment, only to an agent that holds a valid token.

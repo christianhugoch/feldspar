@@ -6851,6 +6851,84 @@ pub fn admin_handlers_with(
         }
     });
 
+    // --- build hosts (`TODO-build-hosts.md`) ---------------------------------
+    //
+    // The registry a Mac is added to as a build host. Its agent talks to
+    // `/build-agent/*` (`crate::build_agent`) with the token `createBuildHost`
+    // answers once; every decision about that token is `sc_app::build_hosts`'s.
+
+    reg.register("listBuildHosts", {
+        let catalog = catalog.clone();
+        move |_ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let now = chrono::Utc::now();
+                let out: Vec<Json> = sc_app::list_build_hosts(&catalog)
+                    .await?
+                    .iter()
+                    .map(|host| build_host_json(host, now))
+                    .collect();
+                Ok(HandlerResponse::ok(Json::Array(out)))
+            }
+        }
+    });
+
+    reg.register("createBuildHost", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let (host, token) = sc_app::add_build_host(
+                    &catalog,
+                    str_field(obj, "name")?,
+                    &string_array_field(obj, "targets")?,
+                )
+                .await?;
+                Ok(HandlerResponse::ok(json!({
+                    "host": build_host_json(&host, chrono::Utc::now()),
+                    "token": token,
+                }))
+                .with_status(201))
+            }
+        }
+    });
+
+    reg.register("updateBuildHost", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_build_host_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let host = sc_app::update_build_host(
+                    &catalog,
+                    id,
+                    str_field(obj, "name")?,
+                    &string_array_field(obj, "targets")?,
+                )
+                .await?
+                .ok_or_else(|| Error::not_found(format!("there is no build host `{id}`")))?;
+                Ok(HandlerResponse::ok(build_host_json(
+                    &host,
+                    chrono::Utc::now(),
+                )))
+            }
+        }
+    });
+
+    reg.register("deleteBuildHost", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_build_host_id(ctx.path_param("id")?)?;
+                let deleted = sc_app::delete_build_host(&catalog, id).await?;
+                Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
     // --- the Analytics UI (analytics TODO A1.13) -----------------------------
     crate::analytics::register(&mut reg, catalog.clone());
     crate::public_datasets::register(&mut reg, catalog.clone(), fetch);
@@ -10023,6 +10101,24 @@ fn api_token_json(token: &sc_auth::ApiToken) -> Json {
         // answer is better than one per client.
         "live": token.is_live(chrono::Utc::now()),
     })
+}
+
+/// A build host as the admin API answers it (`build_host_schema`).
+fn build_host_json(host: &sc_app::BuildHost, now: chrono::DateTime<chrono::Utc>) -> Json {
+    json!({
+        "id": host.id,
+        "name": host.name,
+        "targets": host.targets,
+        "created_at": host.created_at,
+        "last_seen_at": host.last_seen_at,
+        "online": host.is_online(now),
+        "report": host.report,
+    })
+}
+
+fn parse_build_host_id(raw: &str) -> Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(raw)
+        .map_err(|_| Error::invalid(format!("`{raw}` is not a valid build host id")))
 }
 
 fn parse_api_token_id(raw: &str) -> Result<uuid::Uuid> {

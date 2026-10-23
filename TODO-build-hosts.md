@@ -14,18 +14,20 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## B1 — Registering a build host
 
-- [ ] B1.1 `_fd_build_hosts`: a name, the targets it builds (`ios`, `ios_simulator`, later
+- [x] B1.1 `_fd_build_hosts`: a name, the targets it builds (`ios`, `ios_simulator`, later
       `android`), the hash of its token, when it was last seen, and what it last reported (OS,
-      `feldspar` version, Xcode version, readiness per target).
-- [ ] B1.2 Settings → Build hosts: add a host (its token is shown once), rename it, choose its
-      targets, revoke it. The list shows whether each host is online.
-- [ ] B1.3 `feldspar build-agent --server <url> --token <token>`: the same binary, started on the
-      Mac. It needs no database. It checks the targets' requirements on its own machine and
-      sends a heartbeat with what it found.
-- [ ] B1.4 `/build-agent/*` routes that take the build host's bearer token and nothing else. A
+      architecture, `feldspar` version, readiness per target).
+- [x] B1.2 Settings → Build hosts: add a host (its token is shown once, with the command that
+      starts the agent), rename it, change its targets, remove it (which revokes its token). The
+      list shows whether each host is online and what each target still lacks.
+- [x] B1.3 `feldspar build-agent --server <url> --token-file <path>` (or the token in
+      `FELDSPAR_BUILD_TOKEN`; never on the command line): the same binary, started on the Mac. It
+      needs no database. It checks the targets' requirements on its own machine and sends a
+      heartbeat with what it found. `--once` checks a setup and exits.
+- [x] B1.4 `/build-agent/*` routes that take the build host's bearer token and nothing else. A
       build host token opens no other endpoint, and no other token opens these.
-- [ ] B1.5 An agent whose `feldspar` version is too old for the server is refused with a message
-      saying which version it needs.
+- [x] B1.5 An agent that speaks another protocol version than the server is refused with a
+      message saying which `feldspar` to install; the admin sees the reason on the host.
 
 ## B2 — Jobs
 
