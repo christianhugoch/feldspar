@@ -62,9 +62,23 @@ the body. Each action reads what it touches **as the caller**, so another user's
 | `mail_delete_folder` | `{ folder_id }` or `{ account_id, path }` | mirror |
 | `mail_save_draft` | as `mail_send`, plus `replaces` | mirror |
 | `mail_send` | `{ account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id, calendar }` | both |
+| `mail_oauth_start` | `{ account_id, provider, return_to }` → `{ url, provider }`: send the browser to `url` (below) | both |
 
 An action's change is on the server and in the rows when it answers. A live list therefore
 updates without a sync.
+
+## Outlook.com, Microsoft 365 and Gmail
+
+`outlook.office365.com` refuses passwords (`LOGINDISABLED`, `AUTH=XOAUTH2` only). Such an
+account logs in with a token: call `mail_oauth_start` as the account's owner (an admin, for a
+shared account), then `window.location.assign(url)`. The user consents at Microsoft or Google,
+and the browser comes back to `return_to`, with `oauth_error=…` in the query if it failed. The
+row then has `auth = "oauth2"`, `oauth_provider`, the tokens in the Secret fields
+`oauth_access_token` and `oauth_refresh_token`, and `oauth_expires_at`; empty IMAP and SMTP
+servers are filled with the provider's. The module renews the token itself. When the provider
+refuses to renew it, the account goes to `auth_failed`, and connecting it again is
+`mail_oauth_start` once more. `provider` is `microsoft` or `google`, found from the address when
+left out. Tutorial Step 11 has the admin's half.
 
 ## Columns a client uses
 
@@ -77,7 +91,8 @@ updates without a sync.
 - `mail_folders`: `path`, `name`, `role` (`inbox`, `sent`, `drafts`, `trash`, `spam`,
   `archive`), `unread`, `total`, `backfill_uid` (0 when the folder is complete).
 - `mail_accounts`: `status` (`connecting`, `syncing`, `idle`, `error`, `auth_failed`,
-  `refused`, `disabled`), `last_error`, `last_sync_at`.
+  `refused`, `disabled`), `last_error`, `last_sync_at`, `auth` (`password` or `oauth2`),
+  `oauth_provider`.
 
 ## Settings (admin)
 
@@ -85,6 +100,9 @@ updates without a sync.
 reloads the module and restarts its service. Writing `_fd_modules` directly does neither.
 
 - **Trusted servers** and **Extra CA certificates**: mail servers on a private network.
+- **Sign-in providers**: the Microsoft and Google apps OAuth2 accounts use (client id and secret,
+  and Microsoft's tenant), each with the redirect address
+  `https://<admin host>/_feldspar/oauth/callback`. Tutorial Step 11 says how to register them.
 - **Headers to keep**: the header fields stored in `mail_messages.headers`, by lower-case name,
   one per line, `x-spam-*` for a prefix. Empty means `list-id`, `list-unsubscribe`,
   `list-unsubscribe-post`, `authentication-results`, `x-spam-*`, `precedence` and

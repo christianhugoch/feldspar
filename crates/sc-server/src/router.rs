@@ -392,6 +392,10 @@ pub fn build_router_with_apps(
             crate::oauth::COMPLETE_ROUTE,
             axum::routing::get(crate::oauth::complete),
         )
+        .route(
+            crate::oauth::CONSENT_ROUTE,
+            axum::routing::get(crate::oauth::consent),
+        )
         .fallback(dispatch)
         // Explicit rather than axum's implicit 2 MiB (TODO F2.5): every `Bytes`
         // extractor above reads at most `--max-request-body`. The fallback reads
@@ -3111,7 +3115,7 @@ fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
 /// what anonymity costs depends on what is being asked for; `Err` is a session
 /// store that failed, which no caller can do anything about. The error is boxed
 /// because a `Response` is large and this is the rare path.
-async fn session_user(
+pub(crate) async fn session_user(
     state: &AppState,
     jar: &CookieJar,
 ) -> std::result::Result<Option<User>, Box<Response>> {

@@ -22,7 +22,12 @@
 // Who may do what (§5.6): reading an account's mail is the ownership rule's business, and
 // whoever may read it may also set flags, move, delete and file it. Sending, and saving a
 // draft, is speaking for the account: a personal account's owner may, and on a shared account
-// a user at or above its `send_role` (an admin only, when that is empty).
+// a user at or above its `send_role` (an admin only, when that is empty). Connecting an account
+// to an OAuth2 provider (`mail_oauth_start`) is changing it: its owner, or an admin for a shared
+// one.
+//
+// An OAuth2 account's access token is renewed before the action connects or sends with it, when
+// it expires within 5 minutes (`oauth.js` `fresh`).
 
 "use strict";
 
@@ -35,6 +40,7 @@ const { withConnection, assignRoles } = require("./account.js");
 const { runners } = require("./service.js");
 const { FILE_STORE, FILE_FOLDER, safeName, downloadable, storeMessage, fetchAndParse, deleteMessages, deleteFolder, isMirror, headerNames } = require("./sync.js");
 const { parse } = require("./parse.js");
+const { fresh, isOAuth, consentRequest, providerOf } = require("./oauth.js");
 
 /** A Secret field's value as clients see it (`sc-types` `SECRET_SENTINEL`): "keep what is stored". */
 const SECRET_SENTINEL = "••••••••";
@@ -91,16 +97,18 @@ async function readable(name, id, user) {
 }
 
 /** Run IMAP work on `path` of an account: on its running connection, or on one of its own. */
-function onFolder(account, path, configuration, work) {
+async function onFolder(account, path, configuration, work) {
   const runner = runners.get(account.id);
   if (runner && runner.client && runner.client.usable) return runner.withFolder(path, work);
+  await fresh(account, configuration, moduleDb());
   return withConnection(account, connectionSettings(configuration), path, work);
 }
 
 /** Run IMAP work that selects no folder (CREATE, APPEND) on an account's connection. */
-function onAccount(account, configuration, work) {
+async function onAccount(account, configuration, work) {
   const runner = runners.get(account.id);
   if (runner && runner.client && runner.client.usable) return runner.withClient(work);
+  await fresh(account, configuration, moduleDb());
   return withConnection(account, connectionSettings(configuration), null, work);
 }
 
@@ -138,7 +146,12 @@ function moduleDb() {
       },
     };
   };
-  return { mail_messages: chain("mail_messages"), mail_attachments: chain("mail_attachments"), mail_folders: chain("mail_folders") };
+  return {
+    mail_accounts: chain("mail_accounts"),
+    mail_messages: chain("mail_messages"),
+    mail_attachments: chain("mail_attachments"),
+    mail_folders: chain("mail_folders"),
+  };
 }
 
 /** What `sync.js` needs to write rows from an action. */
@@ -255,7 +268,8 @@ const ACCOUNT_FIELDS = [
 ];
 
 /** Log in to IMAP and SMTP with settings that may not be saved yet. With `account_id`, a
- * password left empty (or as the sentinel) is the saved one, read as the caller. */
+ * password left empty (or as the sentinel) is the saved one, read as the caller; a saved
+ * OAuth2 account logs in with its token. */
 async function testAccount({ payload, user, settings: configuration }) {
   caller(user);
   const now = Date.now();
@@ -273,10 +287,18 @@ async function testAccount({ payload, user, settings: configuration }) {
       const given = account[key];
       if (given === undefined || given === null || given === "" || given === SECRET_SENTINEL) account[key] = saved[key];
     }
+    if (isOAuth(saved)) {
+      for (const key of ["id", "auth", "oauth_provider", "oauth_access_token", "oauth_refresh_token", "oauth_expires_at"]) account[key] = saved[key];
+    }
   }
   const settings = connectionSettings(configuration);
   const result = { imap: false, smtp: null, error: null };
   const errors = [];
+  try {
+    await fresh(account, configuration, moduleDb());
+  } catch (e) {
+    return { ...result, error: redact(e, account) };
+  }
   try {
     await withConnection(account, settings, null, async () => {});
     result.imap = true;
@@ -775,6 +797,7 @@ async function send({ payload, user, settings: configuration, files, callerFiles
   const source = await sourceOf(mail);
 
   const settings = connectionSettings(configuration);
+  await fresh(account, configuration, moduleDb());
   const transport = nodemailer.createTransport(smtpOptions(account, await smtpTarget(account, settings), settings));
   let info;
   try {
@@ -828,8 +851,28 @@ async function send({ payload, user, settings: configuration, files, callerFiles
   return result;
 }
 
+// ------------------------------------------------------------------------------ mail_oauth_start
+
+/** Connect an account to its OAuth2 provider (`oauth.js`): the consent flow's address, where
+ * the application sends the browser. The account's owner, or an admin for a shared account. */
+async function oauthStart({ payload, user, settings: configuration, oauth }) {
+  caller(user);
+  const p = payload || {};
+  const account = await readable("mail_accounts", idList(p.account_id, "account_id")[0], user);
+  const shared = account.owner === null || account.owner === undefined;
+  if (shared ? Number(user.role) !== 1 : String(account.owner) !== String(user.id)) {
+    throw new Error(shared ? `only an admin may connect the shared account ${label(account)}` : `only its owner may connect ${label(account)}`);
+  }
+  if (!oauth) throw new Error("this server cannot run a consent flow for a module");
+  const provider = String(p.provider || "").trim().toLowerCase() || providerOf(account);
+  if (!provider) throw new Error(`say which provider ${label(account)} is with: microsoft or google`);
+  const { url } = await oauth.begin(consentRequest(account, provider, configuration, p.return_to));
+  return { url, provider };
+}
+
 module.exports = {
   actions: {
+    mail_oauth_start: oauthStart,
     mail_test_account: testAccount,
     mail_sync_now: syncNow,
     mail_set_flags: setFlags,

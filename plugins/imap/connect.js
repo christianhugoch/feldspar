@@ -21,12 +21,14 @@
 //   may resolve to private addresses, and with a port it may use that port as well as the
 //   standard ones. It is the admin's setting, not an account's: a user who types `10.0.0.5` into
 //   their own account is still refused.
-// - **Passwords never appear** in a log, an error or `last_error`: see `redact`.
+// - **Passwords never appear** in a log, an error or `last_error`: see `redact`. Nor do an OAuth2
+//   account's tokens (`oauth.js`), which log in in place of its passwords.
 
 "use strict";
 
 const dns = require("node:dns");
 const net = require("node:net");
+const { authOf } = require("./oauth.js");
 
 /** The standard ports, by protocol and security (§5.1). */
 const PORTS = {
@@ -235,7 +237,7 @@ function imapOptions(account, target, settings, extra = {}) {
     doSTARTTLS: target.secure ? undefined : true,
     servername: target.servername,
     tls: tlsOptions(target, settings),
-    auth: { user: account.imap_user || account.email || "", pass: account.imap_password || "" },
+    auth: authOf(account, account.imap_user || account.email || "", "imap"),
     logger: false,
     connectionTimeout: TIMEOUTS.connection,
     greetingTimeout: TIMEOUTS.greeting,
@@ -260,7 +262,7 @@ function smtpOptions(account, target, settings) {
     requireTLS: !target.secure,
     name: domainOf(account.email) || domainOf(account.smtp_user) || target.host,
     tls: tlsOptions(target, settings),
-    auth: { user: account.smtp_user || account.email || "", pass: account.smtp_password || "" },
+    auth: authOf(account, account.smtp_user || account.email || "", "smtp"),
     logger: false,
     debug: false,
     connectionTimeout: TIMEOUTS.connection,
@@ -281,7 +283,7 @@ function smtpTarget(account, settings) {
 
 // ------------------------------------------------------------------------------ errors
 
-/** An error's message with the account's passwords taken out, cut to a length a status column
+/** An error's message with the account's passwords and tokens taken out, cut to a length a status column
  * holds. Includes the server's own response text when imapflow has one, which is what says
  * *why* a login failed. */
 function redact(error, account) {
@@ -289,7 +291,8 @@ function redact(error, account) {
   if (error && typeof error === "object" && error.responseText && !text.includes(error.responseText)) {
     text += `: ${error.responseText}`;
   }
-  for (const secret of [account && account.imap_password, account && account.smtp_password]) {
+  const secrets = ["imap_password", "smtp_password", "oauth_access_token", "oauth_refresh_token"].map((k) => account && account[k]);
+  for (const secret of secrets) {
     if (typeof secret === "string" && secret.length >= 1) text = text.split(secret).join("•••");
   }
   return text.replace(/\0/g, "").slice(0, 1000);

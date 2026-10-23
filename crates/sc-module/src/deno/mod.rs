@@ -1381,7 +1381,8 @@ impl DenoModuleHost {
             || call.hosts.module_fns.is_some()
             || call.hosts.files.is_some()
             || call.service.is_some()
-            || call.module_files.is_some();
+            || call.module_files.is_some()
+            || call.oauth.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
             // The functions this call's modules supply, by name, for v1's
@@ -1422,6 +1423,7 @@ impl DenoModuleHost {
         let files = call.hosts.files;
         let service = call.service;
         let module_files = call.module_files;
+        let oauth = call.oauth;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work. A service has none (`None`).
@@ -1489,6 +1491,7 @@ impl DenoModuleHost {
                             files,
                             service,
                             module_files,
+                            oauth,
                         };
                         let (ok, text) = match serve(surfaces, ask.request).await {
                             Ok(value) => (
@@ -1591,6 +1594,7 @@ struct Surfaces<'a> {
     files: Option<&'a dyn sc_expr::FileHost>,
     service: Option<&'a dyn crate::host::ServiceAsks>,
     module_files: Option<&'a dyn sc_expr::FileHost>,
+    oauth: Option<&'a dyn crate::host::OAuthAsks>,
 }
 
 /// One ask, on the surface it names.
@@ -1642,11 +1646,18 @@ async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
                 "only a module's running service can ask for this (`ctx.onTableChange`)",
             )),
         },
+        "oauth" => match surfaces.oauth {
+            Some(oauth) => oauth.ask(plan).await,
+            None => Err(Error::config(
+                "only an action called by a user can ask for their consent (`oauth.begin`)",
+            )),
+        },
         other => Err(Error::config(format!(
             "`{other}` is not something a module can ask this server for; what a module may \
              reach is the database (`db`), this server's triggers (`trigger`), its modules' \
              functions (`function`), the file stores it was given (`files`), its own \
-             file areas (`module_files`) and, from a service, its supervisor (`service`)"
+             file areas (`module_files`), from a service its supervisor (`service`) and, \
+             from an action, a consent flow (`oauth`)"
         ))),
     }
 }

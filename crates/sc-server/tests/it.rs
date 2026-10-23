@@ -145,6 +145,8 @@ mod model_formulas;
 mod model_handle;
 #[path = "models_without_actions.rs"]
 mod models_without_actions;
+#[path = "module_consent.rs"]
+mod module_consent;
 #[path = "modules_api.rs"]
 mod modules_api;
 #[path = "named_datasets.rs"]

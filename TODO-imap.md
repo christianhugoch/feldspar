@@ -961,7 +961,7 @@ and do not commit.
   | IONOS | | | | | | | | | not run yet |
   | Strato | | | | | | | | | not run yet |
   | Exchange on-premises | | | | | | | | | not run yet; needs `configuration` (trusted server, CA) in its entry |
-- [ ] **M10.3** OAuth2 / XOAUTH2 per account (Gmail, Microsoft 365), built on the core OAuth work
+- [x] **M10.3** OAuth2 / XOAUTH2 per account (Gmail, Microsoft 365), built on the core OAuth work
   (`sc-server/src/oauth.rs`). The tokens are Secret fields. **No longer "later"** (field report
   2026-10-23, PaddiMail): `outlook.office365.com` answers `LOGINDISABLED`, offers only
   `AUTH=XOAUTH2` and says "Basic authentication is disabled", so **personal Outlook.com /
@@ -981,6 +981,43 @@ and do not commit.
   - a consent flow an application can start for one account (owner-checked) that comes back
     to a `return_to` in the app, reusing `oauth.rs`'s callback-on-the-admin-host, PKCE and
     binding-cookie design, but storing tokens on the account instead of signing anybody in.
+
+  **Done (2026-10-23).** Decisions worth knowing (CHANGELOG has the full list):
+  - **The consent flow is the server's, asked for by the action.** An action's argument has
+    `oauth.begin(request)` (a new `oauth` ask surface, `sc_module::consent`), answering
+    `{ url: "/_feldspar/oauth/consent/<id>" }`. The server checks the request (the caller is
+    signed in; https or loopback addresses; the tokens go only into the module's declared Secret
+    fields of its own table; `set` only its declared fields), and runs the browser's half on
+    `oauth.rs`: the consent route refuses any session but the caller's, then the binding cookie,
+    PKCE, the shared callback on the admin host, and the completion in the starting browser,
+    which writes the tokens through the row layer and leaves for `return_to` (`oauth_error=…`
+    on failure). The module never sees the code; the application never sees a token. The
+    provider's redirect address is the same one sign-in uses.
+  - **`mail_oauth_start { account_id, provider, return_to }`** → `{ url, provider }`: the owner of
+    a personal account, an admin for a shared one. `provider` is `microsoft` or `google`, found
+    from the address or IMAP host when left out. Empty IMAP/SMTP servers get the provider's.
+  - **New columns:** `oauth_provider`, `oauth_access_token` and `oauth_refresh_token` (Secret),
+    `oauth_expires_at`. Module settings step **Sign-in providers**: `microsoft_client_id`,
+    `microsoft_client_secret`, `microsoft_tenant` (default `common`; `consumers` for Outlook.com
+    only), `google_client_id`, `google_client_secret`.
+  - **`oauth.js` `fresh`** renews a token expiring within 5 minutes before every connection
+    (runner and actions) and every send, one renewal at a time per account, and writes the new
+    tokens back (Microsoft's new refresh token too). A login refused with a token that looked
+    good renews once and reconnects at once. `invalid_grant` (and a bad client) sets
+    `auth_failed` straight away, "connect the account again"; other token-endpoint failures are
+    retried with the usual backoff. Tokens are redacted from errors like passwords.
+  - **The service** leaves token changes out of an account's fingerprint: tokens an action
+    renewed are handed to the running runner, and only an account at `auth_failed` restarts for
+    them (which is what a new consent does).
+  - **Tests:** `test/oauth.test.mjs` against a fake token endpoint, a fake IMAP server with
+    only `AUTH=XOAUTH2` (and `LOGINDISABLED`) and the SMTP library with XOAUTH2 only;
+    `crates/sc-module/tests/module_consent.rs` (the checks of `oauth.begin`) and
+    `crates/sc-server/tests/module_consent.rs` (the whole browser flow against a fake provider,
+    with a stranger's session and another browser refused).
+  - **Not done:** no live run against Outlook.com or Gmail yet (M10.2's matrix takes OAuth2
+    entries now: `auth`, `oauth_provider`, `oauth_refresh_token`, and the provider app in
+    `configuration`). The Admin UI's row editor has no "Connect" button; an application starts
+    the flow. Revoking the grant at the provider when an account is deleted is not done.
 - [ ] **M10.4** Search: server-side `UID SEARCH` for an action, plus Postgres full-text search over
   `mail_messages`. *(later)*
 - [ ] **M10.5** Risk scoring after `risk.py`'s ideas. CalDAV, and answering invitations. *(later)*

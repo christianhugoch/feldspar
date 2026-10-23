@@ -43,6 +43,10 @@
 // - **Three login failures in a row** set `status = auth_failed` and stop the runner, because
 //   repeated bad logins can get an account locked. The service starts it again when somebody
 //   changes the row (§5.5).
+// - **OAuth2 accounts** (`oauth.js`): the access token is renewed before each connection when
+//   it expires within 5 minutes. A login refused with a token that looked good renews it once
+//   and connects again at once; a renewal the provider refuses sets `auth_failed` straight away,
+//   because only a new consent mends it.
 // - **A refused server** (a private address, a wrong port: `connect.js`) is not retried either;
 //   it sets `status = refused` and waits for the row to change.
 // - Errors written to `last_error` have the passwords taken out (`connect.redact`).
@@ -54,6 +58,7 @@
 
 const { ImapFlow } = require("imapflow");
 const { imapTarget, imapOptions, redact } = require("./connect.js");
+const { fresh, isOAuth } = require("./oauth.js");
 const { syncFolder, folderRow, watchedFolders, applyFlags, backfill, backfillPending, deleteFolder, isMirror } = require("./sync.js");
 
 const DEFAULTS = {
@@ -161,8 +166,9 @@ function nextBackoff(previous, opts) {
 
 class AccountRunner {
   /**
-   * @param {{ db, files, log, settings, now?: () => Date }} host the service's `ctx.db`,
-   *   `ctx.files`, `ctx.log`, and the connection settings (`connect.connectionSettings`)
+   * @param {{ db, files, log, settings, configuration, now?: () => Date }} host the service's
+   *   `ctx.db`, `ctx.files`, `ctx.log`, the connection settings (`connect.connectionSettings`)
+   *   and the module's configuration (an OAuth2 account's provider, `oauth.js`)
    * @param {object} account the `mail_accounts` row, secrets revealed
    * @param {object} [options] overrides of `DEFAULTS`, for tests
    */
@@ -174,6 +180,9 @@ class AccountRunner {
     this.client = null;
     this.state = "stopped";
     this.authFailures = 0;
+    /** An OAuth2 login was refused: renew the token before the next connection, whatever its
+     * expiry says. */
+    this.forceRefresh = false;
     this.queue = Promise.resolve();
     this.folders = new Map();
     this.due = emptyDue();
@@ -283,10 +292,22 @@ class AccountRunner {
           this.host.log.warn(`${this.label}: ${message}`);
           return;
         }
+        if (e.reconnect) {
+          await this.setStatus("auth_failed", message).catch(() => {});
+          this.host.log.warn(`${this.label}: ${message}`);
+          return;
+        }
+        if (e.authenticationFailed && isOAuth(this.account) && !this.forceRefresh && !e.refreshed) {
+          // Revoked early, or the clock is off: one renewal and another try, now.
+          this.forceRefresh = true;
+          this.host.log.info(`${this.label}: the access token was refused; renewing it`);
+          continue;
+        }
         if (e.authenticationFailed) {
           this.authFailures += 1;
           if (this.authFailures >= this.opts.maxAuthFailures) {
-            await this.setStatus("auth_failed", `login failed ${this.authFailures} times in a row; fix the password and save the account to try again: ${message}`).catch(() => {});
+            const fix = isOAuth(this.account) ? "connect the account to its provider again" : "fix the password and save the account to try again";
+            await this.setStatus("auth_failed", `login failed ${this.authFailures} times in a row; ${fix}: ${message}`).catch(() => {});
             this.host.log.warn(`${this.label}: login failed ${this.authFailures} times; not retrying until the account changes`);
             return;
           }
@@ -305,6 +326,11 @@ class AccountRunner {
   async session() {
     const settings = this.host.settings || {};
     const target = await imapTarget(this.account, settings);
+    const forced = this.forceRefresh;
+    if (isOAuth(this.account)) {
+      await fresh(this.account, this.host.configuration, this.host.db, { force: forced });
+      this.forceRefresh = false;
+    }
     const client = new ImapFlow(
       imapOptions(this.account, target, settings, {
         maxIdleTime: this.opts.maxIdleMs,
@@ -336,7 +362,13 @@ class AccountRunner {
     });
     this.client = client;
     try {
-      await client.connect();
+      try {
+        await client.connect();
+      } catch (e) {
+        // A token renewed just now and refused all the same: not worth renewing again.
+        if (forced && e && typeof e === "object") e.refreshed = true;
+        throw e;
+      }
       this.authFailures = 0;
       // On the queue, behind whatever an action or the last connection's pass left there.
       await this.enqueue(async () => {

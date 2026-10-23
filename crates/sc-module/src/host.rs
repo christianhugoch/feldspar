@@ -70,6 +70,9 @@ pub struct CallHosts<'a> {
     /// [`crate::files::ModuleFiles`], confined to the stores and folders its
     /// declared file fields name.
     pub module_files: Option<&'a dyn sc_expr::FileHost>,
+    /// An action's `oauth.begin(…)` (TODO-imap M10.3): the `oauth` surface, a
+    /// [`crate::consent::ConsentAsks`] for the action's module and caller.
+    pub oauth: Option<&'a dyn OAuthAsks>,
 }
 
 /// The `service` ask surface: what a running service asks of the supervisor
@@ -86,6 +89,14 @@ pub trait ServiceAsks: Send + Sync {
     async fn ask(&self, plan: Json) -> Result<Json>;
 }
 
+/// The `oauth` ask surface: an action asking for its caller's consent at an
+/// OAuth 2.0 provider ([`crate::consent`]).
+#[async_trait::async_trait]
+pub trait OAuthAsks: Send + Sync {
+    /// Answer one ask.
+    async fn ask(&self, plan: Json) -> Result<Json>;
+}
+
 impl<'a> CallHosts<'a> {
     /// The surfaces and the schema of one run, as
     /// `sc_core_actions::code_body::Hosts` supplies them.
@@ -97,6 +108,7 @@ impl<'a> CallHosts<'a> {
             views: None,
             service: None,
             module_files: None,
+            oauth: None,
         }
     }
 
@@ -104,6 +116,13 @@ impl<'a> CallHosts<'a> {
     #[must_use]
     pub fn with_module_files(mut self, files: &'a dyn sc_expr::FileHost) -> CallHosts<'a> {
         self.module_files = Some(files);
+        self
+    }
+
+    /// The same, with the `oauth` surface.
+    #[must_use]
+    pub fn with_oauth(mut self, oauth: &'a dyn OAuthAsks) -> CallHosts<'a> {
+        self.oauth = Some(oauth);
         self
     }
 

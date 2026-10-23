@@ -2,6 +2,56 @@
 
 Changes in reverse chronological order.
 
+## Mail: Outlook.com, Microsoft 365 and Gmail with OAuth2 (TODO-imap M10.3)
+
+`outlook.office365.com` answers `LOGINDISABLED` and offers only `AUTH=XOAUTH2`, so personal
+Outlook.com, Hotmail and Live mailboxes could not be used at all (field report from PaddiMail).
+A mail account can now log in with a token from Microsoft or Google.
+
+- **Consent flows for modules (core).** A module action's argument has `oauth.begin(request)`
+  (a new `oauth` ask surface: `sc_module::consent`, `CallHosts::oauth`). It asks for the
+  *caller's* consent at an OAuth 2.0 provider, for tokens kept in a row of the module's own
+  table, and answers `{ url: "/_feldspar/oauth/consent/<id>" }` for the application to send the
+  browser to. The request is checked first: a signed-in caller; `https` (or loopback) provider
+  addresses; `params` may not set the request's own parameters; the table must be one the
+  module declared, the token fields its declared Secret fields, and `set` its declared fields;
+  `return_to` a local path.
+- **The browser's half is the sign-in flow's** (`sc_server::oauth`). The new route
+  `GET /_feldspar/oauth/consent/{id}` refuses any session but the caller's, then sets the
+  binding cookie and redirects to the provider with PKCE. The shared callback (on the admin
+  host, the same redirect address sign-in registers) exchanges the code. The completion, in the
+  browser that started, writes the tokens through the row layer: sealed, and seen by the
+  module's service as a change. It then leaves for `return_to`, with `oauth_error=…` when
+  anything failed. The module never sees the code, and the application never sees a token.
+  `Pending`/`Completion` now carry a `Purpose`/`Outcome`, and the token exchange is shared with
+  sign-in (`exchange`).
+- **The mail module.** New action `mail_oauth_start { account_id, provider, return_to }` →
+  `{ url, provider }`, for the owner of a personal account or an admin for a shared one.
+  `provider` (`microsoft` or `google`) is found from the address when left out, and empty IMAP
+  and SMTP servers get the provider's. New `mail_accounts` columns: `oauth_provider`,
+  `oauth_access_token` and `oauth_refresh_token` (Secret), `oauth_expires_at`. A new settings
+  step, **Sign-in providers**, takes the Microsoft client id, secret and tenant (`common` by
+  default, `consumers` for Outlook.com only) and the Google client id and secret.
+- **Renewal** (`oauth.js`): before every connection (service and actions) and every send, a
+  token expiring within 5 minutes is renewed at the provider and written back, one renewal at a
+  time per account. Microsoft's rotated refresh token is kept too. A login refused with a token
+  that looked good renews once and reconnects at once. A renewal refused with `invalid_grant`
+  (or a bad client) sets `auth_failed` straight away, saying to connect the account again;
+  other failures retry with the usual backoff. imapflow gets `auth: { user, accessToken }`,
+  nodemailer `{ type: "OAuth2", user, accessToken }`, and `redact` takes tokens out of errors.
+  Token changes are not part of an account's fingerprint: renewed tokens are handed to the
+  running runner rather than restarting it.
+- **Docs:** tutorial-mail Step 11 (registering the Microsoft and Google apps, the settings,
+  connecting from an app, what happens afterwards); tutorial-modules ("The caller's consent");
+  TECHNICAL_DESIGN §15.1d; `plugins/imap/README.md`. `test/live-matrix.mjs` takes OAuth2
+  entries.
+- **Tests:** `plugins/imap/test/oauth.test.mjs` (the request, renewal and its refusals, and a
+  runner and the actions logging in against a fake IMAP server that knows only XOAUTH2 and an
+  SMTP server with XOAUTH2 only); `sc-module` `module_consent` (what `oauth.begin` keeps and
+  what it refuses); `sc-server` `module_consent` (the whole flow against a fake provider: PKCE
+  and the client secret checked, tokens sealed in the row, a stranger's session and another
+  browser refused).
+
 ## Field report fixes: `db.sql` casts, trigger scope, `build-app`, module services
 
 From a second round of feedback on the PaddiMail application.

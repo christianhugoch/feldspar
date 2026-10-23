@@ -103,6 +103,12 @@ const ACTIONS = {
     payload: { object: { ...MESSAGE, replaces: opt("int") } },
     returns: { object: { id: opt("int"), uid: opt("int"), message_id: "string", replaced: opt("int") } },
   },
+  mail_oauth_start: {
+    description:
+      "Connect an account to Microsoft (Outlook.com, Microsoft 365) or Google (Gmail) instead of a password: answers { url }, where the application sends the browser for the user's consent. The browser comes back to return_to, with oauth_error=… if it failed. Payload: { account_id, provider, return_to }.",
+    payload: { object: { account_id: "int", provider: opt("string"), return_to: opt("string") } },
+    returns: { object: { url: "string", provider: "string" } },
+  },
   mail_send: {
     description:
       "Send a message through the account's SMTP server and keep a copy in Sent. Payload: { account_id, to, cc, bcc, subject, text, html, attachments, in_reply_to, draft_id, calendar }; calendar is { method, content } for an invitation or a reply to one (iTIP).",
@@ -155,7 +161,18 @@ const tables = [
       { name: "smtp_security", type: "text", label: "SMTP security", description: "tls (465) or starttls (587)" },
       { name: "smtp_user", type: "text", label: "SMTP user" },
       { name: "smtp_password", secret: true, label: "SMTP password" },
-      { name: "auth", type: "text", required: true, default: "password", label: "Authentication" },
+      {
+        name: "auth",
+        type: "text",
+        required: true,
+        default: "password",
+        label: "Authentication",
+        description: "password, or oauth2: a token from Microsoft or Google, set by mail_oauth_start",
+      },
+      { name: "oauth_provider", type: "text", label: "OAuth provider", description: "microsoft or google" },
+      { name: "oauth_access_token", secret: true, label: "OAuth access token" },
+      { name: "oauth_refresh_token", secret: true, label: "OAuth refresh token" },
+      { name: "oauth_expires_at", type: "timestamp", label: "OAuth token expires" },
       { name: "folders", type: "json", label: "Folders", description: 'Ingest: the folders to watch (default ["INBOX"])' },
       { name: "processed_folder", type: "text", label: "Move imported mail to" },
       { name: "error_folder", type: "text", label: "Move failed mail to" },
@@ -297,6 +314,37 @@ const configuration_workflow = () => ({
               "Empty: List-Id, List-Unsubscribe, List-Unsubscribe-Post, Authentication-Results, X-Spam-*, Precedence and Auto-Submitted. A single - keeps none. " +
               "Applies to mail stored from then on.",
           },
+        ],
+      },
+    },
+    {
+      name: "Sign-in providers",
+      form: {
+        fields: [
+          {
+            name: "microsoft_client_id",
+            label: "Microsoft client ID",
+            type: "String",
+            sublabel:
+              "For Outlook.com and Microsoft 365 accounts, which refuse passwords: the Application (client) ID of an app registered in Microsoft Entra, " +
+              "with the redirect address https://<this server's admin host>/_feldspar/oauth/callback and the delegated permissions " +
+              "IMAP.AccessAsUser.All, SMTP.Send and offline_access.",
+          },
+          { name: "microsoft_client_secret", label: "Microsoft client secret", type: "String", fieldview: "password" },
+          {
+            name: "microsoft_tenant",
+            label: "Microsoft tenant",
+            type: "String",
+            sublabel: "common (any account; the default), consumers (Outlook.com, Hotmail and Live only), organizations, or your tenant's id",
+          },
+          {
+            name: "google_client_id",
+            label: "Google client ID",
+            type: "String",
+            sublabel:
+              "For Gmail without an app password: an OAuth client (web application) in Google Cloud, with the same redirect address and the scope https://mail.google.com/.",
+          },
+          { name: "google_client_secret", label: "Google client secret", type: "String", fieldview: "password" },
         ],
       },
     },

@@ -11943,6 +11943,23 @@ for the caller's own download, and a refusal is the same refusal. It is read-onl
 writes nowhere but its own areas. The mail module's `mail_send` attaches an application file this
 way, so a user cannot mail themselves a file they could not have downloaded.
 
+**A consent flow (TODO-imap M10.3).** An action also gets **`oauth.begin(request)`**, a seventh
+ask surface, `oauth` (`CallHosts::oauth`, `sc_module::consent`), which only an action carries: it
+asks for the **caller's** consent at an OAuth 2.0 provider, for tokens the module keeps in its own
+row. The request names the provider's addresses, client, scopes and extra parameters, a
+`return_to` path, and `store: { table, id, fields: { access_token, refresh_token, expires_at },
+set }`. It is checked before anything is kept: the caller is a signed-in user, the addresses are
+`https` (or loopback), `params` does not set the request's own parameters, and the table is one
+the module declared, the token fields its declared **Secret** fields and `set` its declared fields.
+The answer is `{ url: "/_feldspar/oauth/consent/<id>" }`, which the application sends the browser
+to. The server then runs the browser's half on `sc_server::oauth`'s routes: the consent route
+refuses any session but the caller's, sets the binding cookie and redirects with PKCE; the
+shared callback (on the admin UI's host) exchanges the code; the completion, in the browser that
+started, writes the tokens through the row layer (sealed, and heard by the module's service as a
+change that is not its own) and leaves for `return_to`, with `oauth_error=…` on a failure. The
+module never sees the code, and the application never sees a token. Renewing a token is the
+module's own business, with its own `fetch`.
+
 **The vocabulary** is four functions, store-relative paths throughout:
 `write(store, path, data, { contentType, filename }) → path`, `read(store, path, { encoding }) →
 Buffer | string`, `remove(store, path) → bool`, `stat(store, path) → {size, …} | null`. The

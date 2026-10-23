@@ -2425,6 +2425,11 @@ async function runAction({ module: name, action: actionName, args }) {
     const callId = store.call;
     argument.files = moduleFiles((plan) => askFor(callId, "module_files", plan));
     argument.callerFiles = callerFiles((plan) => askFor(callId, "files", plan));
+    /** Ask for the caller's consent at an OAuth 2.0 provider (TODO-imap
+     * M10.3, `sc_module::consent`): answers `{ url }`, where the application
+     * sends the browser; the granted tokens are written into the row
+     * `request.store` names. */
+    argument.oauth = { begin: (request) => askFor(callId, "oauth", request) };
   }
   const result = await impl.run(argument);
   return result === undefined ? null : result;

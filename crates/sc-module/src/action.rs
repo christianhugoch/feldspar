@@ -26,6 +26,7 @@ use sc_error::Result;
 use sc_types::{Attrs, FormField};
 use serde_json::{Map, Value as Json, json};
 
+use crate::consent::ConsentAsks;
 use crate::files::{FileArea, ModuleFiles};
 use crate::host::{CallHosts, ModuleHost};
 
@@ -140,12 +141,19 @@ impl Action for ModuleAction {
         // host serve the module's asks while it waits for the answer.
         let hosts = self.surfaces.build(ctx);
         let files = ModuleFiles::new(ctx.catalog, &self.module, &self.areas);
+        let oauth = ConsentAsks {
+            catalog: ctx.catalog,
+            module: &self.module,
+            user: ctx.event.user.as_ref(),
+        };
         self.host
             .run(
                 &self.module,
                 &self.name,
                 args,
-                CallHosts::new(hosts.surfaces(), hosts.schema()).with_module_files(&files),
+                CallHosts::new(hosts.surfaces(), hosts.schema())
+                    .with_module_files(&files)
+                    .with_oauth(&oauth),
             )
             .await
     }

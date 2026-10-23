@@ -71,7 +71,7 @@ and Archive, and `mail_messages` fills with the mail that is already there, olde
 | `idle` | connected and up to date; `last_sync_at` says when |
 | `syncing` | importing, or re-reading flags |
 | `error` | something went wrong; `last_error` says what, and it reconnects by itself (5 s, doubling to 10 min) |
-| `auth_failed` | the login failed three times in a row. It stops trying, because repeated bad logins can lock an account. Fix the password and save the row |
+| `auth_failed` | the login failed three times in a row. It stops trying, because repeated bad logins can lock an account. Fix the password and save the row. For an OAuth account (Step 11), connect it again |
 | `refused` | the server is not allowed (Step 1's rules). Change the row, or have an admin trust the server |
 | `disabled` | `enabled` is off |
 
@@ -82,6 +82,10 @@ readable by every user at or above its `min_role`, and a personal account's (one
 owner of a personal account may read and change their own row, through the REST API
 (`PUT /api/mail_accounts/<id>`, with a password left as `••••••••` to keep it) as anywhere
 else.
+
+**Outlook.com, Hotmail and Microsoft 365** refuse passwords altogether (the server answers
+`LOGINDISABLED`), and Gmail needs an app password for one. Step 11 connects such an account
+with the provider's sign-in instead.
 
 ## Step 3 — Orders from mail
 
@@ -660,3 +664,57 @@ upload into it with `api.outgoing.file.upload(row.id, f.name, f)`, and pass
 password in the app: the client only ever sees `••••••••` in `imap_password`. Writing a field
 the service owns (`status`, `seen`, the folder state) through REST is overwritten at the next
 sync. Change flags, folders and mail through the actions, which do it on the server first.
+
+## Step 11 — Outlook.com, Microsoft 365 and Gmail: signing in with the provider
+
+`outlook.office365.com` accepts no password at all: it offers only `AUTH=XOAUTH2`, a login with
+an **access token** that Microsoft grants after the mailbox's owner consents on Microsoft's own
+page. Gmail does the same (and takes an app password besides). An account with
+`auth = "oauth2"` logs in this way, to IMAP and to SMTP.
+
+**Once, as an admin: the provider's app.** The tokens are granted to an app you register:
+
+- **Microsoft**: in Microsoft Entra (portal.azure.com → App registrations → New registration),
+  supported account types *personal Microsoft accounts* (for Outlook.com) or *any organizational
+  directory and personal accounts* (both), a **Web** redirect URI
+  `https://<your admin host>/_feldspar/oauth/callback`, a client secret (Certificates & secrets),
+  and the delegated API permissions `IMAP.AccessAsUser.All`, `SMTP.Send` and `offline_access`
+  (Office 365 Exchange Online). For Microsoft 365, SMTP AUTH must also be on for the mailbox.
+- **Google**: in Google Cloud, an OAuth client of type *Web application* with the same redirect
+  URI, and the scope `https://mail.google.com/` on the consent screen.
+
+The redirect URI is the one the server's own sign-in uses (Settings → Authentication shows it).
+Then **Modules → Mail → Settings → Sign-in providers**: the client id and secret of each, and for
+Microsoft the tenant — `consumers` for Outlook.com, Hotmail and Live only; `common` (the default)
+for those and Microsoft 365; or your organization's tenant id.
+
+**In the app: connect an account.** Make the account row as usual (Step 2 or 6) with its
+`email`; the IMAP and SMTP servers may stay empty, and are filled with the provider's. Expose the
+action `mail_oauth_start` as a trigger (Step 10), and send the browser where it says:
+
+```tsx
+const connect = async (accountId: number) => {
+  const { url } = (await api.runMailOauthStart({
+    account_id: accountId,
+    return_to: "/settings/mail", // a path in this app
+    // provider: "microsoft" | "google" — found from the address when left out
+  })) as { url: string };
+  window.location.assign(url);
+};
+
+// back on /settings/mail:
+const failed = new URLSearchParams(window.location.search).get("oauth_error");
+```
+
+The user signs in at Microsoft or Google and consents; the browser comes back to `return_to`
+(with `oauth_error=…` if they declined, or something failed), and the account's row now has
+`auth = "oauth2"`, `oauth_provider`, and the tokens in the Secret fields `oauth_access_token`
+and `oauth_refresh_token`, with `oauth_expires_at`. The service connects within a second or two.
+Only the account's owner may connect it (an admin, for a shared account), and only in their own
+signed-in browser: a link to somebody else's consent flow is refused.
+
+**Afterwards.** An access token lasts about an hour. The module renews it with the refresh token
+before it connects or sends, and writes the new one back; you do nothing. If the user withdraws
+the consent, changes their password, or Microsoft lets the refresh token lapse (after 90 days
+unused), the renewal is refused: the account goes to `auth_failed`, with `last_error` saying to
+connect it again, which is `mail_oauth_start` once more.
