@@ -87,6 +87,15 @@ impl LoadedModule {
             .unwrap_or_default()
     }
 
+    /// The content-security sources this module suggests (TODO-payments P1.4)
+    /// — the valid ones; an invalid one was an issue when it loaded.
+    pub fn csp_suggestions(&self) -> Vec<crate::csp::CspSuggestion> {
+        self.manifest
+            .as_ref()
+            .map(|m| crate::csp::read_suggestions(&self.module.name, &m.csp).0)
+            .unwrap_or_default()
+    }
+
     /// The view patterns this module supplies that are available (TODO
     /// "Saltcorn UI" 11.1) — what the Modules tab lists, and what a view may be
     /// saved with. A pattern whose name was taken is not here; it is an issue.
@@ -114,6 +123,16 @@ impl LoadedModule {
             .into_iter()
             .map(|d| d.name.trim().to_owned())
             .collect()
+    }
+
+    /// The application tables this module may read because its settings name
+    /// them (TODO-payments P4.1, [`crate::reads`]): what its services and
+    /// webhooks are admitted to read beside its own tables.
+    pub fn read_names(&self) -> Vec<String> {
+        self.manifest
+            .as_ref()
+            .map(|m| crate::reads::admitted(&m.reads, &self.module.configuration).0)
+            .unwrap_or_default()
     }
 
     /// The services this module runs in the background (TODO-imap M5) — what
@@ -296,6 +315,15 @@ impl ModuleSet {
         &self.modules
     }
 
+    /// Every content-security suggestion of every loaded module, in the set's
+    /// order (TODO-payments P1.4).
+    pub fn csp_suggestions(&self) -> Vec<crate::csp::CspSuggestion> {
+        self.modules
+            .iter()
+            .flat_map(LoadedModule::csp_suggestions)
+            .collect()
+    }
+
     /// One module by package name.
     pub fn get(&self, name: &str) -> Option<&LoadedModule> {
         self.modules.iter().find(|m| m.module.name == name)
@@ -361,6 +389,8 @@ async fn load_one(
     let (config_spec, spec_issues) =
         config_fields_to_form_fields(&manifest.config_fields, "this module");
     issues.extend(spec_issues);
+    issues.extend(crate::csp::read_suggestions(&module.name, &manifest.csp).1);
+    issues.extend(crate::reads::admitted(&manifest.reads, &module.configuration).1);
 
     let areas = Arc::new(crate::files::file_areas(
         &crate::tables::parse_declarations(&manifest.tables).0,
@@ -380,6 +410,7 @@ async fn load_one(
             Arc::clone(surfaces),
         )
         .with_file_areas(Arc::clone(&areas))
+        .with_role_ceiling(module.permissions.roles)
         .with_types(action.payload.clone(), action.returns.clone());
         // A type that does not lower is reported and dropped: the action still
         // runs, and its client method is `unknown` rather than wrong.
@@ -534,6 +565,9 @@ mod tests {
             map_tools: Vec::new(),
             tables: Vec::new(),
             services: Vec::new(),
+            webhooks: Vec::new(),
+            reads: Vec::new(),
+            csp: Vec::new(),
             frameworks: Vec::new(),
             view_patterns: Vec::new(),
             headers: Vec::new(),

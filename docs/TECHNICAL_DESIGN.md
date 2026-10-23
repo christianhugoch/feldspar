@@ -1138,7 +1138,9 @@ together still fails the test). Null handling is specified once, by the translat
 reified path is normalised to meet it: `===`/`==` render as `IS NOT DISTINCT FROM` (JS's
 two-valued equality — `owner === user.id` on a null `owner` is *false*), ordered comparisons
 and arithmetic are null-guarded so JS's `null → 0` coercion cannot diverge from SQL, and
-`user.x` on an anonymous (null) user reads as null rather than throwing.
+`user.x` on an anonymous (null) user reads as null rather than throwing. `+` with a string literal
+on either side (`"Invoice " + number`, TODO-payments P2.4) is JavaScript's concatenation: SQL
+`||` over each side cast to text, a null side reading `null` as JavaScript writes it.
 
 **Fail closed, everywhere.** A stored formula that no longer validates at load time (a field
 was dropped, a dump restored) grants nothing and the table stays `min_role`-only, with the
@@ -1279,6 +1281,154 @@ uses is one every admin has to read and decide to delete. Those two are **built 
 deletable (without admin nobody can administer anything; without public an anonymous request has
 no role to be), and a role any user still holds cannot be deleted either — nothing cascades a
 user to a different role.
+
+### 7.4a Role grants and the effective role (`sc_auth::grants`, TODO-payments P3, design C2)
+
+`users.role` is the **base role** an admin sets. A **role grant** is a role a user holds for a
+while beside it: a subscription's, a trial's, a comp an admin gives by hand. Each is a row of
+**`role_grants`** — `(user_id → users, role → _fd_roles, source, source_ref, starts_at,
+expires_at, revoked_at, note, created_at)`, with `(source, source_ref)` jointly unique — and the
+role a user is served at, their **effective role**, is the most privileged of the base role and
+the grants in force (started, not ended, not revoked). A grant never lowers a role.
+
+- **Every way of loading a user serves the effective role**: `load_user`, `load_user_by_email`,
+  `authenticate` (the sign-in, so the `login` event's role), a session's cache miss, an API
+  token, the MCP admin host. Everything downstream reads `User::role` — `user.role` in
+  formulas, `Event.role`, the `sc.role` and `sc.user` settings a policy reads — so it is the
+  effective role there too, with no second code path. `load_base_user` (and `User::from_row`)
+  give the base role, which is what the user editor edits and what "the last enabled admin"
+  counts: a temporary admin is not one of the admins an installation cannot lose.
+- **Lapsing is a read, never a write.** Nothing runs at an expiry; the next read finds no grant
+  in force. A missed renewal ends access on time, never extends it. `effective_role` also
+  answers `changes_at`, the soonest a grant that could matter starts or ends, and a session
+  cache entry is believed no later than that — a grant that ends lapses at once, not up to the
+  60-second freshness TTL later. A grant made or revoked lands within the TTL, as a role change
+  does. A session started at sign-in is cached at the effective role read afresh, so a trial a
+  sign-up's trigger granted is served from the first request.
+- **One grant per source and reference.** `grant_role` upserts on it (a renewal extends the one
+  grant, and a revoked one comes back); `grant_role_once` inserts only if no grant with that key
+  has *ever* existed. Revoking keeps the row (`revoked_at`) for that reason.
+- **An ordinary table**, so an application reads it (a "your trial ends on …" banner, a daily
+  reminder trigger): created with `min_role_read`/`min_role_write` 1 and the ownership formula
+  `_read && user_id === user.id`, which are then the admin's. It is never dropped and its
+  columns are protected, like `users`'. Deleting a user deletes their grants; deleting a role
+  is refused while a grant of it is in force, and clears its ended ones. A backup carries the
+  grants inside the Users choice (`users/role_grants.ndjson`), not as a table, and Clear all
+  empties the table rather than dropping it.
+- **Sources.** `admin` (the user page, a fresh uuid as the reference), `grant_role` (the action,
+  §10.1, with `<user id>:<key>` as the reference), or a module's package name (`ctx.roles`,
+  §15.1e) — a module sees and touches only its own.
+- **The admin user page** shows the base role beside the effective one, every grant, a form to
+  give one for a number of days (or until revoked), and Revoke (`listUserRoleGrants`,
+  `grantUserRole`, `revokeUserRoleGrant`). The public role (100) is never granted: it is
+  everybody's already.
+
+### 7.4b LLM credits (`sc_auth::credits`, TODO-payments P6, design C3)
+
+A user's **LLM credits** are what a metered agent's model calls are charged to (§11.2). The
+ledger has one spender — an agent run's model calls — and is deliberately not a general
+metering facility: an application that charges for something else keeps its own tables.
+
+- **Three ordinary tables.** **`credit_buckets`** — one per grant: `(user_id → users, amount,
+  remaining, kind, source, key, expires_at, note, created_at)`, `(source, key)` unique.
+  **`credit_entries`** — one per thing that happened: `kind` `grant`, `debit` or `low_balance`,
+  the signed `amount`, the `balance` after it, `(source, key)` unique, the `bucket` a grant made,
+  and for a debit the `run`, `agent`, `model`, `input_tokens`, `output_tokens` and `cost`.
+  **`credit_accounts`** — one per user who has had credits: their `debt` and
+  `low_balance_threshold`. Amounts are `numeric`, kept to six decimal places, and travel as
+  decimal strings to the admin client. All three are created with `min_role_read`/`write` 1
+  and `_read && user_id === user.id`, so a balance widget is an owner's REST read; never
+  dropped, columns protected, emptied by Clear all, carried by a backup's Users choice
+  (`users/credit_*.ndjson`), and deleted with their user.
+- **The balance** is what is left in the unexpired buckets less the debt. An expiry is a read,
+  like a role grant's: nothing is written when a bucket lapses.
+- **`grant_credits`** repays debt first, then fills a new bucket with the rest. A grant whose
+  `(source, key)` exists does nothing and answers that bucket (`replayed`) — what makes a
+  re-delivered webhook harmless. Sources: `admin` (the user page) and a module's package name
+  (`ctx.credits`, §15.1e). `agent` is reserved for debits.
+- **Rollover** (TODO-payments P7.1). A grant may name an earlier bucket of its own source
+  (`CreditRollover { from_key, cap }`): in the same locked transaction that bucket is emptied and
+  `min(remaining, cap)` (all of it with no cap) is added to the new bucket, and an entry of kind
+  `rollover` records what that did to the balance. An expired earlier bucket still carries what it
+  held when it expired: nothing spends an expired bucket, and a renewal usually arrives just
+  after the period, and its allowance, has ended. A replayed grant carries nothing again.
+- **`debit_credits`** is called by the agent loop and nothing else: no code body, workflow,
+  action or module can spend credits. It takes from the soonest-expiring bucket first (never
+  expiring last), and what the buckets do not cover becomes debt: the call has already happened,
+  so a debit is never refused. A debit whose key (`<run>:<step>`) exists does nothing.
+- **One writer per user.** Every operation is one transaction that first locks the user's
+  `users` row `FOR UPDATE`; concurrent debits for one user take turns and never overdraw.
+- **The low-balance notice.** A debit that takes the balance from at or above the user's
+  threshold to below it writes a `low_balance` entry — once per fall, not per later call. The
+  threshold is set on the user page or by a module (`ctx.credits.setThreshold`).
+- **Events.** Each ledger write is raised as a table event after the transaction commits
+  (`Catalog::emit_write`), so an application's trigger on `credit_entries` fires (an auto
+  top-up on `low_balance`) and live reads of the buckets update. A debit's events carry the
+  run's user as the caller.
+- **The admin user page** ("LLM credits" in a user's menu) shows the balance and debt, every
+  bucket, the latest 50 entries, a form to grant credits for some days (or for good), and the
+  threshold (`getUserCredits`, `grantUserCredits`, `setUserCreditThreshold`).
+
+### 7.5 Guest sessions, and where a request came from (TODO-payments P1.3, P1.5, P1.6)
+
+**The origin.** Two facts about a request matter far below the transport, past signatures that
+carry only the user: the **application** it came through (an event's `app` — its id, its base
+URL as this request reached it, and its native apps' URL scheme from the `url_scheme` attribute),
+and the caller's **guest session**. They travel as one `sc_catalog::Origin`. The router runs an
+application request inside it (`with_origin`, a task-local), and whatever builds a caller context
+reads it there — `ownership::caller_context_at`, a code body's table host, the row actions'
+authority — so `CallerContext` carries `app` and `session` explicitly from then on, onto the write,
+onto the event the write raises (`Event::caused_by`), and back into scope by the dispatcher while
+the trigger's action runs. A scheduled trigger, a service and a webhook run in no origin, and see
+none. A code body binds `app` (`{ id, url, scheme }` or null) and `session` (`{ id }` or null)
+beside `user`.
+
+**Guest sessions** (design C9) let a visitor who is not signed in own rows — a basket — as a
+signed-in user owns them by `user`.
+
+- **Off per application** until the admin switches `guest_sessions` on (its lifetime,
+  `guest_session_days`, defaults to 30). The REST provider then projects `POST
+  {mount}/guest-session`, `api.startGuestSession()`: started on request, never on a visit, so a
+  crawler makes no rows. Idempotent for a caller who has one; refused (409) for a signed-in
+  caller; throttled per address. Its auth is `Public`, not the public *role*, so it needs the CSRF
+  token — a cross-site page cannot plant a guest session.
+- **Two secrets.** `_fd_guest_sessions` keys on the SHA-256 of the cookie token, and stores a
+  separate random **public id** (`gs_…`) beside it. The public id is what a table stores and what
+  a formula sees as `session.id`; a dump or a REST read of `orders.session_id` is not a usable
+  cookie. The table is **logged**, unlike `_fd_sessions`: the guest session is the only record of
+  who owns a guest's rows.
+- **The cookie** (`sc_guest`) is the application's own: no `Domain` (never the shared cookie
+  domain), `SameSite=Strict`, `HttpOnly`, and **persistent** (`Max-Age` = the lifetime), so the
+  basket survives a reload and closing the browser. A cross-site return from a provider's
+  checkout therefore arrives without it; the success page loads the order through the API, whose
+  same-site calls carry it.
+- **Resolution.** For an application API request with no signed-in user, the transport looks the
+  cookie up (token and application, unexpired) and runs the provider inside an origin with that
+  session. A mutating request that failed the CSRF check is the anonymous caller §7.3 describes,
+  and gets no guest session either.
+- **`session` in formulas** is an ambient object always in scope, like `user`, with one declared
+  field, `id` (`session.token` is an error on save). Ownership formulas (runtime and RLS), default
+  expressions, `only_if` and action formulas see it; in an RLS policy `session.id` is
+  `NULLIF(current_setting('sc.session', true), '')`, and `set_caller_context` sets `sc.session`
+  beside `sc.role`/`sc.user`. A calculated field, a constraint and a dataset may not use it, for
+  `user`'s reason (`Analysis::uses_caller`). `user` stays null and the role stays public for a
+  guest, so `user && …` still means "signed in".
+- **Signing in from the same browser** (P1.6) ends the guest session — row deleted, cookie
+  cleared — and the `login` event's payload is `{ guest_session: <public id> }`, which the
+  application's own trigger uses to move the guest's rows to the account (`update_rows` where
+  `session_id !== null && session_id === payload.guest_session`). A login from a browser that was
+  nobody's guest has no payload, as before — and a field a payload does not have reads as null,
+  so the trigger's first half is what keeps it from matching every row with no session.
+- **The live socket** (P2.8) is resolved like a REST request: the upgrade's cookie names the
+  guest session (an upgrade is a GET, and a cross-site one is refused by its `Origin`), the
+  connection runs inside an origin carrying it, and the connection's `CallerCell` carries its
+  public id to the hub, whose `table_changes` verdicts run inside an origin of their own
+  (`sc_catalog::with_origin`) and share verdicts per (user, role, guest session). Each re-check
+  reads the guest session again; one that has lapsed or ended closes the socket as `signed_out`.
+- **Defaults on nullable fields** (P2.8). A table owned by *either* `user` or `session` defaults
+  both (`user && user.id`, `session && session.id`), and each gives nothing for the other kind of
+  caller, so a default expression is allowed on a nullable field: one that gives nothing leaves
+  it null (on a `NOT NULL` field that fails the insert, naming the field).
 
 ---
 
@@ -2071,8 +2221,11 @@ ambient, and `row`/`old` are *out of scope* on an event that has no row (so nami
 run's `context` — §10.3) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
-The nine built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
-`run_python_code` (§15.2), `send_email`, `publish` (§14.10) and `undo` (§14.12), and they live in
+The ten built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
+`run_python_code` (§15.2), `send_email`, `publish` (§14.10), `undo` (§14.12) and `grant_role`
+(§7.4a: a user formula, a role, a duration or an `expires_at` formula, a key formula that is per
+user, and `once`, which grants nothing if a grant with that key ever existed for the user — the
+card-less trial; never the admin role), and they live in
 **`sc-core-actions`, above the row layer**. That placement is the design's one real constraint on where an action may live: a
 trigger's write goes through `sc-api`'s `rows` module, so it is coerced, validated,
 `File`-field-checked and *observed* exactly like an API caller's write. A second write path would
@@ -3702,6 +3855,20 @@ its reason kept**, remaining stored, listed and editable, because editing it is 
   left overnight is not over budget. Only an explicit `context_budget` ends a run for now; the
   working-budget default arrives with compaction (Phase 4). `max_cost` is refused on save unless
   every model the agent may call has input and output prices.
+- **LLM credits** (TODO-payments P6.3, `sc_agent::meter`). An agent is **metered** when it sets
+  `credits_per_dollar` (credits per unit of `Usage::cost`) or `credits_per_1k_input` /
+  `credits_per_1k_output` (for a model with no prices; a call with a known cost is charged by
+  the dollar when both are set). A rate per dollar alone is refused on save unless every model
+  has input and output prices, as `max_cost` is; a call whose only unknown is a cache price is
+  charged at the input price. A metered run is charged to its caller (§7.4b): it refuses an
+  anonymous caller (the run fails, naming why), stops before a model call when the balance is
+  at or below zero — or, at the start of a drive, below `credits_min_balance` — as
+  `OverBudget { budget: credits }`, and debits after **every** model call: steps (`<run>:<step>`),
+  compaction summaries and a tool's own `Delegator::ask`. A delegated run is charged to the same
+  caller at its own rates, or its parent's when it has none. **A caller at the admin role is
+  never charged**: that keeps the admin's copilot (whose caller must be an admin) and a
+  trigger's `run_agent` (which carries the admin role and no user) free. The chat says "You are
+  out of LLM credits" for that conclusion.
 - **Parallel tool calls** are sent as `false` unless the agent's `parallel_tool_calls` attribute
   is set.
 
@@ -11745,7 +11912,9 @@ has a sandbox:
   argument, so a module's worker is given exactly what an admin granted it and nothing else:
   four allow-lists on `_fd_modules.permissions` — `net`, `read`, `write`, `env` — where **every
   empty list means nothing, never everything**, and a module installed with nothing declared
-  gets the closed set. A container belongs to an isolate and there is no fence inside one, so
+  gets the closed set. A fifth entry, `roles`, is not the worker's at all: the most privileged
+  role the module may grant users (§15.1e), checked by the server when the module asks, and
+  left out of the set the pool pins by (`ModulePermissions::sandbox`). A container belongs to an isolate and there is no fence inside one, so
   the pool pins **by permission set**: two modules share a worker only when they may reach the
   same things, and editing a module's permissions moves it to a worker that grants what it now
   has, losing its sockets as a restart would. A denial is rewritten into the module's name, what
@@ -12066,6 +12235,225 @@ reads one back inside the worker's 256 MB heap. `read` reads in 4 MB pieces by `
 guessing from the path (a descriptor's own type still wins). `filename` is the existing
 `FILENAME_ATTRIBUTE`. Both are set by `ModuleFiles` after the `write` or the final `rename`.
 
+### 15.1e Module webhooks and content-security suggestions (TODO-payments P1.1, P1.2, P1.4)
+
+**Webhooks** (design C1). A module exports `webhooks: { name: { description, handle } }` (or a
+bare function, or a function of its configuration). The server serves each at `POST
+/_feldspar/hooks/<module>/<name>[/<rest>]` — and `GET` too where the webhook declares `methods:
+["GET", "POST"]` (anything else is a 405) — where `<module>` is the package name without its npm
+scope (`sc_module::hook_segment`); two modules that would share a segment are an error naming
+both. The URL to register is the admin host's, which the card shows — one stable URL, as the
+OAuth callback is — but the route answers on **every** host, as the OAuth routes do: a test
+provider's checkout page (TODO-payments P2.2) is a webhook a buyer opens on the shop's own host.
+The request reaches the module as one `webhook_call` on its worker: `req.rawBody` is a `Buffer` of
+the bytes as sent (base64 across the seam), `req.headers` are lower-cased with cookies and
+credentials withheld, `req.rest` is the path after the name. `ctx` is a service's for one call —
+`db` through the same `ScopedTables` (the module's declared tables only, no SQL, no `asUser`),
+`files`, `runTrigger`, `log`, `configuration` — at the admin role with `{ module, webhook }` as the
+writes' user, bounded like an action (wall clock and ask budget). The answer `{ status, body,
+headers }` is sent as it is; a throw is a 500 (so the provider retries), logged and raised as the
+`error` event. No session, no CSRF (the CSRF middleware treats the prefix as open to the public:
+the route reads no cookie), a 1 MiB body cap on the route, and a per-IP rate limit (600/min). The
+installed card lists each webhook's path, the admin UI prefixes its own origin and offers a copy
+button; a bundled manifest's `webhooks: [names]` puts them on the catalog card before the install.
+
+**Content-security suggestions** (design C6). A module exports `csp: { name: { description,
+sources: { directive: [hosts] } } }`. `sc_module::csp` accepts only `https://`/`wss://` host
+sources in the directives that load or reach something (`script-src`, `frame-src`,
+`connect-src`, …) — no keyword, no bare scheme, no `*`, no `default-src` or `frame-ancestors` —
+and reports anything else as an issue on the card. Nothing is allowed by installing: an
+application lists the suggestions it allows by key (`<module>:<name>`) in its `csp_sources`
+attribute, switched on from its settings page, and `AppMounts::app_csp` merges each enabled one
+when the policy is served (`CspPolicy::with_sources`: added to what the directive allows now, or
+to `default-src`'s list when the policy does not state the directive, so the application's own
+`'self'` is kept). A key whose module has been uninstalled adds nothing.
+
+**Role grants** (TODO-payments P3.3, design C4). `ctx.roles` in a service and a webhook, and
+`roles` on an action's argument, speak the `roles` ask surface (`sc_module::roles::ModuleRoles`):
+`grant({ user, role, ref, expires_at, starts_at, note })` upserts the module's grant `ref` (its
+own name for the thing that grants, a subscription), `revoke(ref)` and `get(ref)`. The grant's
+`source` is the module's package name, so a module reaches only its own. Granting is a
+permission an admin gives, like a host: the `roles` entry of the module's permissions is the
+most privileged role it may grant (`70` allows 70 to 99), set on the Modules tab ("Roles it may
+grant") or requested by a bundled manifest and granted by the install. A role above it, any role
+when there is none, and the admin role always are refused by name.
+
+**LLM credits** (TODO-payments P6.4, design C4). `ctx.credits` in a service and a webhook, and
+`credits` on an action's argument, speak the `credits` ask surface
+(`sc_module::credits::ModuleCredits`): `grant({ user, amount, key, expires_at, kind, note,
+rollover })` grants a bucket under the module's package name, once per `key`, `rollover: { from,
+cap }` carrying over what is left of the module's earlier grant `from` (P7.1); `balance(user)`; and
+`setThreshold(user, amount | null)`. There is **no debit** (§7.4b). Unlike roles, granting
+credits needs no permission: a role is a privilege, while credits only pay for model calls
+through agents the admin configured.
+
+**Tables a module reads because its settings name them** (TODO-payments P4.1). A service's and
+a webhook's `ctx.db` reach only the module's declared tables (`ScopedTables`). A module whose
+webhook must read one of the application's tables — the payments module's plan binding names a
+`plans` table, and the webhook looks up which plan a subscription's price is — exports `reads`, a
+list of table names or a function of its configuration. The worker reports it in the manifest;
+`sc_module::reads::admitted` keeps only the names that are **values in the module's stored
+configuration** (anything else is an issue on the card), so module code cannot widen its own
+reach and the admin who typed the name into the settings form is the one who granted it. The
+admitted names join `ScopedTables` as `TableScope::reads`: a `select` or `aggregate` on one (and a
+Ⱶ-path through one, on a read) is admitted; a write is refused by name. The card lists them as
+`reads`. An action needs none of this: it already runs at its trigger's authority.
+
+**A module action's argument** (TODO-payments P2.1) carries, beside v1's object, what a code body
+has of its event: `app` (`{ id, url, scheme }` of the application whose request ran it, or null),
+`session` (`{ id }` of the caller's guest session, or null), and `db` — the same fluent chain a
+service's and a webhook's `ctx.db` are, over the action's own surfaces, so at the trigger's
+authority unless a chain says `asUser()`. A module's code then reads its own tables one way from
+an action, a service and a webhook.
+
+### 15.1f The payments module (`plugins/payments`, TODO-payments P2)
+
+The design is TODO-payments.md's Part I; what follows is how P2 built it, and where it differs.
+
+**Processing is shared, and idempotent rather than transactional.** A verified delivery
+(`adapter.verifyWebhook` → `[{ id, type, ref, raw }]`) and a sweep (`adapter.listEvents`, the
+same shape) go through one function, `processing.js`'s `processEvents`: the adapter maps the
+provider's type to the module's kinds (`kinds(event)`; none is `other`), the object the event is
+about is **fetched** from the provider (§3.6 — the event says what changed, never what things
+are), the mirror row is upserted by `(account, provider_ref)`, and one `pay_events` row is
+inserted per kind unless `(account, event_id, kind)` is there. The module's `db` has no
+transaction, so nothing spans the steps; each is an upsert or an insert-if-absent, a unique
+violation from a concurrent delivery is read back as "already done", and a failure throws — the
+webhook's 500, which the provider retries and the retry finishes. An application trigger
+therefore fires once per event row, however the deliveries arrive. Events the adapter does not
+map are logged as `other` with the raw event, their object mirrored when it can be fetched.
+
+**Which application row a provider object was for** comes from, in order: its own mirror row as
+`pay_checkout` wrote it; the checkout it belongs to (a payment inherits its checkout's
+`ref_table`, `ref_key`, `user_id`, `email` and `effects`); and the provider's metadata, which the
+module sets on the checkout and its payment (`sc_ref_table`, `sc_ref_key`, `sc_user_id`) for a
+provider such as Stripe that does not link the two. `ref_key` is a **JSON** field holding the key
+as the row has it — a number for an integer key, a string for text or a UUID — and metadata keeps
+it JSON-encoded, because metadata is text. A row action's event bindings read a JSON column's
+scalar as that scalar (`rows_scope::typed_value`), so `id === row.ref_key` translates to a
+comparison with an integer, or with text the driver reads as a UUID — the same answer the
+reified evaluator gives.
+
+**The checkout's amounts are the `db` chain's formula projections.** `pay_checkout` reads the
+source row as the caller (`db.asUser()[table].get(key)`, which carries a guest's session) and
+then evaluates its configured formulas server-side with `select({ alias: formula })` at the
+trigger's authority — on the row for one line, on the child rows for many — so `productⱵprice` is
+a translated correlated subselect and the module has no formula engine of its own. The checkout
+configuration is v1 `configFields`, which the trigger form renders.
+
+**Stripe over `fetch`, not the `stripe` package** (a deviation from §3.5, which put the SDK in
+`pay_provider_code`'s scope). The REST API is form-encoded requests to one host, the package would
+be downloaded by every installation, and an adapter whose transport is one function is tested
+against recorded responses by replacing it. `client(account)` is an authenticated
+`get/post/del/request` over any endpoint, which is what `pay_provider_code` gets as `stripe` and
+what `pay_api` calls.
+
+**`pay_api` reads accounts the service keeps.** A module function is called with nobody's
+authority and no `db` (§15.1), so it cannot read `pay_accounts`. The `reconcile` service — which
+the module needs anyway — loads the accounts at start and again on every change to the table
+(`ctx.onTableChange`), into module memory on the module's worker, where its functions run. The
+sweep itself lists the provider's **events** since the last sweep (`synced_at`, less an hour's
+overlap; the first reaches back 30 days, Stripe's retention) and processes them as deliveries, so
+one already delivered is a duplicate and does nothing.
+
+**The test provider** is an adapter like the others, with its state in the worker's memory. Its
+checkout page is the module's `fake` webhook (GET and POST, served on the application's host,
+its own CSP with no script); paying delivers signed events in-process into the same `events`
+handler a provider's request reaches; an account with `settings.webhooks: "hold"` records them
+undelivered, for a test (or an admin) to `resend` in any order, as often as it likes.
+
+
+**Subscriptions (P4).** The plan binding is the module's own settings (`configuration_workflow`:
+plans table, price field — one for every account, or `account=field` pairs — role field, grace
+days), read by `plans.js`. The module's actions are a function of those settings (v1's
+`withCfg`), and the webhook and the service have them as `ctx.configuration`; the plans table is
+read through `reads` (above). Processing applies the grant after the mirror is upserted, from the
+subscription's **fetched** state: `trialing`/`active` grant the plan's role to the trial's or
+period's end plus grace (exactly to that end when it is canceled at the period's end),
+`past_due` leaves the grant alone, anything else revokes it — one grant per subscription,
+`ctx.roles.grant` upserted under `<account>:<subscription id>`. A price that is no plan's, a role
+above the module's ceiling (the manifest asks for 50; the install grants it) or a subscription
+with no user writes the reason on the mirror row's `issue` and logs it rather than failing the
+delivery, which a retry could not fix. The sweep, after the provider's event log, reads every
+live subscription in the mirror again and applies its grant, so a fixed binding or ceiling takes
+effect at the next sweep or `pay_sync`. A `pay_checkout` *grant a role* effect is applied the same
+way, per payment, from the payment's own time, and revoked when the payment is fully refunded.
+The mirror also gains a `customer` row per provider customer with its user, which is how
+`pay_portal` finds the caller's account and a second checkout reuses the same customer.
+
+An adapter's `kinds(event)` may answer `null`: an event the module understands that says nothing
+an application reacts to (Stripe's invoice for a subscription's first period), whose object is
+synced and nothing logged. Stripe maps `customer.subscription.updated` by its
+`previous_attributes` (past due, set to cancel, or changed) and a renewal is `invoice.paid` with
+`billing_reason: subscription_cycle`; `current_period_end` is read from the subscription or, since
+API version 2025-03-31, from its item. The fake provider grew customers, subscriptions, a portal
+page (plan change, cancel) and a **test clock** on it (renew, renew with a declined card, retry),
+so trials, renewals and failed renewals run in a test in milliseconds; Stripe's own test clocks
+drive the live test.
+
+Sign-up does not insert a `users` row through the row layer, so no table trigger sees it; a
+card-less trial is a `grant_role` trigger on the `login` event (sign-up signs the account in)
+with `once`.
+
+**The second adapter: Polar (P5).** `adapters/polar.js` speaks Polar's JSON API over `fetch` to
+`api.polar.sh`, or `sandbox-api.polar.sh` in test mode, pinned with `Polar-Version` (2026-10 unless
+the account says otherwise). Polar is a merchant of record, `merchant_of_record: "always"` and no
+`physical_goods`; `prepareCheckout` treats any tax setting on such an account as
+`merchant_of_record`. Fitting it showed what was Stripe's shape rather than the module's, and each
+was changed here rather than worked around:
+
+- *A checkout has lines.* A Polar checkout sells one product. A one-off checkout charges the
+  account's **one-off product** (a setting) at an ad-hoc price, the lines' total; the lines stay
+  on the mirror row as charged.
+- *A plan is a price.* On Polar it is a product: `price_ref` is "the provider's price or product",
+  and the binding's per-account field (`polar=polar_product`) says which.
+- *Proration in Stripe's words.* `pay_change_subscription` takes the module's own `prorate`,
+  `invoice` and `none`; each adapter translates, and Polar refuses `none` by name.
+- *An event says what changed.* Polar's events carry the object, never `previous_attributes`.
+  `adapter.kinds(event, { previous })` now gets the event's object's mirror row as it was before
+  the event (processing reads it first), and Polar tells a plan change on its catch-all
+  `subscription.updated` by comparing products, ignoring an event older than the mirror. A retry
+  of a delivery that failed after its mirror was written no longer sees the change, so it logs no
+  `subscription.changed`; the grant moves all the same.
+- *One delivery, one object.* A paid renewal is an **order** (`billing_reason:
+  subscription_cycle`). `verifyWebhook` answers two events under the delivery's one id, the
+  payment and the subscription's renewal, each with its own object and kinds; the dedupe key
+  `(account, event_id, kind)` already kept them apart.
+- *One delivery per happening.* Polar may say a checkout succeeded in more than one
+  `checkout.updated`; that event is given the id `<checkout>:succeeded`, so it is logged once.
+- *Idempotency keys.* Polar has none. A refund and a saved-card charge carry the module's key in
+  their metadata, and the adapter looks for one made with it before making another.
+- *Amounts.* `amount` is what the buyer paid (`total_amount`, tax included), as on Stripe. Polar
+  refunds a pre-tax amount, so a refund of an amount is converted in proportion (exactly when
+  there was no tax).
+- *An event log.* Polar's sweep reads the webhook endpoint's deliveries (its id is an account
+  setting) and processes the events never delivered.
+
+Webhooks are Standard Webhooks (`webhook-id`, `-timestamp`, `-signature`). Secrets made before 8
+September 2026 are used as their UTF-8 bytes, later ones as the standard's base64 key after
+`whsec_`; both are tried. **Saved cards (P5.3):** Polar's off-session charges (in preview, for
+organisations on a paid plan) are a draft order for the customer, finalized against their default
+payment method. `chargeSavedMethod` answers `{ status: "paid" }`, or `{ status:
+"requires_checkout", reason }` on Polar's 402 (declined, no card, authentication needed), and
+refuses by name when the organisation cannot charge off-session.
+
+Two Stripe bugs came out of running the same scenarios on it. A PaymentIntent does not name its
+Checkout Session, so a one-off payment never inherited the session's effects: processing now
+passes a checkout's row, user and effects to the payment it names, when that payment does not name
+its checkout, whichever event arrives first. And since the period moved onto the subscription
+item, a renewal's `customer.subscription.updated` has `items` in its `previous_attributes`, so it
+was logged as `subscription.changed`. Now an update is a change only when the item's price or
+quantity differs, or a cancellation is undone; other updates are `null`.
+
+**One suite, every provider (P5.2).** `test/shared.test.mjs` holds the shop's and the
+subscriptions' scenarios once and runs them against each provider through a **driver**
+(`test/providers/`). The fake is driven through its own hooks. Stripe and Polar are **simulations
+of their APIs**, in their documented shapes, put in the adapter's `transport`: they play the buyer,
+the test clock and the portal, and send their own signed events after the request that caused them
+has been answered. Where a provider differs in a way the module shows, the driver says so by a flag
+(`renewalPaymentsKnowTheirRow`: a Stripe renewal's PaymentIntent names no subscription). The fake-only copies of
+those scenarios were removed. An adapter added later is a driver and a simulation, run through the
+same suite.
 ### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
 
 The second adapter. It is small for a reason that is structural rather than lucky: the JavaScript

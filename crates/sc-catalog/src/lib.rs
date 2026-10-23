@@ -57,7 +57,7 @@ mod tx;
 mod wakeups;
 
 pub use admin_host::{AdminCall, AdminHost};
-pub use caller::CallerContext;
+pub use caller::{CallerContext, CallingApp, Origin, current_origin, with_origin};
 pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
 pub use change_log::{
     CHANGES_TABLE, ChangeLogFeature, as_text_sql, bootstrap_change_log, change_log_enabled,

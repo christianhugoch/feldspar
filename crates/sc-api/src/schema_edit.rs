@@ -105,6 +105,16 @@ pub fn key_generator(storage: &TypeRef, kind: &DataFieldKind) -> Option<ColumnGe
 const USERS_TABLE: &str = "users";
 /// The role table, protected for the same reason.
 const ROLES_TABLE: &str = "_fd_roles";
+/// The role grants (TODO-payments P3): an ordinary table, but every session
+/// reads it to decide the role a user is served at.
+const ROLE_GRANTS_TABLE: &str = sc_auth::ROLE_GRANTS_TABLE;
+/// The LLM credits ledger (TODO-payments P6): ordinary tables, but every
+/// metered agent run reads and writes them by name.
+const CREDIT_TABLES: [&str; 3] = [
+    sc_auth::CREDIT_BUCKETS_TABLE,
+    sc_auth::CREDIT_ENTRIES_TABLE,
+    sc_auth::CREDIT_ACCOUNTS_TABLE,
+];
 
 /// The columns of `users` and `_fd_roles` that the rest of the system requires
 /// to exist. Dropping one is refused regardless of grant: authentication reads
@@ -113,6 +123,64 @@ const ROLES_TABLE: &str = "_fd_roles";
 const PROTECTED_COLUMNS: &[(&str, &[&str])] = &[
     (USERS_TABLE, &["id", "email", "password_hash", "role"]),
     (ROLES_TABLE, &["id", "role", "name"]),
+    (
+        ROLE_GRANTS_TABLE,
+        &[
+            sc_auth::COL_GRANT_ID,
+            sc_auth::COL_GRANT_USER,
+            sc_auth::COL_GRANT_ROLE,
+            sc_auth::COL_GRANT_SOURCE,
+            sc_auth::COL_GRANT_SOURCE_REF,
+            sc_auth::COL_GRANT_STARTS_AT,
+            sc_auth::COL_GRANT_EXPIRES_AT,
+            sc_auth::COL_GRANT_REVOKED_AT,
+            sc_auth::COL_GRANT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_BUCKETS_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_CREDIT_AMOUNT,
+            sc_auth::COL_CREDIT_REMAINING,
+            sc_auth::COL_CREDIT_KIND,
+            sc_auth::COL_CREDIT_SOURCE,
+            sc_auth::COL_CREDIT_KEY,
+            sc_auth::COL_CREDIT_EXPIRES_AT,
+            sc_auth::COL_CREDIT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_ENTRIES_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_CREDIT_KIND,
+            sc_auth::COL_CREDIT_AMOUNT,
+            sc_auth::COL_ENTRY_BALANCE,
+            sc_auth::COL_CREDIT_SOURCE,
+            sc_auth::COL_CREDIT_KEY,
+            sc_auth::COL_ENTRY_BUCKET,
+            sc_auth::COL_ENTRY_RUN,
+            sc_auth::COL_ENTRY_AGENT,
+            sc_auth::COL_ENTRY_MODEL,
+            sc_auth::COL_ENTRY_INPUT_TOKENS,
+            sc_auth::COL_ENTRY_OUTPUT_TOKENS,
+            sc_auth::COL_ENTRY_COST,
+            sc_auth::COL_CREDIT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_ACCOUNTS_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_ACCOUNT_DEBT,
+            sc_auth::COL_ACCOUNT_THRESHOLD,
+            sc_auth::COL_ACCOUNT_UPDATED_AT,
+        ],
+    ),
 ];
 
 // --- what a batch may do ------------------------------------------------------
@@ -236,7 +304,8 @@ pub struct FieldSpec {
     pub attributes: Attrs,
     /// A JavaScript expression giving the value when an insert leaves the field
     /// out, with `user` and the row's other values in scope
-    /// ([`DataField::default_expression`]). Only for a `required` field.
+    /// ([`DataField::default_expression`]). On a nullable field, an expression
+    /// that gives nothing leaves the field null.
     pub default_expression: Option<String>,
 }
 
@@ -1901,7 +1970,11 @@ impl Plan {
         table: &str,
     ) -> Result<()> {
         self.require_editable(table)?;
-        if table == USERS_TABLE || table == ROLES_TABLE {
+        if table == USERS_TABLE
+            || table == ROLES_TABLE
+            || table == ROLE_GRANTS_TABLE
+            || CREDIT_TABLES.contains(&table)
+        {
             return Err(Error::invalid(format!(
                 "`{table}` is a built-in table and is never dropped"
             )));
@@ -2724,9 +2797,10 @@ fn validate_ownership(
 }
 
 /// Validate a field's default-value expression against a projected schema: it
-/// must parse and validate over the insert scope (`user` and the row's fields),
-/// and it belongs on a stored `NOT NULL` field only — a nullable field is
-/// already allowed to be left out, and a calculated one is never written.
+/// must parse and validate over the insert scope (`user`, `session` and the
+/// row's fields), and it belongs on a stored field — a calculated one is never
+/// written. A nullable field may have one too: what it gives is used, and
+/// nothing (`user && user.id` for a guest) leaves the field null.
 fn validate_default_expression(
     shape: &sc_expr::SchemaShape,
     table: &str,
@@ -2740,12 +2814,6 @@ fn validate_default_expression(
         return Err(Error::invalid(format!(
             "field `{table}.{name}`: a calculated field is never written, so it cannot \
              have a default value"
-        )));
-    }
-    if !field.required {
-        return Err(Error::invalid(format!(
-            "field `{table}.{name}`: only a required (NOT NULL) field can have a default \
-             value; make it required, or clear its default"
         )));
     }
     let formula = sc_expr::Formula::parse(expression)
@@ -2771,10 +2839,10 @@ fn validate_calc_expression(
     let analysis = formula
         .validate(shape, table)
         .map_err(|e| Error::invalid(format!("calculated field `{table}.{field}`: {e}")))?;
-    if analysis.uses(sc_expr::Ambient::User) || !analysis.flags.is_empty() {
+    if analysis.uses_caller() || !analysis.flags.is_empty() {
         return Err(Error::invalid(format!(
-            "calculated field `{table}.{field}`: a calculated field cannot use `user` \
-             or the operation flags"
+            "calculated field `{table}.{field}`: a calculated field cannot use `user`, \
+             `session` or the operation flags"
         )));
     }
     Ok(analysis)

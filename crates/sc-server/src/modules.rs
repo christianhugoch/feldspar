@@ -498,6 +498,58 @@ impl ModuleServices {
         self.supervisor.statuses_of(module)
     }
 
+    /// Run the webhook `name` of the module `segment` addresses
+    /// ([`sc_module::hook_segment`]) for `request` (TODO-payments P1.1).
+    ///
+    /// `Ok(None)` when no loaded module receives webhooks there — the route's
+    /// `404`. An `Err` is a failure to run one, which the route answers `500`.
+    pub async fn webhook(
+        &self,
+        segment: &str,
+        name: &str,
+        request: sc_module::WebhookRequest,
+    ) -> Result<Option<sc_module::WebhookResponse>> {
+        let set = self.modules();
+        let Some(loaded) = sc_module::webhook_module(&set, segment)? else {
+            return Ok(None);
+        };
+        let Some(declared) = loaded
+            .manifest
+            .as_ref()
+            .and_then(|m| m.webhooks.iter().find(|w| w.name == name))
+        else {
+            return Ok(None);
+        };
+        if !declared
+            .methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&request.method))
+        {
+            let allow = declared.methods.join(", ");
+            return Ok(Some(sc_module::WebhookResponse {
+                status: 405,
+                headers: vec![
+                    ("allow".to_owned(), allow.clone()),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                body: format!("this webhook answers {allow}").into_bytes(),
+            }));
+        }
+        sc_module::run_webhook(
+            &self.catalog,
+            &self.host,
+            Some(&self.dispatcher),
+            loaded,
+            name,
+            request,
+        )
+        .await
+        .map(Some)
+    }
+
     /// The loaded set as it stands — what the Modules tab renders.
     pub fn modules(&self) -> Arc<ModuleSet> {
         match self.loaded.read() {

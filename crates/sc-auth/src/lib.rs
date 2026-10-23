@@ -22,9 +22,25 @@
 //! Roles live in [`_fd_roles`](ROLES_TABLE) and `users.role` is a foreign key
 //! onto it (§7.1, §9): a role is a row carrying a name and role-specific
 //! settings, not a bare integer with a convention attached.
+//!
+//! **Role grants** ([`role_grants`](ROLE_GRANTS_TABLE), TODO-payments P3) are
+//! roles held for a while beside that base role. Every way of loading a user
+//! — a session, an API token, a sign-in, [`load_user`] — serves them at their
+//! [`effective_role`]: the most privileged of the base role and the grants in
+//! force.
+//!
+//! **LLM credits** ([`credit_buckets`](CREDIT_BUCKETS_TABLE),
+//! [`credit_entries`](CREDIT_ENTRIES_TABLE) and
+//! [`credit_accounts`](CREDIT_ACCOUNTS_TABLE), TODO-payments P6) are the balance
+//! an agent run's model calls are charged to: [`grant_credits`],
+//! [`credit_balance`], and the debit the agent loop alone calls
+//! ([`debit_credits`]).
 
 mod create;
+mod credits;
 mod first_user;
+mod grants;
+mod guest;
 mod login;
 mod lookup;
 mod manage;
@@ -37,9 +53,34 @@ mod user;
 mod users;
 
 pub use create::{CreatedUser, NewUser, create_user, create_user_with};
+pub use credits::{
+    COL_ACCOUNT_DEBT, COL_ACCOUNT_THRESHOLD, COL_ACCOUNT_UPDATED_AT, COL_CREDIT_AMOUNT,
+    COL_CREDIT_CREATED_AT, COL_CREDIT_EXPIRES_AT, COL_CREDIT_ID, COL_CREDIT_KEY, COL_CREDIT_KIND,
+    COL_CREDIT_NOTE, COL_CREDIT_REMAINING, COL_CREDIT_SOURCE, COL_CREDIT_USER, COL_ENTRY_AGENT,
+    COL_ENTRY_BALANCE, COL_ENTRY_BUCKET, COL_ENTRY_COST, COL_ENTRY_INPUT_TOKENS, COL_ENTRY_MODEL,
+    COL_ENTRY_OUTPUT_TOKENS, COL_ENTRY_RUN, CREDIT_ACCOUNTS_TABLE, CREDIT_BUCKETS_TABLE,
+    CREDIT_DECIMALS, CREDIT_ENTRIES_TABLE, CREDIT_SOURCE_ADMIN, CREDIT_SOURCE_AGENT,
+    CREDITS_OWNERSHIP, CreditBalance, CreditBucket, CreditDebit, CreditDebited, CreditEntry,
+    CreditGrant, CreditRollover, ENTRY_DEBIT, ENTRY_GRANT, ENTRY_LOW_BALANCE, ENTRY_ROLLOVER,
+    NewCreditGrant, bootstrap_credits,
+    credit_balance, credits, debit_credits, grant_credits, list_credit_buckets,
+    list_credit_entries, set_low_balance_threshold,
+};
 pub use first_user::{any_user_exists, create_first_user};
+pub use grants::{
+    COL_GRANT_CREATED_AT, COL_GRANT_EXPIRES_AT, COL_GRANT_ID, COL_GRANT_NOTE, COL_GRANT_REVOKED_AT,
+    COL_GRANT_ROLE, COL_GRANT_SOURCE, COL_GRANT_SOURCE_REF, COL_GRANT_STARTS_AT, COL_GRANT_USER,
+    EffectiveRole, GRANT_SOURCE_ADMIN, NewRoleGrant, ROLE_GRANTS_OWNERSHIP, ROLE_GRANTS_TABLE,
+    RoleGrant, bootstrap_role_grants, effective_role, find_role_grant, grant_role, grant_role_once,
+    list_role_grants, load_role_grant, revoke_role_grant, revoke_role_grant_by_id,
+};
+pub use guest::{
+    DEFAULT_GUEST_SESSION_DAYS, GUEST_SESSIONS_TABLE, GuestSession, StartedGuestSession,
+    bootstrap_guest_sessions, end_guest_session, guest_session, start_guest_session,
+    sweep_guest_sessions,
+};
 pub use login::{authenticate, authenticate_admin};
-pub use lookup::{first_user_with_role, load_user, load_user_by_email};
+pub use lookup::{first_user_with_role, load_base_user, load_user, load_user_by_email};
 pub use manage::{UserUpdate, delete_user, set_user_disabled, set_user_password, update_user};
 pub use password::{
     RANDOM_PASSWORD_LENGTH, hash_password, is_valid_hash, random_password, verify_password,

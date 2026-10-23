@@ -45,7 +45,10 @@ use serde_json::{Map, Value as Json};
 
 use super::archive::{Archive, RowReader};
 use super::values;
-use super::{Available, MANIFEST_FILE, SSL_SECTION, Selection, USER_ROWS_FILE, USERS_FILE};
+use super::{
+    Available, CREDIT_ROWS_FILES, MANIFEST_FILE, ROLE_GRANT_ROWS_FILE, SSL_SECTION, Selection,
+    USER_ROWS_FILE, USERS_FILE,
+};
 use crate::apps::AppMounts;
 use crate::handlers::{
     agent_from_body, agents_of, application_from_body, backup_file_meta_from_json,
@@ -452,7 +455,136 @@ async fn restore_users(
         report.did(format!("{restored} users"));
     }
     check_count(report, USER_ROWS_FILE, "users", Some(expected), lines);
+    restore_role_grants(catalog, archive, &repointed, report).await;
+    restore_credits(catalog, archive, &repointed, report).await;
     repointed
+}
+
+/// The LLM credits the restored accounts hold (TODO-payments P6), after the
+/// accounts and in [`CREDIT_ROWS_FILES`]' order. A row already here — the same
+/// id, or for an account the same user — is kept as it is, and one whose user
+/// is here under another id follows the user.
+async fn restore_credits(
+    catalog: &Catalog,
+    archive: &Archive,
+    repointed: &BTreeMap<String, String>,
+    report: &mut RestoreReport,
+) {
+    for (name, path) in CREDIT_ROWS_FILES {
+        if !archive.contains(path) {
+            continue;
+        }
+        let Ok(table) = catalog.require(name) else {
+            report.skipped(format!("`{name}`: this server has no such table"));
+            continue;
+        };
+        // An account is one per user, so a user who already has one here keeps
+        // it; every other row is known by its id.
+        let key = if name == sc_auth::CREDIT_ACCOUNTS_TABLE {
+            sc_auth::COL_CREDIT_USER
+        } else {
+            sc_auth::COL_CREDIT_ID
+        };
+        let mut here: BTreeSet<String> = match rows_of(catalog, &table).await {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|r| r.get(key).and_then(Json::as_str).map(str::to_owned))
+                .collect(),
+            Err(e) => {
+                report.skipped(format!("`{name}`: {}", e.causes()));
+                continue;
+            }
+        };
+        let mut restored = 0;
+        let mut reader = archive.rows(path);
+        while let Some(batch) = reader.next_batch().await {
+            let batch = match batch {
+                Ok(batch) => batch,
+                Err(e) => {
+                    report.skipped(format!("`{name}`: {}", e.causes()));
+                    break;
+                }
+            };
+            for bad in &batch.bad {
+                report.skipped(format!("a row in `{path}`, {bad}"));
+            }
+            let fresh: Vec<Json> = repoint_users(&table, batch.rows, repointed)
+                .into_iter()
+                .filter(|row| {
+                    row.get(key)
+                        .and_then(Json::as_str)
+                        .is_some_and(|k| here.insert(k.to_owned()))
+                })
+                .collect();
+            let (inserted, problems) = insert_rows(catalog, &table, &fresh).await;
+            restored += inserted;
+            for (_, problem) in problems {
+                report.skipped(format!("a row of `{name}`: {problem}"));
+            }
+        }
+        if restored > 0 {
+            report.did(format!("{restored} rows of `{name}`"));
+        }
+    }
+}
+
+/// The role grants the restored accounts hold (TODO-payments P3), after the
+/// accounts. A grant already here — the same source and reference — is kept as
+/// it is, and one whose account is here under another id follows the account.
+/// A backup taken before there were grants has no file, and nothing to say.
+async fn restore_role_grants(
+    catalog: &Catalog,
+    archive: &Archive,
+    repointed: &BTreeMap<String, String>,
+    report: &mut RestoreReport,
+) {
+    if !archive.contains(ROLE_GRANT_ROWS_FILE) {
+        return;
+    }
+    let Ok(table) = catalog.require(sc_auth::ROLE_GRANTS_TABLE) else {
+        report.skipped("role grants: this server has no role grants table");
+        return;
+    };
+    let mut restored = 0;
+    let mut reader = archive.rows(ROLE_GRANT_ROWS_FILE);
+    while let Some(batch) = reader.next_batch().await {
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(e) => {
+                report.skipped(format!("role grants: {}", e.causes()));
+                break;
+            }
+        };
+        for bad in &batch.bad {
+            report.skipped(format!("a role grant in `{ROLE_GRANT_ROWS_FILE}`, {bad}"));
+        }
+        let mut fresh = Vec::with_capacity(batch.rows.len());
+        for grant in repoint_users(&table, batch.rows, repointed) {
+            let field = |name: &str| grant.get(name).and_then(Json::as_str).unwrap_or("");
+            let here = sc_auth::find_role_grant(
+                catalog,
+                field(sc_auth::COL_GRANT_SOURCE),
+                field(sc_auth::COL_GRANT_SOURCE_REF),
+            )
+            .await;
+            if matches!(here, Ok(Some(_))) {
+                continue;
+            }
+            fresh.push(grant);
+        }
+        let (inserted, problems) = insert_rows(catalog, &table, &fresh).await;
+        restored += inserted;
+        for (index, problem) in problems {
+            let source = fresh[index]
+                .get(sc_auth::COL_GRANT_SOURCE)
+                .and_then(Json::as_str)
+                .unwrap_or("");
+            report.skipped(format!("a role grant from `{source}`: {problem}"));
+        }
+    }
+    if restored > 0 {
+        report.did(format!("{restored} role grants"));
+    }
 }
 
 /// The accounts already here, by id and by email: either colliding means "this

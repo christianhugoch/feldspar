@@ -108,11 +108,11 @@ export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; 
 export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
 export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
 export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
-export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; tables: Array<string>; services: Array<string>; permissions: unknown; installed: boolean }> };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; tables: Array<string>; services: Array<string>; webhooks: Array<{ name: string; path: string }>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
-export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type UpdateModuleRequest = { configuration?: unknown | null; permissions?: unknown | null };
-export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type DeleteModuleResponse = { deleted: boolean };
 export type ReloadModulesResponse = { modules: number };
 export type ListCodeLibrariesResponse = Array<{ id: string; name: string; description: string; code: string; application_id?: string | null; application?: string | null; used_by?: Array<{ kind: string; name: string; application?: string | null }> | null }>;
@@ -235,6 +235,15 @@ export type SetUserDisabledResponse = { id: string; email: string; role: number;
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };
+export type ListUserRoleGrantsResponse = { base_role: number; effective_role: number; grants: Array<{ id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean }> };
+export type GrantUserRoleRequest = { role: number; expires_in_days?: number | null; note?: string | null };
+export type GrantUserRoleResponse = { id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean };
+export type RevokeUserRoleGrantResponse = { id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean };
+export type GetUserCreditsResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
+export type GrantUserCreditsRequest = { amount: string; expires_in_days?: number | null; note?: string | null };
+export type GrantUserCreditsResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
+export type SetUserCreditThresholdRequest = { threshold?: string | null };
+export type SetUserCreditThresholdResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
 export type ListApiTokensResponse = Array<{ id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }>;
 export type CreateApiTokenRequest = { label: string; grants?: { allow_create?: boolean | null; allow_edit?: boolean | null; allow_drop?: boolean | null; allow_access_changes?: boolean | null; allow_triggers?: boolean | null; allow_applications?: boolean | null; allow_modules?: boolean | null; allow_history?: boolean | null; allow_all?: boolean | null } | null; expires_in_days?: number | null };
 export type CreateApiTokenResponse = { token: { id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }; secret: string };
@@ -572,6 +581,12 @@ export interface ApiClient {
   forceLogoutUser(id: string): Promise<ForceLogoutUserResponse>;
   becomeUser(id: string): Promise<BecomeUserResponse>;
   setRandomPassword(id: string): Promise<SetRandomPasswordResponse>;
+  listUserRoleGrants(id: string): Promise<ListUserRoleGrantsResponse>;
+  grantUserRole(id: string, body: GrantUserRoleRequest): Promise<GrantUserRoleResponse>;
+  revokeUserRoleGrant(id: string, grant: string): Promise<RevokeUserRoleGrantResponse>;
+  getUserCredits(id: string): Promise<GetUserCreditsResponse>;
+  grantUserCredits(id: string, body: GrantUserCreditsRequest): Promise<GrantUserCreditsResponse>;
+  setUserCreditThreshold(id: string, body: SetUserCreditThresholdRequest): Promise<SetUserCreditThresholdResponse>;
   listApiTokens(): Promise<ListApiTokensResponse>;
   createApiToken(body: CreateApiTokenRequest): Promise<CreateApiTokenResponse>;
   revokeApiToken(id: string): Promise<RevokeApiTokenResponse>;
@@ -2038,6 +2053,57 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("setRandomPassword", res);
       return (await res.json()) as SetRandomPasswordResponse;
+    },
+    async listUserRoleGrants(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listUserRoleGrants", res);
+      return (await res.json()) as ListUserRoleGrantsResponse;
+    },
+    async grantUserRole(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("grantUserRole", res);
+      return (await res.json()) as GrantUserRoleResponse;
+    },
+    async revokeUserRoleGrant(id, grant) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants/${encodeURIComponent(grant)}/revoke`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("revokeUserRoleGrant", res);
+      return (await res.json()) as RevokeUserRoleGrantResponse;
+    },
+    async getUserCredits(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getUserCredits", res);
+      return (await res.json()) as GetUserCreditsResponse;
+    },
+    async grantUserCredits(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("grantUserCredits", res);
+      return (await res.json()) as GrantUserCreditsResponse;
+    },
+    async setUserCreditThreshold(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits/threshold`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setUserCreditThreshold", res);
+      return (await res.json()) as SetUserCreditThresholdResponse;
     },
     async listApiTokens() {
       const res = await doFetch(`${baseUrl}/api/api-tokens`, {

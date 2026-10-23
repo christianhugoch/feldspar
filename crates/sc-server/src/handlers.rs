@@ -6826,6 +6826,171 @@ pub fn admin_handlers_with(
         }
     });
 
+    // Role grants (TODO-payments P3.2). The page shows the base role beside
+    // the effective one, every grant the user has had, and lets an admin add a
+    // time-limited one by hand or revoke one — a subscription's included, which
+    // the provider's next renewal would put back.
+    reg.register("listUserRoleGrants", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let user = sc_auth::load_base_user(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no user with id {id}")))?;
+                let effective = sc_auth::effective_role(&catalog, id, user.role).await?;
+                let grants = sc_auth::list_role_grants(&catalog, id).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "base_role": i64::from(user.role),
+                    "effective_role": i64::from(effective.role),
+                    "grants": grants.iter().map(sc_api::auth::role_grant_json).collect::<Vec<_>>(),
+                })))
+            }
+        }
+    });
+
+    reg.register("grantUserRole", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                if sc_auth::load_base_user(&catalog, id).await?.is_none() {
+                    return Err(Error::not_found(format!("no user with id {id}")));
+                }
+                let role = int_field(obj, "role")?;
+                let role = u8::try_from(role)
+                    .map_err(|_| Error::invalid(format!("role {role} is not in 1..=99")))?;
+                let expires_at = match obj.get("expires_in_days") {
+                    None | Some(Json::Null) => None,
+                    Some(_) => {
+                        let days = int_field(obj, "expires_in_days")?;
+                        if days < 1 {
+                            return Err(Error::invalid(
+                                "`expires_in_days` must be a positive number of days; \
+                                 leave it out for a grant that lasts until it is revoked",
+                            ));
+                        }
+                        Some(chrono::Utc::now() + chrono::Duration::days(days))
+                    }
+                };
+                let note = optional_str(obj, "note");
+                let grant = sc_auth::grant_role(
+                    &catalog,
+                    sc_auth::NewRoleGrant {
+                        user_id: id,
+                        role,
+                        source: sc_auth::GRANT_SOURCE_ADMIN.to_owned(),
+                        source_ref: uuid::Uuid::new_v4().to_string(),
+                        starts_at: None,
+                        expires_at,
+                        note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                    },
+                )
+                .await?;
+                Ok(HandlerResponse::ok(sc_api::auth::role_grant_json(&grant)))
+            }
+        }
+    });
+
+    reg.register("revokeUserRoleGrant", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let grant_id = parse_user_id(ctx.path_param("grant")?)?;
+                let not_found = || Error::not_found(format!("user {id} has no grant {grant_id}"));
+                let grant = sc_auth::load_role_grant(&catalog, grant_id)
+                    .await?
+                    .filter(|g| g.user_id == id)
+                    .ok_or_else(not_found)?;
+                if grant.revoked_at.is_none() {
+                    sc_auth::revoke_role_grant_by_id(&catalog, grant.id).await?;
+                }
+                let grant = sc_auth::load_role_grant(&catalog, grant_id)
+                    .await?
+                    .ok_or_else(not_found)?;
+                Ok(HandlerResponse::ok(sc_api::auth::role_grant_json(&grant)))
+            }
+        }
+    });
+
+    // LLM credits (TODO-payments P6.2). Every answer is the whole view — the
+    // balance, the buckets and the latest entries — so the page redraws from
+    // what the server now holds rather than guessing at what changed.
+    reg.register("getUserCredits", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
+    reg.register("grantUserCredits", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let amount = credit_amount(obj.get("amount"), "amount")?
+                    .ok_or_else(|| Error::invalid("`amount` is required: the credits to grant"))?;
+                let expires_at = match obj.get("expires_in_days") {
+                    None | Some(Json::Null) => None,
+                    Some(_) => {
+                        let days = int_field(obj, "expires_in_days")?;
+                        if days < 1 {
+                            return Err(Error::invalid(
+                                "`expires_in_days` must be a positive number of days; \
+                                 leave it out for credits that never expire",
+                            ));
+                        }
+                        Some(chrono::Utc::now() + chrono::Duration::days(days))
+                    }
+                };
+                let note = optional_str(obj, "note");
+                let caller = admin_caller(ctx.user.as_ref());
+                sc_auth::grant_credits(
+                    &catalog,
+                    sc_auth::NewCreditGrant {
+                        user_id: id,
+                        amount,
+                        source: sc_auth::CREDIT_SOURCE_ADMIN.to_owned(),
+                        key: uuid::Uuid::new_v4().to_string(),
+                        kind: sc_auth::CREDIT_SOURCE_ADMIN.to_owned(),
+                        expires_at,
+                        note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                        rollover: None,
+                    },
+                    Some(&caller),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
+    reg.register("setUserCreditThreshold", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let threshold = credit_amount(obj.get("threshold"), "threshold")?;
+                let caller = admin_caller(ctx.user.as_ref());
+                sc_auth::set_low_balance_threshold(&catalog, id, threshold, Some(&caller)).await?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
     reg.register("deleteUser", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -9328,6 +9493,9 @@ fn module_json(
         // The tables it declares (TODO-imap M4): created when it loaded, and
         // kept when it is uninstalled.
         "tables": loaded.table_names(),
+        // The application tables it reads because its settings name them
+        // (TODO-payments P4.1): a plans table, say. Read only.
+        "reads": loaded.read_names(),
         // The services it runs in the background (TODO-imap M5), each with
         // where it is: running, restarting after a failure (and why), or
         // stopped. A module that declares one whose task has not been started
@@ -9352,6 +9520,27 @@ fn module_json(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
+        // The webhooks it receives (TODO-payments P1.2), each with the path it
+        // is served at on this host — what the admin registers with the
+        // provider. The tab puts its own origin in front: it is served on the
+        // admin host, which is where webhooks are.
+        "webhooks": loaded
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .webhooks
+                    .iter()
+                    .map(|webhook| {
+                        json!({
+                            "name": webhook.name,
+                            "description": webhook.description,
+                            "path": sc_module::hook_path(&module.name, &webhook.name),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         // And the model providers, for the same reason: installing
         // `feldspar-sklearn` gets an admin five estimators on the model form,
         // and the tab is where they find that out.
@@ -9363,6 +9552,13 @@ fn module_json(
         // application's New view offers beside v1's six. One whose name was
         // taken is not here; its issue says so.
         "view_patterns": loaded.view_pattern_names(),
+        // The content-security sources it suggests an application allow
+        // (TODO-payments P1.4), each switched on per application by its `key`.
+        "csp_sources": loaded
+            .csp_suggestions()
+            .iter()
+            .map(sc_module::CspSuggestion::to_json)
+            .collect::<Vec<_>>(),
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),
@@ -9388,6 +9584,13 @@ fn bundled_json(entry: &sc_module::BundledModule, installed: bool) -> Json {
         // And the services it runs (TODO-imap M5): the card says it runs in
         // the background and writes to its own tables.
         "services": entry.services,
+        // And the webhooks it receives (TODO-payments P1.2), with the path each
+        // will be served at once it is installed.
+        "webhooks": entry
+            .webhooks
+            .iter()
+            .map(|name| json!({ "name": name, "path": sc_module::hook_path(&entry.name, name) }))
+            .collect::<Vec<_>>(),
         "supplies": entry.supplies,
         "installs": entry.installs,
         // What installing it grants, in the same shape a module's own
@@ -11754,6 +11957,37 @@ fn provided_configuration(table: &Table) -> sc_types::Attrs {
 /// the row editor must work on a FORCE'd table.
 fn admin_caller(user: Option<&sc_auth::User>) -> sc_catalog::CallerContext {
     sc_api::caller_context_at(ROLE_ADMIN, user)
+}
+
+/// A user's LLM credits as the admin user page shows them: the balance, every
+/// bucket, and the latest entries.
+async fn user_credits(catalog: &Catalog, id: uuid::Uuid) -> Result<Json> {
+    /// The entries the page lists; older ones are a REST read of the table.
+    const RECENT_ENTRIES: u64 = 50;
+    if sc_auth::load_base_user(catalog, id).await?.is_none() {
+        return Err(Error::not_found(format!("no user with id {id}")));
+    }
+    let balance = sc_auth::credit_balance(catalog, id).await?;
+    let buckets = sc_auth::list_credit_buckets(catalog, id).await?;
+    let entries = sc_auth::list_credit_entries(catalog, id, RECENT_ENTRIES).await?;
+    Ok(sc_api::auth::user_credits_json(
+        &balance, &buckets, &entries,
+    ))
+}
+
+/// An amount of credits from a body: a decimal string (what the admin client
+/// sends, exactly) or a number. Absent or null is `None`.
+fn credit_amount(value: Option<&Json>, key: &str) -> Result<Option<rust_decimal::Decimal>> {
+    let parsed = match value {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::String(text)) if text.trim().is_empty() => return Ok(None),
+        Some(Json::String(text)) => text.trim().parse::<rust_decimal::Decimal>().ok(),
+        Some(Json::Number(n)) => n.to_string().parse::<rust_decimal::Decimal>().ok(),
+        Some(_) => None,
+    };
+    parsed
+        .map(Some)
+        .ok_or_else(|| Error::invalid(format!("`{key}` must be an amount of credits, like 12.5")))
 }
 
 /// A required role field of an object body: an integer on the `1..=100` scale.

@@ -61,6 +61,8 @@ pub mod action;
 pub mod bounds;
 pub mod bundled;
 pub mod consent;
+pub mod credits;
+pub mod csp;
 #[cfg(feature = "deno-host")]
 pub mod deno;
 pub mod files;
@@ -73,6 +75,8 @@ pub mod module;
 pub mod modules;
 pub mod paths;
 pub mod permissions;
+pub mod reads;
+pub mod roles;
 pub mod services;
 pub mod spec;
 pub mod store;
@@ -80,12 +84,15 @@ pub mod stream_providers;
 pub mod table_providers;
 pub mod tables;
 pub mod view_runtime;
+pub mod webhooks;
 
 pub use action::ModuleAction;
 pub use bounds::{
     DEFAULT_CALL_TIMEOUT, DEFAULT_MODULE_JS_SLICE, DEFAULT_MODULE_MAX_HEAP, DEFAULT_MODULE_WORKERS,
 };
 pub use bundled::{BUNDLED_IN_CHECKOUT, BundledModule, BundledModules};
+pub use credits::ModuleCredits;
+pub use csp::{CspSuggestion, SUGGESTIBLE_DIRECTIVES};
 #[cfg(feature = "deno-host")]
 pub use deno::{DenoModuleHost, PoolBounds};
 pub use frameworks::ModuleFrameworks;
@@ -93,7 +100,7 @@ pub use functions::ModuleFunctions;
 pub use host::{
     ActionManifest, CallHosts, FrameworkManifest, FunctionArg, FunctionManifest,
     ModelProviderManifest, ModuleHost, ModuleManifest, OAuthAsks, ServiceAsks, ServiceManifest,
-    TableProviderManifest, UnsupportedEntity, prime_v8,
+    TableProviderManifest, UnsupportedEntity, WebhookManifest, prime_v8,
 };
 pub use install::{
     InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,
@@ -104,7 +111,10 @@ pub use module::{
 };
 pub use modules::{LoadedModule, ModuleIssue, ModuleSet, redacted_configuration, unsupported_json};
 pub use paths::default_modules_root;
-pub use permissions::{ANY_HOST, ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_WRITE};
+pub use permissions::{
+    ANY_HOST, ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_ROLES, PERM_WRITE,
+};
+pub use roles::ModuleRoles;
 pub use services::{Backoff, SERVICE_EVENTS, ServiceState, ServiceStatus, ServiceSupervisor};
 pub use spec::config_fields_to_form_fields;
 pub use store::{
@@ -115,3 +125,7 @@ pub use stream_providers::ModuleStreamProviders;
 pub use table_providers::ModuleTableProviders;
 pub use tables::{FieldDecl, MODULE_TABLE_KEY, SyncReport, TableDecl};
 pub use view_runtime::{BUILTIN_VIEW_RUNTIME, ModuleViewRuntime};
+pub use webhooks::{
+    HOOKS_PREFIX, WEBHOOK_MAX_BODY, WebhookRequest, WebhookResponse, hook_path, hook_segment,
+    run_webhook, webhook_module,
+};

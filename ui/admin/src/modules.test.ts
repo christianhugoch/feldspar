@@ -89,7 +89,10 @@ function module_(overrides: Partial<Module> = {}): Module {
     functions: [],
     table_providers: [],
     tables: [],
+    reads: [],
     services: [],
+    webhooks: [],
+    csp_sources: [],
     model_providers: [],
     stream_providers: [],
     view_patterns: [],
@@ -125,7 +128,8 @@ function bundled(overrides: Partial<BundledModule> = {}): BundledModule {
     installs: ["rss-parser"],
     tables: [],
     services: [],
-    permissions: { net: ["*"], read: [], write: [], env: [] },
+    webhooks: [],
+    permissions: { net: ["*"], read: [], write: [], env: [], roles: [] },
     installed: false,
     ...overrides,
   };
@@ -460,7 +464,11 @@ describe("a module's permissions", () => {
       read: [],
       write: [],
       env: [],
+      roles: [],
     });
+    // A role ceiling, as the server stores it and as a manifest requests it.
+    expect(modulePermissions(module_({ permissions: { roles: ["70"] } })).roles).toEqual(["70"]);
+    expect(modulePermissions(module_({ permissions: { roles: [70] } })).roles).toEqual(["70"]);
     // The direction that cannot mislead: a screen that could not parse what it
     // was sent must not draw a module as *less* able to reach things than a
     // reader would then assume. Closed is what it shows, and closed is what the
@@ -474,8 +482,11 @@ describe("a module's permissions", () => {
     expect(isClosed(CLOSED_PERMISSIONS)).toBe(true);
     expect(permissionSummary(CLOSED_PERMISSIONS)).toMatch(/reaches nothing/i);
     expect(
-      permissionSummary({ net: ["broker:1883"], read: ["/srv/data"], write: [], env: [] }),
+      permissionSummary({ net: ["broker:1883"], read: ["/srv/data"], write: [], env: [], roles: [] }),
     ).toBe("Reaches only these: connects to broker:1883; reads /srv/data.");
+    expect(permissionSummary({ ...CLOSED_PERMISSIONS, roles: ["70"] })).toBe(
+      "Reaches only these: grants users roles 70 to 99.",
+    );
   });
 
   it("round-trips a list through the textarea an admin types it in", () => {
@@ -513,8 +524,14 @@ describe("a module's permissions", () => {
     expect(permissionProblem("env", "MQTT_PASSWORD")).toBeNull();
     expect(permissionProblem("env", "A=B")).toMatch(/variable name/);
     expect(
-      permissionProblems({ net: ["https://x"], read: ["rel"], write: [], env: [] }),
+      permissionProblems({ net: ["https://x"], read: ["rel"], write: [], env: [], roles: [] }),
     ).toHaveLength(2);
+    // A role ceiling: one number, never the admin's or the public's.
+    expect(permissionProblem("roles", "70")).toBeNull();
+    expect(permissionProblem("roles", "1")).toMatch(/admin/);
+    expect(permissionProblem("roles", "100")).toMatch(/public/);
+    expect(permissionProblem("roles", "pro")).toMatch(/role number/);
+    expect(permissionProblems({ ...CLOSED_PERMISSIONS, roles: ["70", "80"] })).toHaveLength(1);
     expect(permissionProblems(CLOSED_PERMISSIONS)).toEqual([]);
   });
 });
@@ -542,7 +559,7 @@ describe("the bundled catalog", () => {
     expect(sentence).toMatch(/any host/);
     expect(sentence).toMatch(/change that afterwards/);
     // A named host reads as itself rather than as a wildcard.
-    expect(grantSentence(bundled({ permissions: { net: ["a.example"], read: [], write: [], env: [] } }))).toMatch(
+    expect(grantSentence(bundled({ permissions: { net: ["a.example"], read: [], write: [], env: [], roles: [] } }))).toMatch(
       /connect to a.example/,
     );
     // And an entry that asks for nothing says nothing — which is every Python
@@ -594,14 +611,14 @@ describe("any host", () => {
     // The wildcard exists for a module whose addresses are configured per table
     // — an RSS feed's host is on the table, not the module — and "connects to *"
     // would be the one rendering that reads as *less* than it is.
-    expect(permissionSummary({ net: ["*"], read: [], write: [], env: [] })).toMatch(
+    expect(permissionSummary({ net: ["*"], read: [], write: [], env: [], roles: [] })).toMatch(
       /connects to any host/,
     );
-    expect(permissionSummary({ net: ["a.example"], read: [], write: [], env: [] })).toMatch(
+    expect(permissionSummary({ net: ["a.example"], read: [], write: [], env: [], roles: [] })).toMatch(
       /connects to a.example/,
     );
     // It is a grant, so it is not the closed set.
-    expect(isClosed({ net: ["*"], read: [], write: [], env: [] })).toBe(false);
+    expect(isClosed({ net: ["*"], read: [], write: [], env: [], roles: [] })).toBe(false);
     // And the form does not refuse it on the way in.
     expect(permissionProblem("net", "*")).toBeNull();
   });

@@ -684,6 +684,33 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// Run one webhook of one module (TODO-payments P1.1).
+    ///
+    /// Routed like [`run`](DenoModuleHost::run), and bounded like it: a
+    /// provider waiting on a webhook is a caller like any other.
+    pub async fn run_webhook(
+        &self,
+        module: &str,
+        webhook: &str,
+        request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send_with(
+            index,
+            json!({
+                "op": "webhook_call",
+                "module": module,
+                "webhook": webhook,
+                "request": request,
+            }),
+            None,
+            call,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// Stop one running service, and answer once its `stop` has finished.
     pub async fn stop_service(&self, module: &str, service: &str) -> Result<Json> {
         let index = self.worker_for(module).await;
@@ -1149,6 +1176,9 @@ impl DenoModuleHost {
     /// the worker that has whatever half-loaded state the failure left, rather
     /// than spreading one broken module's wreckage over the pool.
     async fn pin(&self, name: &str, permissions: &ModulePermissions) -> (usize, Option<usize>) {
+        // Pinned by what the worker is built with: a module's role ceiling is
+        // the server's to check, and must not split the pool.
+        let permissions = &permissions.sandbox();
         let mut pool = self.pool.lock().await;
         let mut moved_from = None;
         if let Some(index) = pool.pinned.get(name).copied() {
@@ -1382,6 +1412,8 @@ impl DenoModuleHost {
             || call.hosts.files.is_some()
             || call.service.is_some()
             || call.module_files.is_some()
+            || call.roles.is_some()
+            || call.credits.is_some()
             || call.oauth.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
@@ -1423,6 +1455,8 @@ impl DenoModuleHost {
         let files = call.hosts.files;
         let service = call.service;
         let module_files = call.module_files;
+        let roles = call.roles;
+        let credits = call.credits;
         let oauth = call.oauth;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
@@ -1491,6 +1525,8 @@ impl DenoModuleHost {
                             files,
                             service,
                             module_files,
+                            roles,
+                            credits,
                             oauth,
                         };
                         let (ok, text) = match serve(surfaces, ask.request).await {
@@ -1594,6 +1630,8 @@ struct Surfaces<'a> {
     files: Option<&'a dyn sc_expr::FileHost>,
     service: Option<&'a dyn crate::host::ServiceAsks>,
     module_files: Option<&'a dyn sc_expr::FileHost>,
+    roles: Option<&'a dyn crate::host::RoleAsks>,
+    credits: Option<&'a dyn crate::host::CreditAsks>,
     oauth: Option<&'a dyn crate::host::OAuthAsks>,
 }
 
@@ -1646,6 +1684,20 @@ async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
                 "only a module's running service can ask for this (`ctx.onTableChange`)",
             )),
         },
+        "roles" => match surfaces.roles {
+            Some(roles) => roles.ask(plan).await,
+            None => Err(Error::config(
+                "this module call cannot grant roles: `roles` is there in an action, a \
+                 service and a webhook (TODO-payments P3.3)",
+            )),
+        },
+        "credits" => match surfaces.credits {
+            Some(credits) => credits.ask(plan).await,
+            None => Err(Error::config(
+                "this module call cannot grant credits: `credits` is there in an action, a \
+                 service and a webhook (TODO-payments P6.4)",
+            )),
+        },
         "oauth" => match surfaces.oauth {
             Some(oauth) => oauth.ask(plan).await,
             None => Err(Error::config(
@@ -1656,8 +1708,9 @@ async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
             "`{other}` is not something a module can ask this server for; what a module may \
              reach is the database (`db`), this server's triggers (`trigger`), its modules' \
              functions (`function`), the file stores it was given (`files`), its own \
-             file areas (`module_files`), from a service its supervisor (`service`) and, \
-             from an action, a consent flow (`oauth`)"
+             file areas (`module_files`), role grants (`roles`), LLM credits \
+             (`credits`), from a service its \
+             supervisor (`service`) and, from an action, a consent flow (`oauth`)"
         ))),
     }
 }

@@ -52,6 +52,8 @@ pub struct ModuleAction {
     /// Where the module may keep files (TODO-imap M6): what its declared file
     /// fields name, and what `files` in the argument object reaches.
     areas: Arc<Vec<FileArea>>,
+    /// The most privileged role it may grant users (TODO-payments P3.3).
+    roles: Option<u8>,
     /// What a direct run takes and answers, as the module declared them
     /// ([`Action::payload_type`], [`Action::returns_type`]).
     payload: Option<Json>,
@@ -84,6 +86,7 @@ impl ModuleAction {
             host,
             surfaces,
             areas: Arc::new(Vec::new()),
+            roles: None,
             payload: None,
             returns: None,
         }
@@ -96,6 +99,14 @@ impl ModuleAction {
     pub fn with_types(mut self, payload: Option<Json>, returns: Option<Json>) -> ModuleAction {
         self.payload = payload;
         self.returns = returns;
+        self
+    }
+
+    /// The same action, able to grant roles up to `ceiling` (TODO-payments
+    /// P3.3) — the module's [`ModulePermissions::roles`](crate::ModulePermissions::roles).
+    #[must_use]
+    pub fn with_role_ceiling(mut self, ceiling: Option<u8>) -> ModuleAction {
+        self.roles = ceiling;
         self
     }
 
@@ -141,6 +152,8 @@ impl Action for ModuleAction {
         // host serve the module's asks while it waits for the answer.
         let hosts = self.surfaces.build(ctx);
         let files = ModuleFiles::new(ctx.catalog, &self.module, &self.areas);
+        let roles = crate::roles::ModuleRoles::new(ctx.catalog, &self.module, self.roles);
+        let credits = crate::credits::ModuleCredits::new(ctx.catalog, &self.module);
         let oauth = ConsentAsks {
             catalog: ctx.catalog,
             module: &self.module,
@@ -153,6 +166,8 @@ impl Action for ModuleAction {
                 args,
                 CallHosts::new(hosts.surfaces(), hosts.schema())
                     .with_module_files(&files)
+                    .with_roles(&roles)
+                    .with_credits(&credits)
                     .with_oauth(&oauth),
             )
             .await
@@ -192,6 +207,20 @@ fn v1_arguments(event: &Event, config: &Attrs, trigger: &str) -> Json {
     args.insert("payload".into(), event.payload.clone());
     args.insert("mode".into(), Json::String(event.kind.as_str().to_owned()));
     args.insert("trigger".into(), Json::String(trigger.to_owned()));
+    // Where the event came from (TODO-payments P1.3, P1.5), as a code body
+    // sees it: the application whose request raised it — what a checkout's
+    // return URLs are built on — and the caller's guest session.
+    args.insert(
+        "app".into(),
+        event.app.as_ref().map_or(Json::Null, |a| a.to_json()),
+    );
+    args.insert(
+        "session".into(),
+        event
+            .session
+            .as_ref()
+            .map_or(Json::Null, |id| json!({ "id": id })),
+    );
     // v1 code reads two things off `req`: who is asking, and what they posted.
     // Anything else it reaches for is an Express request, which does not exist
     // here — and an object that answered those too would be pretending.
@@ -228,6 +257,9 @@ mod tests {
         assert_eq!(args["mode"], json!("insert"));
         assert_eq!(args["trigger"], json!("publish a reading"));
         assert_eq!(args["req"]["user"]["id"], json!(7));
+        // No application's request raised it, and nobody is a guest.
+        assert_eq!(args["app"], Json::Null);
+        assert_eq!(args["session"], Json::Null);
     }
 
     #[test]

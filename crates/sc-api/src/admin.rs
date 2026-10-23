@@ -3093,6 +3093,110 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Role grants (TODO-payments P3.2): roles a user holds for a while beside
+    // the base role `updateUser` sets — a subscription's, a trial's, or one an
+    // admin gives by hand. The effective role is the most privileged of the two.
+    set.register(
+        Endpoint::new(
+            "listUserRoleGrants",
+            Method::Get,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants"),
+        )
+        .output(crate::auth::user_role_grants_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "grantUserRole",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("role", TypeSchema::int()),
+            // Days from now; left out, the grant lasts until it is revoked.
+            StructField::new("expires_in_days", TypeSchema::optional(TypeSchema::int())),
+            StructField::new("note", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::role_grant_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "revokeUserRoleGrant",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants")
+                .param("grant", ValueType::Uuid)
+                .lit("revoke"),
+        )
+        .output(crate::auth::role_grant_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // LLM credits (TODO-payments P6.2): the balance an agent run's model calls
+    // are charged to. The page shows the balance, the buckets and the latest
+    // entries, grants credits by hand, and sets the low-balance threshold.
+    // Amounts are exact decimal strings.
+    set.register(
+        Endpoint::new(
+            "getUserCredits",
+            Method::Get,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits"),
+        )
+        .output(crate::auth::user_credits_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "grantUserCredits",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("amount", TypeSchema::text()),
+            // Days from now; left out, the credits never expire.
+            StructField::new("expires_in_days", TypeSchema::optional(TypeSchema::int())),
+            StructField::new("note", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::user_credits_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "setUserCreditThreshold",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits")
+                .lit("threshold"),
+        )
+        .input(TypeSchema::struct_of([
+            // Left out or null: no low-balance notices.
+            StructField::new("threshold", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::user_credits_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- API tokens (§13.6) --------------------------------------------------
     //
     // The credential the administration MCP server authenticates with: a bearer
@@ -5501,6 +5605,9 @@ fn module_schema() -> TypeSchema {
         StructField::new("table_providers", TypeSchema::array(TypeSchema::text())),
         // The tables it declares (TODO-imap M4), created when it loaded.
         StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+        // The application tables it reads because its settings name them
+        // (TODO-payments P4.1): read only, by its services and webhooks.
+        StructField::new("reads", TypeSchema::array(TypeSchema::text())),
         // The services it runs in the background (TODO-imap M5), each with its
         // state: `running`, `restarting` (after a failure, with `last_error`)
         // or `stopped`.
@@ -5512,6 +5619,17 @@ fn module_schema() -> TypeSchema {
                 StructField::new("state", TypeSchema::text()),
                 StructField::new("restarts", TypeSchema::int()),
                 StructField::new("last_error", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
+        // The webhooks it receives (TODO-payments P1.2): `path` is where each
+        // is served on the admin host, which the admin registers with the
+        // service that calls it.
+        StructField::new(
+            "webhooks",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
             ])),
         ),
         // The model providers it supplies — names only, for the same reason:
@@ -5526,6 +5644,18 @@ fn module_schema() -> TypeSchema {
         // what one *asks for* is its configuration wizard, a call per step on
         // `viewConfigStep`.
         StructField::new("view_patterns", TypeSchema::array(TypeSchema::text())),
+        // The content-security sources it suggests (TODO-payments P1.4): an
+        // application allows one when its admin puts the `key` in the
+        // application's `csp_sources` attribute. `sources` is directive → hosts.
+        StructField::new(
+            "csp_sources",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("key", TypeSchema::text()),
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+                StructField::new("sources", TypeSchema::json()),
+            ])),
+        ),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".
@@ -5575,6 +5705,15 @@ fn bundled_module_schema() -> TypeSchema {
         // The services it runs in the background (TODO-imap M5): the card says
         // so before the click.
         StructField::new("services", TypeSchema::array(TypeSchema::text())),
+        // The webhooks it receives (TODO-payments P1.2), with the path each will
+        // be served at once installed.
+        StructField::new(
+            "webhooks",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
+            ])),
+        ),
         // What it will be granted: the same `{ net, read, write, env }` shape a
         // module's own permissions have, so one renderer draws both. Always
         // closed for a Python module — there is nothing to enforce it (§10).

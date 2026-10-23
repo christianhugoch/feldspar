@@ -474,10 +474,7 @@ impl TriggerDispatcher {
             event = event.on(channel.clone());
         }
         if let Some(caller) = caller {
-            event = event
-                .caller(caller.role, caller.user.clone())
-                .chained(caller.chain.clone())
-                .in_changeset(caller.changeset.clone());
+            event = event.caused_by(caller);
         }
         let result = fire_trigger_in(self, catalog, trigger, &event, tx).await?;
         Ok(result.unwrap_or(Json::Null))
@@ -508,10 +505,7 @@ impl TriggerDispatcher {
     ) -> Result<Json> {
         let mut event = Event::new(EventKind::None);
         if let Some(caller) = caller {
-            event = event
-                .caller(caller.role, caller.user.clone())
-                .chained(caller.chain.clone())
-                .in_changeset(caller.changeset.clone());
+            event = event.caused_by(caller);
         }
         let chain = event.firing(name)?;
         let config: Attrs = [("code".to_owned(), Json::String(code.to_owned()))]
@@ -524,7 +518,7 @@ impl TriggerDispatcher {
             .with_request(request)
             .with_application(application)
             .with_file_urls(file_urls);
-        action.run(&mut ctx).await
+        sc_catalog::with_origin(event.origin(), action.run(&mut ctx)).await
     }
 
     /// Run one trigger **as a test**: the admin pressed Test run, and what comes
@@ -604,10 +598,7 @@ impl TriggerDispatcher {
             event = event.row(row);
         }
         if let Some(caller) = caller {
-            event = event
-                .caller(caller.role, caller.user.clone())
-                .chained(caller.chain.clone())
-                .in_changeset(caller.changeset.clone());
+            event = event.caused_by(caller);
         }
         let result = fire_trigger_with(self, catalog, trigger, &event, None, Some(console)).await?;
         Ok(result.unwrap_or(Json::Null))
@@ -682,10 +673,7 @@ fn table_event(write: &TableWrite<'_>) -> Event {
         event = event.old_row(old.clone());
     }
     match write.caller {
-        Some(caller) => event
-            .caller(caller.role, caller.user.clone())
-            .chained(caller.chain.clone())
-            .in_changeset(caller.changeset.clone()),
+        Some(caller) => event.caused_by(caller),
         None => event
             .caller(ROLE_PUBLIC, None)
             .in_changeset(sc_catalog::changeset::current()),
@@ -817,9 +805,16 @@ pub async fn fire_trigger_with(
     if let Some(console) = console {
         ctx = ctx.with_console(Arc::clone(console));
     }
-    // In the event's changeset, so whatever the action writes joins the
+    // The action runs inside the event's origin (TODO-payments P1.3, P1.5), so
+    // a caller context it builds — a code body's `asUser()` write, a row it
+    // inserts — carries the application and the guest session of the request
+    // that raised the event, whichever task the event is being handled on.
+    // And in the event's changeset, so whatever the action writes joins the
     // action that raised the event (§14.12), however it builds its caller.
-    sc_catalog::changeset::scope_if(event.changeset.clone(), action.run(&mut ctx))
+    sc_catalog::with_origin(
+        event.origin(),
+        sc_catalog::changeset::scope_if(event.changeset.clone(), action.run(&mut ctx)),
+    )
         .await
         .map(Some)
 }
@@ -898,7 +893,9 @@ async fn only_if_selects(
             // Neither the caller nor the payload is typed here: neither ever
             // correlates a prefetch (and the payload has no columns to be typed
             // against at all).
-            Ambient::User | Ambient::Payload | Ambient::Context => value_from_json(json),
+            Ambient::User | Ambient::Payload | Ambient::Context | Ambient::Session => {
+                value_from_json(json)
+            }
             Ambient::Row | Ambient::Old => typed_value(table.as_ref(), field, json),
         }
     });

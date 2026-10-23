@@ -45,12 +45,16 @@ mod install;
 mod map_tools;
 #[path = "model_providers.rs"]
 mod model_providers;
-#[path = "module_consent.rs"]
-mod module_consent;
 #[path = "module_actions.rs"]
 mod module_actions;
+#[path = "module_consent.rs"]
+mod module_consent;
+#[path = "module_credits.rs"]
+mod module_credits;
 #[path = "module_files.rs"]
 mod module_files;
+#[path = "module_roles.rs"]
+mod module_roles;
 #[path = "module_services.rs"]
 mod module_services;
 #[path = "module_store.rs"]
