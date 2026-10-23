@@ -2,6 +2,49 @@
 
 Changes in reverse chronological order.
 
+## Mail: self-signed certificates and SMTP hosts given as an IP address
+
+The test message failed with `invalid peer certificate: certificate not valid for name
+"188.65.204.58"; certificate is only valid for DnsName(…)` when the SMTP host was entered as an
+IP address (field report). That is one of two separate problems. In this one the certificate may
+be perfectly good, but it is issued for a DNS name and checked against the IP that was dialled,
+which it does not carry. In the other, a self-signed certificate fails whatever name it is checked
+against, because no trusted CA issued it. Each now has a setting.
+
+- **Settings → Email** (`sc-config`, `sc-email`):
+  - `smtp_certificate_name` checks the certificate against this name instead of the host. The
+    connection still goes to the host, and the check is still complete.
+  - `smtp_certificate_check` is `verify` (the default) or `accept_any`. `accept_any` accepts
+    any certificate: self-signed, expired, or for another name.
+  - `EmailSettings` carries both, and `SmtpMailer` builds its TLS from them in one place
+    (`tls_for`), for the installation's server and a pinned override alike.
+  - lettre's `dangerous_accept_invalid_certs` alone still checks the name, despite its
+    documentation, so `accept_any` also sets `dangerous_accept_invalid_hostnames`.
+  - A certificate error now ends with which setting fixes it.
+  - A certificate name that is an IP, or not a host name, is refused when the settings are saved.
+- **`send_email` overrides always verify.** `check_relay` refuses `accept_any`, because an
+  override's host can come from a row a user wrote.
+- **The mail module** (`connect.js`) has two new admin settings:
+  - `certificate_names`, one `host name` (or `host:port name`) per line, sets the name used for
+    the certificate check and SNI.
+  - `unverified_servers`, one `host` or `host:port` per line, turns `rejectUnauthorized` off for
+    those servers only.
+  - As with trusted servers, an account cannot set either.
+  - A certificate error in `last_error` or from `mail_test_account` names the setting that
+    fixes it. Because nodemailer replaces Node's error code with `ESOCKET`, the hint is chosen
+    by code or by message.
+- **Tests:**
+  - `crates/sc-email/tests/smtp_certificates.rs` runs real TLS handshakes against a TLS listener
+    in front of `TestSmtp`, using a generated CA installed as `SSL_CERT_FILE`. It covers four
+    cases: an IP host refused a CA-issued certificate for `mail.test`; accepted with the
+    certificate name; still refused with a wrong name; and a self-signed certificate refused,
+    then accepted with `accept_any`.
+  - Unit tests cover reading and checking the settings and refusing them in a relay. The
+    settings API test lists the two new fields.
+  - `plugins/imap/test/connect.test.mjs` parses the settings and runs nodemailer against
+    `smtp-server` with two new test certificates from `certs.sh` (`name.crt` for `mail.test`
+    only, and a self-signed `self.crt`): refused, then accepted through each setting.
+
 ## Mail: Outlook.com, Microsoft 365 and Gmail with OAuth2 (TODO-imap M10.3)
 
 `outlook.office365.com` answers `LOGINDISABLED` and offers only `AUTH=XOAUTH2`, so personal

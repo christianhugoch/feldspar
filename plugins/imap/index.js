@@ -302,7 +302,27 @@ const configuration_workflow = () => ({
             label: "Extra CA certificates",
             type: "String",
             fieldview: "textarea",
-            sublabel: "PEM certificates of your internal CA, used to check the trusted servers above instead of the public ones. Certificates are always checked.",
+            sublabel: "PEM certificates of your internal CA, used to check the trusted servers above instead of the public ones.",
+          },
+          {
+            name: "certificate_names",
+            label: "Certificate names",
+            type: "String",
+            fieldview: "textarea",
+            sublabel:
+              "For a server given by IP address, whose certificate is issued for a name: host name, one per line, " +
+              "e.g. 188.65.204.58 mail.example.com (or 188.65.204.58:465 mail.example.com). The certificate is checked " +
+              "against that name instead of the IP — still a full check.",
+          },
+          {
+            name: "unverified_servers",
+            label: "Servers whose certificate is not checked",
+            type: "String",
+            fieldview: "textarea",
+            sublabel:
+              "host or host:port, one per line: any certificate is accepted from these, self-signed, expired or for " +
+              "another name. The connection is still encrypted, but anyone who can intercept it can pose as the server " +
+              "and read the password. Only for servers on a network you trust.",
           },
           {
             name: "extra_headers",

@@ -100,6 +100,9 @@ left out. Tutorial Step 11 has the admin's half.
 reloads the module and restarts its service. Writing `_fd_modules` directly does neither.
 
 - **Trusted servers** and **Extra CA certificates**: mail servers on a private network.
+- **Certificate names** (`host name` per line): check the certificate of a server dialled by IP
+  against the name it is issued for. **Servers whose certificate is not checked** (`host` or
+  `host:port` per line): accept any certificate from them, e.g. a self-signed one.
 - **Sign-in providers**: the Microsoft and Google apps OAuth2 accounts use (client id and secret,
   and Microsoft's tenant), each with the redirect address
   `https://<admin host>/_feldspar/oauth/callback`. Tutorial Step 11 says how to register them.

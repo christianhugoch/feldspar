@@ -28,13 +28,27 @@ What may actually be reached is narrower than "any host", and is the module's ow
   without TLS.
 - **Public addresses only.** A server name that resolves to a private, loopback or link-local
   address is refused, so a user cannot point an account at your intranet. The connection goes to
-  the address that was checked, and the certificate is always verified against the name.
+  the address that was checked, and the certificate is verified against the name.
 
 If your mail server *is* inside your network (an Exchange on the LAN), the module's **Settings**
 has two fields only an admin can fill in: **Trusted servers**, one `host` or `host:port` per
 line, which may resolve to a private address (and use that port), and **Extra CA certificates**:
 your internal CA, which the trusted servers' certificates are checked against instead of the
-public CAs. A third, **Headers to keep**, names the header fields stored with each message
+public CAs. Two more loosen the certificate check for one server, and only an admin can set
+them either:
+
+- **Certificate names**, one `host name` per line (`188.65.204.58 mail.example.com`): for a
+  server an account names by IP address. Its certificate is issued for a name, not the IP, so
+  checked against the IP it fails (`IP: 188.65.204.58 is not in the cert's list`). Listed here,
+  it is checked against the name instead, and the check is still complete.
+- **Servers whose certificate is not checked**, one `host` or `host:port` per line: for a
+  self-signed certificate that no CA issued, which the right name does not fix. Any certificate
+  is accepted from these servers. The connection is still encrypted, but anyone who can intercept
+  it can pose as the server and read the password, so use it only on a network you trust. (A
+  self-signed server inside your network can be checked properly instead: make it a trusted
+  server and put its certificate under Extra CA certificates.)
+
+A last field, **Headers to keep**, names the header fields stored with each message
 (Step 6). Saving the settings reloads the module and restarts its service, so they apply at
 once; a coding agent changes them with the MCP tool `updateModule` (modules area). Writing
 `_fd_modules.configuration` directly does not reload anything.

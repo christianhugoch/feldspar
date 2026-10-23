@@ -166,7 +166,9 @@ rows. M4 must keep fields an admin adds to a module table (e.g. a `handled` flag
   - **ports:** IMAP 993 or 143 with STARTTLS required; SMTP 465 or 587;
   - **public addresses only:** the host must resolve to globally routable addresses only, and the
     connection goes to the address that was checked (no second lookup);
-  - certificates are always verified;
+  - certificates are verified; an admin can name the certificate's host for a server given by IP
+    (`certificate_names`), or list a server whose certificate is not checked
+    (`unverified_servers`, M11.7). An account cannot;
   - imapflow's own timeouts are set, and the logger stays off unless debugging;
   - passwords never appear in a log, an error or `last_error`.
 
@@ -1050,3 +1052,11 @@ Six real accounts (IONOS, Hetzner, Gmail) moved from a Python bridge to the modu
   `text/calendar; method=…` alternative).
 - [x] **M11.6** (7) `…@localhost` addresses; indexes on `(folder, sent_at)` and
   `(folder, internal_date)`; `plugins/imap/README.md` for application authors.
+- [x] **M11.7** (2026-10-23) Self-signed certificates and SMTP hosts given as IP addresses
+  (`certificate not valid for name "188.65.204.58"`). Two problems: a certificate issued for a
+  DNS name, checked against the IP that was dialled; and a certificate no trusted CA issued.
+  Settings → Email: `smtp_certificate_name` (check against this name, still a full check) and
+  `smtp_certificate_check = accept_any`. The mail module: the admin settings
+  `certificate_names` and `unverified_servers`. A `send_email` override always verifies.
+  Not tested under feldspar's Deno worker, only under Node; Deno's `node:tls` is Node's
+  `_tls_wrap` ported, with the same `rejectUnauthorized` handling.

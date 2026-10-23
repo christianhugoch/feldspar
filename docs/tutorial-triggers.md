@@ -794,11 +794,17 @@ come from a row a user wrote:
 - **public addresses only.** A host that resolves to a loopback, private or link-local address, or
   to a mix of public and private ones, is refused. The connection goes to the address that was
   checked, so a DNS server cannot answer differently the second time. The certificate is
-  still verified against the host's name.
+  still verified against the host's name, always: Settings → Email's certificate settings do
+  not apply to an override.
 - a host, port or encryption **typed into the form** is checked when you save. A templated one is
   checked when it renders. Either way the error names the host and never the password.
 
 The server in Settings → Email is not held to these rules: your own relay can be on `localhost`.
+That server also has two certificate settings. **Certificate name** is for a host given as an IP
+address: the certificate is checked against this name instead of the IP, which a certificate
+issued for a name does not carry (`certificate not valid for name "188.65.204.58"`).
+**Certificate check** `accept_any` accepts any certificate, such as a self-signed one. The
+connection is still encrypted, but nothing proves it reaches your server.
 
 **A copy in Sent depends on the server.** `send_email` only submits the message. Gmail and
 Microsoft 365 file whatever you send through their SMTP into the account's Sent folder
