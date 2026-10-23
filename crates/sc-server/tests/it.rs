@@ -77,6 +77,8 @@ mod app_live_presence;
 mod app_live_query_streams;
 #[path = "app_live_topics.rs"]
 mod app_live_topics;
+#[path = "app_server_render.rs"]
+mod app_server_render;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_signup.rs"]

@@ -87,6 +87,7 @@ fn vue() -> FrameworkDecl {
             }),
             runtime: Some(template("{{ project }}/src/feldspar")),
             client_file: "client.ts".to_owned(),
+            server: None,
         },
         csp: Some(CspPolicy::strict().directive("img-src", ["'self'", "data:"])),
         builder_prompt: Some(template(

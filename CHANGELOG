@@ -2,6 +2,69 @@
 
 Changes in reverse chronological order.
 
+## Astro for websites: a bundled framework module that renders on the server (§13.3)
+
+A new bundled module, `plugins/astro` (`@feldspar/astro`), adds the framework **Astro
+(website)**. It is for sites rather than apps: landing pages, blogs, news pages and contact
+forms. Pages are written in Astro's `.astro` syntax. The server sends finished HTML, and a page's
+frontmatter reads the database exactly as a JavaScript code action does
+(`await db.posts.where({ published: true }).rows()`).
+
+- **How it works.** The build (`src/feldspar/astro/build.mjs`, run by `npm run build`) compiles
+  every page with `@astrojs/compiler` and bundles it with esbuild into **one code body**,
+  `dist/_server/entry.js`. Astro's own runtime is not used: `files/server.mjs` implements the
+  functions the compiler's output calls (templates, attributes, `class:list`, slots, the head,
+  scripts), plus routing, endpoints, `getStaticPaths`, `paginate` and the `Astro` global. Saltcorn
+  runs that body per request on `run_js_code`, the path a JavaScript custom query takes. So
+  `db`, `fetch`, `fs`, `trigger`, `Table`, `user` and `lib` are in scope in every frontmatter,
+  with a code action's bounds and authority.
+- **Prerendering is opt-in** (`export const prerender = true`). After the bundler runs,
+  `build_application` asks the body which pages to prerender (dynamic routes through
+  `getStaticPaths()`), renders each through the same body and writes it into `dist/`. A build
+  with no dispatcher, such as one from the CLI, skips this step and those pages render per
+  request.
+- **Built for websites.**
+  - Scoped styles are collected into one hashed stylesheet.
+  - Each `<script>` is bundled into a hashed file under `/_astro/`, so the CSP needs no
+    script widening. Inline styles are allowed.
+  - `/sitemap.xml` and `/robots.txt` are generated.
+  - The scaffold's layout sets canonical and Open Graph tags from the new **Public site URL**
+    setting.
+  - Forms post back with `<Csrf />` from `feldspar:components`.
+  - Islands (`client:*`), framework components, view transitions and `astro:*` imports are
+    refused by name.
+- **The scaffold.** It writes a layout, a prerendered landing page, a component, a contact form,
+  a 404 page, global CSS, a favicon, `AGENTS.md`, and one server-rendered page per table.
+- **The framework seam** (`sc-app`, `sc-module`):
+  - A declared framework's `build` may name `server: "_server/entry.js"`
+    (`BuildTemplate::server` → `BuildSpec::server_entry`, checked by `check_server_entry`).
+  - The new `sc_app::server_render` module provides `ServerRendered`, `mount_code_framework`
+    and `prerender`. Every mount path (build, boot or reload, preview) now goes through
+    `mount_code_framework`.
+  - A `GET` for a file is served from the bundle with no SPA fallback: hashed `_astro/*` files
+    as `immutable`, everything else with an ETag and a 304. `_server/` is never served.
+  - Anything else runs the body, with `request` bound (method, path, query, parsed form or JSON,
+    headers, origin, locale, CSRF token). Rendered pages default to `private, no-cache`, and
+    callers the app does not admit get a 403.
+  - Applications now see `if-none-match` and `user-agent` among the headers passed to them. New
+    content types: `xml`, `webmanifest`, `avif`, `pdf`, `mp4`, `webm`.
+- **Designed, not built:** A/B optimisation of landing pages
+  (`<Optimise><Variant>…</Variant></Optimise>` and `<Goal>`, chosen on the server and sticky per
+  visitor), and a render cache invalidated by table writes. See the design document,
+  §13.3 "Server-rendered frameworks", and `TODO-astro.md`.
+- **Docs:** `docs/tutorial-astro.md` (a landing page and a blog, step by step), the design
+  section, and the `plugins/README.md` table.
+- **Tests:**
+  - `plugins/astro/test/build-and-render.test.mjs` (Node: scaffold, install, build, then run
+    the body with a stand-in `db`): routing, escaping, `set:html`, scoped CSS order, bundled
+    scripts, forms, redirects, endpoints, the sitemap, the 404 page, prerender lists, refused
+    islands.
+  - `sc-app` `server_render` unit tests.
+  - `sc-server` `app_server_render` (the real router, dispatcher and SQLite): files and ETags,
+    a rendered page reading `db`, no source leak, a CSRF-checked form post, prerendering.
+  - `sc-module` `bundled_astro`: the declaration's server entry, and the scaffold and runtime
+    files reaching the project.
+
 ## Agents in an application's pages: chat, single prompts and history (§11.7)
 
 React applications can now use agents in two ways. A **chat** is a ChatGPT-style conversation that

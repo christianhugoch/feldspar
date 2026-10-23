@@ -380,6 +380,7 @@ async fn an_application_edited_onto_the_base_domain_is_served_there_without_a_re
         source_dir: "web".to_owned(),
         output_dir: "web/dist".to_owned(),
         install: None,
+        server_entry: None,
     }));
     apps.mount(MountedApp::new(app.clone(), framework, &catalog)?)?;
     let mut subdomain = Browser::new(router.clone(), "home.example.com");

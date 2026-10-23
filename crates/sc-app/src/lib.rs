@@ -71,6 +71,7 @@ pub mod mcp;
 mod none;
 mod react;
 mod scaffold;
+pub mod server_render;
 mod skill;
 mod store;
 mod streams;
@@ -161,6 +162,9 @@ pub use scaffold::{
     ClientUpdate, GeneratedFile, RUNTIME_DOC_FILE, ScaffoldReport, emit_app_runtime,
     has_generated_runtime, live_doc_ts, require_api_provider, require_scaffoldable,
     require_scaffoldable_in, scaffold_app, update_app_client,
+};
+pub use server_render::{
+    ServerRendered, check_server_entry, mount_code_framework, prerender as prerender_site,
 };
 pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{

@@ -241,6 +241,11 @@ pub struct BuildSpec {
     /// absent from the source directory. `None` for a framework that does not
     /// manage dependencies.
     pub install: Option<InstallSpec>,
+    /// The code body the build emits **within** the output directory, for a
+    /// server-rendered framework ([`crate::server_render`]): taken out of the
+    /// bundle when it is mounted, never served, and run per request. `None` for
+    /// a bundle that is only static files.
+    pub server_entry: Option<String>,
 }
 
 /// How to install an app's dependencies before building it (TODO §2.3).
@@ -732,6 +737,26 @@ impl AssetBundle {
     }
 
     /// Look up an asset by (normalised) path.
+    /// Every asset's key, in no particular order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.assets.keys().map(String::as_str)
+    }
+
+    /// Drop every asset under directory `dir` (and an asset named `dir`) —
+    /// what a server-rendered framework does to its server entry, which is the
+    /// site's source and never a file to serve.
+    pub fn remove_prefix(&mut self, dir: &str) {
+        let dir = normalize_key(dir);
+        let under = format!("{dir}/");
+        self.assets
+            .retain(|key, _| key != &dir && !key.starts_with(&under));
+    }
+
+    /// Serve no SPA fallback: an unknown path is a 404.
+    pub fn clear_fallback(&mut self) {
+        self.fallback = None;
+    }
+
     pub fn get(&self, path: &str) -> Option<&Asset> {
         self.assets.get(&normalize_key(path))
     }
@@ -770,6 +795,12 @@ fn load_dir(root: &Path, current: &Path, bundle: &mut AssetBundle) -> Result<()>
     Ok(())
 }
 
+/// An asset key for a request path — [`normalize_key`], for a framework in
+/// this crate that looks assets up itself.
+pub(crate) fn normalize_asset_key(path: &str) -> String {
+    normalize_key(path)
+}
+
 /// Normalise an asset key: strip leading slashes, use `/` separators.
 fn normalize_key(path: &str) -> String {
     let mut normalized = PathBuf::new();
@@ -797,12 +828,18 @@ fn content_type_for(path: &str) -> &'static str {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "webmanifest" => "application/manifest+json",
         "map" => "application/json; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
         "ico" => "image/x-icon",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
@@ -841,6 +878,12 @@ impl CodeFramework {
     pub fn with_build(mut self, build: BuildSpec) -> CodeFramework {
         self.build = Some(build);
         self
+    }
+
+    /// The asset stored under exactly `key`, with no `index.html` rule and no
+    /// fallback.
+    pub fn asset(&self, key: &str) -> Option<&Asset> {
+        self.bundle.get(key)
     }
 
     /// The asset the framework would serve for `path`, applying the `/` →
@@ -1228,6 +1271,7 @@ mod tests {
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
             install: None,
+            server_entry: None,
         };
         let fw = CodeFramework::new("code", sample_bundle()).with_build(spec.clone());
         assert_eq!(fw.name(), "code");

@@ -977,6 +977,7 @@ async fn mount_shop(
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
             install: None,
+            server_entry: None,
         },
     ));
     apps.remount(MountedApp::new(app.clone(), framework, catalog)?);

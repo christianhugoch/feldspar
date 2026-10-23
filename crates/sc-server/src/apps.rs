@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use sc_agent::{AppPreviewer, PreviewInfo, RunId};
 use sc_api::ApiProvider;
 use sc_app::{
-    Application, CodeFramework, Framework, app_source_from_config, build_application,
-    list_applications, load_app_bundle,
+    Application, Framework, app_source_from_config, build_application, list_applications,
+    load_app_bundle,
 };
 use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Repr, Result};
@@ -1135,9 +1135,12 @@ impl AppPreviewer for AppMounts {
         let bundle = tokio::task::spawn_blocking(move || sc_app::AssetBundle::from_dir(&dir))
             .await
             .map_err(|e| Error::msg(format!("loading the preview bundle: {e}")))??;
-        let framework = Arc::new(
-            CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
-        );
+        let framework = sc_app::mount_code_framework(
+            &app,
+            bundle,
+            source.build.clone(),
+            self.triggers().cloned(),
+        )?;
         let mounted =
             MountedApp::new_with(app, framework, catalog, self.evaluator(), self.triggers())?;
         Ok(AppMounts::mount_preview(self, run, mounted))
@@ -1241,10 +1244,12 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
     // how the rest of the process asks "is this application served from a bundle
     // somebody has to rebuild?", and a mount that dropped the answer would make
     // every re-projection report say no (§13.6).
-    let framework = Arc::new(
-        CodeFramework::new(app.framework.name.clone(), report.bundle.clone())
-            .with_build(source.build.clone()),
-    );
+    let framework = sc_app::mount_code_framework(
+        &app,
+        report.bundle.clone(),
+        source.build.clone(),
+        apps.triggers().cloned(),
+    )?;
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(report)
@@ -1255,7 +1260,8 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
 /// assets were read.
 ///
 /// The mount is indistinguishable from the one [`build_and_mount`] produces —
-/// same [`CodeFramework`] with the same build step on it, same providers —
+/// same framework from [`sc_app::mount_code_framework`] with the same build step
+/// on it, same providers —
 /// because the only difference between the two paths is who ran the bundler.
 /// An application that has never been built has no output to load, and the
 /// error says to build it first.
@@ -1273,9 +1279,8 @@ pub(crate) async fn mount_from_disk(apps: &AppMounts, app: Application) -> Resul
     let source = app_source_from_config(&app.framework)?;
     let bundle = load_app_bundle(catalog, &source)?;
     let assets = bundle.len();
-    let framework = Arc::new(
-        CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
-    );
+    let framework =
+        sc_app::mount_code_framework(&app, bundle, source.build.clone(), apps.triggers().cloned())?;
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(assets)

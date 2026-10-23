@@ -183,6 +183,7 @@ fn code_source_from_config(fw: &FrameworkRef) -> Result<AppSource> {
             // A `code` app's dependencies are the admin's business; their build
             // command is where they say how to get them.
             install: None,
+            server_entry: None,
         },
     );
     Ok(match client {
@@ -436,6 +437,9 @@ pub async fn build_application(
     let (client_path, _) = emit_generated(cat, app, source, dispatcher).await?;
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;
+    // A server-rendered site's `prerender = true` pages, written as files now
+    // that the code body that renders them exists (`server_render`).
+    crate::server_render::prerender(cat, app, &source.build, &mut report, dispatcher).await?;
     Ok(report)
 }
 
@@ -495,6 +499,7 @@ pub async fn build_application_if_changed(
 
     let mut report = build_app(cat, source).await?;
     report.client_path = client_path;
+    crate::server_render::prerender(cat, app, &source.build, &mut report, dispatcher).await?;
 
     // Stamped only if the source is as it was when the build started. The first
     // install rewrites `package-lock.json`, and a file saved mid-build is not in
@@ -1497,6 +1502,7 @@ mod tests {
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
             install: None,
+            server_entry: None,
         }
     }
 

@@ -2476,8 +2476,16 @@ async fn app_live(
 }
 
 /// The headers an application framework is shown (§8): what v1's patterns read,
-/// and not the cookie, which is the router's.
-const APP_REQUEST_HEADERS: [&str; 3] = ["referer", "x-requested-with", "accept"];
+/// `if-none-match` for a framework that answers its own files with an ETag, and
+/// `user-agent` for a server-rendered page — and not the cookie, which is the
+/// router's.
+const APP_REQUEST_HEADERS: [&str; 5] = [
+    "referer",
+    "x-requested-with",
+    "accept",
+    "if-none-match",
+    "user-agent",
+];
 
 /// The [`AppRequest`] for one live request to an application's framework.
 ///

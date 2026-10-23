@@ -1,0 +1,11 @@
+{
+  "name": "@feldspar/astro",
+  "version": "0.1.0",
+  "description": "The Astro (website) application framework for Saltcorn Feldspar.",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

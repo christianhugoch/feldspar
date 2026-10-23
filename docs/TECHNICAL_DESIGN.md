@@ -6150,6 +6150,132 @@ follows.
 The registry is installed whole on every module change, beside the action registry and the
 table providers, so a framework that has just been uninstalled stops being offered.
 
+#### Server-rendered frameworks: Astro for websites
+
+Every framework above produces an SPA: a bundle that a browser runs, which then asks the API
+for data. That is the wrong shape for a **website** — a landing page for an app that lives on
+another subdomain, a blog, a news page, a page with a contact form. Such a site wants the
+content in the HTML the server sends (search engines rank what they can read; a phone on a slow
+network shows what has arrived), little or no JavaScript, and a short time to first byte.
+
+`plugins/astro` (`@feldspar/astro`, framework `astro`) supplies that, and it adds one thing to
+the framework seam: a **server entry**.
+
+**Astro's syntax, Saltcorn's server.** Pages are `.astro` files — the frontmatter fence, the
+JSX-like template, `src/pages` routing, scoped `<style>`s — compiled by `@astrojs/compiler`, the
+compiler Astro itself uses. Astro's *runtime* is not used: the build bundles every page with
+esbuild into **one JavaScript code body**, `dist/_server/entry.js`, against a small runtime of
+its own (`plugins/astro/files/server.mjs`) that implements the ~20 functions the compiler's
+output calls. Of the syntaxes Astro accepts, only `.astro` itself (and `.ts`/`.js` endpoints)
+is supported; UI-framework components and `client:*` islands, Markdown/MDX pages, content
+collections, view transitions and integrations are refused **by name** at render time, never
+silently dropped.
+
+**The frontmatter is a code action's body.** The entry runs through
+`TriggerDispatcher::run_code` on `run_js_code` — the path a JavaScript custom query takes —
+so `db`, `fetch`, `fs`, `trigger`, `Table`, `user` and `lib` are bound for every page, with the
+same bounds and the same admin authority (narrowed with `.asUser()`). This was the requirement
+that decided the design: running real Astro in Node at build time would have needed a second
+data API, and running it at request time would have needed Node. Because the whole site is the
+body of one function, every component's frontmatter and every `getStaticPaths` closes over the
+same run parameters; the body is compiled once per isolate and cached by content. The one
+binding added is `request` (method, path, query, parsed form/JSON body, a few headers, origin,
+locale, CSRF token), and the body answers `{ status, headers, body }`.
+
+**The seam.** A declared framework's `build` may name `server: "_server/entry.js"`, a path
+inside its output directory (`BuildTemplate::server` → `BuildSpec::server_entry`, checked by
+`sc_app::check_server_entry`). Every mount path — build, boot, reload, agent preview — goes
+through `sc_app::mount_code_framework`, which gives such a build a
+`server_render::ServerRendered` instead of a `CodeFramework`:
+
+1. A `GET` that names a file the build wrote (`about` → `about/index.html` too) is served from
+   the bundle: `_astro/*` (content-hashed) as `immutable`, the rest with an ETag and
+   `must-revalidate`. `_server/` is removed from the bundle and never served.
+2. Anything else runs the entry, which routes, renders, and renders `404.astro` when nothing
+   matches. There is no SPA fallback.
+3. A caller the application does not admit gets its files and a 403 for rendered pages.
+4. A rendered page with no `Cache-Control` of its own is `private, no-cache`: it may carry the
+   visitor's CSRF token.
+
+**Prerendering is opt-in, per page** (`export const prerender = true`, Astro's spelling).
+After the bundler, `build_application` asks the entry for the list (`mode: "prerender-list"`:
+static routes, and each dynamic route's `getStaticPaths()`, which may read `db`), renders each
+through the same body and writes it into `dist/` (`server_render::prerender`). So a prerendered
+page and a server-rendered one cannot disagree — they are the same code — and a build with no
+dispatcher (the CLI's) simply skips the step: those pages are then rendered per request, which
+is slower and otherwise identical. Prerendering at *build* time means a prerendered page shows
+the data as it was at the last build; a page showing live data leaves `prerender` off.
+
+Why opt-in rather than Astro's default of "everything static": the use case is mostly-static
+sites with a few live pages, and a page silently frozen at build time is a worse failure (a blog
+that never shows the new post) than a page rendered per request that could have been a file (a
+few milliseconds). The scaffold marks its static pages.
+
+**What a website needs, and gets:** one hashed stylesheet for the site (imported CSS first, then
+each component's scoped styles); each processed `<script>` bundled to a hashed file, so the CSP
+needs no `'unsafe-inline'` for scripts (styles are widened: a `style` attribute is how landing
+pages are written, and cannot run anything); a generated `/sitemap.xml` (static routes plus every
+`getStaticPaths()`, which a server-rendered `[slug].astro` may export just for this) and
+`/robots.txt`, unless the site has its own; canonical/Open Graph tags in the scaffolded layout,
+built from the framework's `site` setting (or the request's origin); forms that post back to
+their page with `<Csrf />` from `feldspar:components` and redirect after the write.
+
+**Not done yet.** A render cache: today every non-prerendered request runs the body. The body
+already reports which tables it read (every read is a `db` plan), so a cache keyed by path and
+invalidated by those tables' write events is the natural next step, and it would make "rebuild
+to refresh a prerendered page" unnecessary for most sites. Also: images are copied, not resized
+(no `<Image>`); a render error is answered by the router's generic error response, not
+`500.astro`; cookies are not passed in, so `Astro.cookies.get` sees only what the page set.
+
+##### Designed for later: A/B optimisation of landing pages
+
+The intended authoring syntax is a pair of components (and a goal marker) from
+`feldspar:components` (the virtual module that already carries `<Csrf />`):
+
+```astro
+---
+import { Optimise, Variant, Goal } from "feldspar:components";
+---
+<h1>
+  <Optimise name="hero-headline">
+    <Variant>The best tool for the job</Variant>
+    <Variant name="speed">Be done in no time!</Variant>
+  </Optimise>
+</h1>
+...
+<Goal name="signup"><a class="button" href="https://app.example.com/signup">Sign up</a></Goal>
+```
+
+How it fits what exists:
+
+- **Choosing a variant is a server-side render decision**, which is why this framework is the
+  right place for it: the visitor's HTML contains only the chosen variant, so there is no flash
+  of the control and no client-side testing script. `<Optimise>` renders one of its `<Variant>`
+  slots; the runtime already gives a component the per-request `result`, which is where the
+  choice is made and remembered for the rest of the page.
+- **Stable assignment** needs a visitor id. The router passes no cookies to a framework today
+  (`AppRequest` carries headers only, by design), so this needs one small addition: an anonymous
+  visitor cookie the router reads and hands over (the guest-session cookie of TODO-payments P1.5
+  is the precedent), and `Astro.cookies` already writes `Set-Cookie`. Assignment is
+  `hash(visitor, experiment) → arm`, so it needs no write per page view.
+- **Exposure and conversion are events**, recorded into two tables the module declares
+  (`tables: [...]`, Step 7 of the modules tutorial): an exposure when a page renders a variant,
+  a conversion when a `<Goal>` is reached. `<Goal>` wraps a link or a form: a link goes through a
+  tiny redirect endpoint (`/_goal/<name>?to=…`) the runtime routes itself, and a form posting
+  back to a page calls `goal("signup")` from its frontmatter. Recording from the body is one
+  `db.insert`, on the call budget every page already has.
+- **Allocation** starts as a fixed even split and moves to Thompson sampling over the conversion
+  counts (a beta–binomial bandit is a few lines, and `sc-stan` exists for anything richer). The
+  arm weights are read once per render from the exposure/conversion tables — or from the render
+  cache's neighbour, an in-isolate snapshot refreshed every few seconds.
+- **Prerendering and variants**: a page with an `<Optimise>` cannot be one static file. The
+  prerender step will refuse such a page with a sentence saying so (cheap, honest), and a later
+  version can prerender one file per arm and pick among them in Rust without running the body.
+- **SEO**: crawlers (`user-agent` is passed to the framework for this) always get the first
+  variant and are never counted, so a test does not show search engines alternating content.
+- **Reporting** is an Analytics workspace over the two tables (`sc-analytics`), so no new admin
+  screen is needed for a first version.
+
 #### Saltcorn UI: v1's views, hosted rather than reimplemented
 
 The third framework is what GOALS means by "applications can also be built in the saltcorn1

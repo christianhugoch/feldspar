@@ -342,6 +342,7 @@ mod tests {
                 args: vec!["install".to_owned()],
                 marker: "node_modules".to_owned(),
             }),
+            server_entry: None,
         }
     }
 
