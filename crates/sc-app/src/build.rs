@@ -443,6 +443,49 @@ pub async fn build_application(
     Ok(report)
 }
 
+/// The **dev loop**'s build (TODO-astro W2.5): what the IDE runs when a file is
+/// saved, so the preview shows the change in the time the bundler takes and no
+/// more.
+///
+/// [`build_application`] less three things a save does not change: the
+/// generated client and runtime are not rewritten, the install step is not
+/// run, and a server-rendered site is not prerendered — its prerendered pages
+/// are rendered per request until the next full build, which is slower and
+/// otherwise the same. When dependencies have never been installed it is a
+/// full build, because without them the bundler cannot run at all.
+pub async fn build_application_quick(
+    cat: &Catalog,
+    app: &Application,
+    source: &AppSource,
+    dispatcher: Option<&std::sync::Arc<sc_action::TriggerDispatcher>>,
+) -> Result<BuildReport> {
+    let store = cat.require_file_store(&source.store.0)?;
+    let root = store_root(&store, source)?;
+    let source_dir = resolve_under(&root, &source.build.source_dir)?;
+    let installed = source
+        .build
+        .install
+        .as_ref()
+        .is_none_or(|install| source_dir.join(&install.marker).exists());
+    if !installed {
+        let mut report = build_application(cat, app, source, dispatcher).await?;
+        report.stdout.insert_str(
+            0,
+            "dependencies are not installed yet, so this was a full build\n",
+        );
+        return Ok(report);
+    }
+    let mut report = run_build_with(&source.build, &root, false).await?;
+    report.git_repo = store.is_git_repo();
+    if source.build.server_entry.is_some() {
+        report.stdout.push_str(
+            "\nquick build: prerendering skipped; those pages are rendered per request until \
+             the next full build\n",
+        );
+    }
+    Ok(report)
+}
+
 /// [`build_application`], except that the bundler is **skipped** when nothing
 /// it reads has changed since its last successful run here — what the server
 /// does at boot, where rebuilding every application every time was most of the
@@ -1099,6 +1142,11 @@ fn file_tail(path: &Path, bytes: usize) -> String {
 /// Catalog-free so it is testable without a database; [`build_app`] wraps it.
 /// [`BuildReport::git_repo`] is always `false` here — only the store knows.
 pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
+    run_build_with(spec, root, true).await
+}
+
+/// [`run_build`], running the install step first only when `install` says to.
+async fn run_build_with(spec: &BuildSpec, root: &Path, install: bool) -> Result<BuildReport> {
     let source_dir = resolve_under(root, &spec.source_dir)?;
     if !source_dir.is_dir() {
         return Err(Error::config(format!(
@@ -1110,7 +1158,11 @@ pub async fn run_build(spec: &BuildSpec, root: &Path) -> Result<BuildReport> {
     // One build at a time, install included; see [`BUILD_LOCK`].
     let _serialised = BUILD_LOCK.lock().await;
 
-    let install_log = run_install(spec.install.as_ref(), &source_dir, &BTreeMap::new()).await?;
+    let install_log = if install {
+        run_install(spec.install.as_ref(), &source_dir, &BTreeMap::new()).await?
+    } else {
+        None
+    };
 
     let output = run_bundler(spec, &source_dir).await.with_context(|| {
         format!(

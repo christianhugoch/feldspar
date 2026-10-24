@@ -17,7 +17,7 @@ import type {
   RegisterLocalProcessExtensionResult,
 } from "@codingame/monaco-vscode-api/extensions";
 
-import { BUILD_COMMAND, registerBuildCommand } from "./build";
+import { BUILD_COMMAND, BUILD_ON_SAVE_COMMAND, registerBuildCommand } from "./build";
 import type { StoreFileSystemProvider } from "./fileSystemProvider";
 import { registerPrettierFormatter } from "./formatter";
 import { StoreGit } from "./git";
@@ -59,6 +59,12 @@ const MANIFEST: IExtensionManifest = {
         title: "Build Application",
         category: "Saltcorn",
         icon: "$(tools)",
+      },
+      {
+        command: BUILD_ON_SAVE_COMMAND,
+        title: "Toggle Build on Save",
+        category: "Saltcorn",
+        icon: "$(sync)",
       },
       {
         command: COMMIT_COMMAND,

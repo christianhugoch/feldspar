@@ -1789,6 +1789,7 @@ async fn dispatch_app(
     req.csrf_token = csrf
         .or_else(|| jar.get(CSRF_COOKIE).map(|c| c.value().to_owned()))
         .unwrap_or_default();
+    req.cookies = app_cookies(&jar);
     match app.framework.handle(req, catalog).await {
         // A store file (`/files/serve/*`) through the shared builder.
         Ok(sc_app::AppResponse {
@@ -2486,6 +2487,20 @@ const APP_REQUEST_HEADERS: [&str; 5] = [
     "if-none-match",
     "user-agent",
 ];
+
+/// The cookies an application framework is shown: every one but the server's
+/// own. Those are named `sc_*` (the session, the CSRF token, the guest session,
+/// a preview, an OAuth binding) or are the shared session cookie, and they are
+/// credentials a page has no use for and must not be able to echo.
+fn app_cookies(jar: &CookieJar) -> std::collections::BTreeMap<String, String> {
+    jar.iter()
+        .filter(|cookie| {
+            let name = cookie.name();
+            !name.starts_with("sc_") && name != sc_config::authentication::SHARED_SESSION_COOKIE
+        })
+        .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()))
+        .collect()
+}
 
 /// The [`AppRequest`] for one live request to an application's framework.
 ///

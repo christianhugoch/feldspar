@@ -2,6 +2,90 @@
 
 Changes in reverse chronological order.
 
+## Astro websites, W2: a render cache, cookies, 500.astro, images and build on save
+
+Milestone W2 of `TODO-astro.md`. Server-rendered pages are now fast without prerendering, can
+stay current when they are prerendered, and the site gets the last Astro features a website
+expects.
+
+- **The render cache** (W2.1, `sc_app::server_render::cache`).
+  - A page rendered for a signed-out `GET` is kept, keyed by origin, path, query and locale.
+    The next visitor gets it (`x-render-cache: hit`) until a table the render read is written.
+  - **Which tables** is the host's record, not the page's. `TriggerDispatcher::run_code_traced`
+    passes a new `sc_expr::TraceSink` (`RunTrace { tables, side_effects }`, plumbed like the
+    console sink: `CodeCall::trace`, `ActionContext::with_trace`). The isolate fills it as each
+    `db` plan is made. The set is widened over key fields both ways, because a Ⱶ-path or a child
+    aggregation reads those tables too.
+  - Writes are heard on the catalog's emit seam. One process-wide listener (`render_cache`)
+    holds each site's cache weakly, so a remount needs no unregistering.
+  - **Not kept:**
+    - a signed-in visitor's page;
+    - a page the runtime marks as per-visitor, because it read a cookie, a request header or
+      the CSRF token (every form page);
+    - a page that says `Cache-Control: no-store` or `private` (the opt-out);
+    - a render that wrote a row or ran a trigger;
+    - anything but a 200 or a 404;
+    - a render that overlapped a write.
+  - **Bounds:** ten minutes, for what no table holds; 1000 pages and 1 MB a page per site.
+- **Cookies** (W2.2). `AppRequest::cookies` carries the request's cookies to a framework,
+  except the server's own (`sc_*`, and the shared session cookie). The Astro runtime puts them
+  behind `Astro.cookies.get`/`has`.
+- **`500.astro`** (W2.3). A render that fails is rendered again in `mode: "error"`. The page
+  gets `Astro.props.error` and is answered as a 500 with `no-store`. The framework raises the
+  `error` event itself, with the payload the router would have used. Without a 500 page, or for
+  a deliberate `httpError`, the router handles the failure as before, so the event is raised
+  exactly once.
+- **Images** (W2.4).
+  - The build reads an imported image's size from its header, so an import is
+    `{ src, width, height, format }`.
+  - `<Image src alt width? height? format? quality? widths? sizes?>` from `feldspar:components`
+    renders an `<img>`, with a `srcset` when `widths` is given, pointing at `/_image?…`.
+  - `/_image` is answered in Rust with the `image` crate (`server_render::images`, now a
+    dependency of `sc-app`). It resizes, or crops to fill when both sides are given, never
+    enlarges, and encodes PNG, JPEG or lossless WebP. It keeps 32 sizes of an image and 64 MB
+    per site.
+  - Only a hashed file under `/_astro/` can be resized, so variants are `immutable`. `alt` is
+    required. SVGs and URL strings pass through unchanged.
+- **The dev loop** (W2.5).
+  - `buildApplication` takes `?quick=true` (`sc_app::build_application_quick`,
+    `sc_server::apps::build_and_mount_with`). It runs the bundler only: no install, no
+    regenerated client, no prerendering. With no dependencies installed yet it is a full build.
+  - The IDE gains a **Build on save** status-bar switch (`saltcorn.toggleBuildOnSave`,
+    remembered per store in the browser). It quick-builds the application whose source holds
+    the saved file, ignoring `dist/` and `node_modules/`, once per burst of saves and never two
+    builds at once (`ui/ide/src/buildOnSave.ts`).
+  - The four checked-in admin clients are regenerated.
+- **Refreshable prerendered pages** (W2.6). `export const refresh = true` beside
+  `prerender = true` lists the page in `_server/prerendered.json`. The mount serves it from
+  memory: rendered again (as at build time) on the first request after a table it read is
+  written, or after a mount, and otherwise served as a file with an ETag.
+- **Runtime details.**
+  - `prerender-list` answers `{ paths, refresh }`, and `500.astro` is never prerendered.
+  - Shareable answers carry `cache: true`.
+  - `Astro.request.headers` and `Astro.locals.csrfToken` are read lazily, so that reading them
+    is noticed.
+- **Docs:** `docs/tutorial-astro.md` (images, the cache, refresh, errors, build on save), the
+  scaffold's `AGENTS.md` and `env.d.ts` (`Image`, image metadata), and §13.3 of the design
+  document, whose "Not done yet" paragraph now describes what was built.
+- **Tests:**
+  - `sc-expr`: a trace records the tables and side effects.
+  - `sc-app`:
+    - the cache's invalidation, the epoch race and the bounds;
+    - the refresh state, and the manifest's pages;
+    - the cache key;
+    - image parsing, resizing and the variant store;
+    - cookies in the binding.
+  - `plugins/astro/test`: cacheability flags, cookies, `500.astro`, the refresh list, and
+    `<Image>`'s markup and its missing-`alt` error.
+  - `sc-server` `app_server_render`:
+    - a kept page, dropped by a write to its table and kept through others;
+    - form pages and writing pages never kept;
+    - the server's cookies withheld;
+    - the 500 page and its `error` event;
+    - `/_image`;
+    - a refreshable prerendered page re-rendered after a write.
+  - `ui/ide`: `buildOnSave.test.ts`.
+
 ## Astro for websites: a bundled framework module that renders on the server (§13.3)
 
 A new bundled module, `plugins/astro` (`@feldspar/astro`), adds the framework **Astro

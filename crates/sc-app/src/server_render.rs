@@ -30,15 +30,34 @@
 //! running anything. Only what no file answers reaches the code body, which also
 //! renders the not-found page. There is no SPA fallback: a website's unknown
 //! path is a 404. `_server/` itself is never served: it is the site's source.
+//!
+//! # Speed
+//!
+//! - A rendered page is kept for the next anonymous visitor until a table it
+//!   read is written ([`cache`], TODO-astro W2.1).
+//! - A prerendered page that says `export const refresh = true` is served as a
+//!   file until a table it read at build time is written, and then rendered
+//!   again on its next request (W2.6).
+//! - `<Image>`'s variants are resized here, once each ([`images`], W2.4).
+//!
+//! # Failures
+//!
+//! A render that fails is answered with the site's `500.astro`, when it has
+//! one, after the failure is raised as an `error` event exactly as the router
+//! would have raised it (W2.3). With no such page, the failure goes to the
+//! router as before.
 
-use std::collections::HashMap;
+pub mod cache;
+pub mod images;
+
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use sc_action::TriggerDispatcher;
+use sc_action::{Event, TriggerDispatcher};
 use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use sc_types::{Attrs, FormField};
@@ -57,6 +76,10 @@ const RUN_JS: &str = "run_js_code";
 /// Assets under this prefix are named by content hash, so a browser may keep
 /// them forever.
 const IMMUTABLE_PREFIX: &str = "_astro/";
+
+/// What the build writes beside the entry: the prerendered pages that are
+/// rendered again when their data changes. Read before `_server/` is dropped.
+const PRERENDERED_MANIFEST: &str = "prerendered.json";
 
 /// Check a declared server entry: a relative path inside the output directory,
 /// with no way out of it. Answers the path normalised (no leading `./`).
@@ -106,6 +129,8 @@ pub struct ServerRendered {
     app_id: uuid::Uuid,
     run_name: String,
     dispatcher: Option<Arc<TriggerDispatcher>>,
+    cache: Arc<cache::SiteCache>,
+    images: images::SiteImages,
 }
 
 impl ServerRendered {
@@ -127,6 +152,11 @@ impl ServerRendered {
         })?;
         let source = String::from_utf8(source.bytes.to_vec())
             .map_err(|_| Error::config(format!("the server entry {entry} is not UTF-8 text")))?;
+        let refresh = bundle
+            .get(&format!("{}/{PRERENDERED_MANIFEST}", server_dir(entry)))
+            .and_then(|asset| serde_json::from_slice::<Json>(&asset.bytes).ok())
+            .map(|manifest| refresh_pages(&manifest))
+            .unwrap_or_default();
         bundle.remove_prefix(server_dir(entry));
         bundle.clear_fallback();
         let etags = bundle
@@ -144,6 +174,23 @@ impl ServerRendered {
             app_id: app.id.0,
             run_name: format!("page of {}", app.subdomain.trim()),
             dispatcher,
+            cache: Arc::new(cache::SiteCache::new(refresh)),
+            images: images::SiteImages::default(),
+        })
+    }
+
+    /// The site's render cache — for a test, or a caller that wants to know
+    /// what is kept.
+    pub fn render_cache(&self) -> &Arc<cache::SiteCache> {
+        &self.cache
+    }
+
+    fn dispatcher(&self) -> Result<&Arc<TriggerDispatcher>> {
+        self.dispatcher.as_ref().ok_or_else(|| {
+            Error::config(
+                "this server-rendered application was mounted without a trigger dispatcher, \
+                 so it cannot run its pages",
+            )
         })
     }
 
@@ -181,16 +228,109 @@ impl ServerRendered {
             .header("cache-control", cache)
     }
 
-    /// Run the entry for one request.
-    async fn render(&self, req: &AppRequest, cat: &Catalog) -> Result<AppResponse> {
-        let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
-            Error::config(
-                "this server-rendered application was mounted without a trigger dispatcher, \
-                 so it cannot run its pages",
+    /// One file served from memory: a refreshed prerendered page.
+    fn serve_rendered(page: &cache::RenderedPage, req: &AppRequest) -> AppResponse {
+        let cache = "public, max-age=0, must-revalidate";
+        if req.header("if-none-match") == Some(page.etag.as_str()) {
+            return AppResponse::with_status(304, page.content_type.clone(), Bytes::new())
+                .header("etag", page.etag.clone())
+                .header("cache-control", cache);
+        }
+        AppResponse::ok(page.content_type.clone(), page.body.clone())
+            .header("etag", page.etag.clone())
+            .header("cache-control", cache)
+    }
+
+    /// A refreshable prerendered page whose data changed: render it again, as
+    /// the build did, and serve that from now on. A render that fails leaves
+    /// the file the build wrote being served, and says so in the log.
+    async fn refresh(
+        &self,
+        key: &str,
+        path: &str,
+        asset: &Asset,
+        req: &AppRequest,
+        cat: &Catalog,
+    ) -> AppResponse {
+        let rendered = async {
+            let dispatcher = self.dispatcher()?;
+            self.cache.listen(cat);
+            let epoch = self.cache.epoch();
+            let trace = sc_expr::trace_sink();
+            let mut page_req = AppRequest::get(path);
+            page_req.base_url = String::new();
+            let answer = run_entry(
+                dispatcher,
+                cat,
+                &self.entry,
+                &self.run_name,
+                self.app_id,
+                request_binding(&page_req, "prerender"),
+                None,
+                Some(trace.clone()),
             )
-        })?;
+            .await?;
+            let page = response_from(&answer)?;
+            if !matches!(page.status, 200 | 404) {
+                return Err(Error::invalid(format!(
+                    "refreshing {path} answered {} rather than a page",
+                    page.status
+                )));
+            }
+            let tables = cache::watched_tables(cat, &sc_expr::read_trace(&trace).tables);
+            let rendered = cache::RenderedPage {
+                etag: etag(&page.body),
+                content_type: page.content_type,
+                body: page.body,
+            };
+            self.cache.refreshed(key, rendered.clone(), tables, epoch);
+            Ok::<_, Error>(rendered)
+        }
+        .await;
+        match rendered {
+            Ok(page) => Self::serve_rendered(&page, req),
+            Err(e) => {
+                eprintln!(
+                    "feldspar: refreshing the prerendered page {path}: {}",
+                    e.chain()
+                );
+                self.serve_static(key, asset, req)
+            }
+        }
+    }
+
+    /// What a request is kept under in the render cache, when it may be: an
+    /// anonymous `GET`.
+    fn cache_key(req: &AppRequest) -> Option<cache::CacheKey> {
+        if !matches!(req.method, Method::Get) || req.user.is_some() {
+            return None;
+        }
+        Some(cache::CacheKey {
+            origin: req.base_url.clone(),
+            path: req.path.clone(),
+            query: req
+                .query
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            locale: req.locale.to_string(),
+        })
+    }
+
+    /// Run the entry for one request — or answer it from the render cache.
+    async fn render(&self, req: &AppRequest, cat: &Catalog) -> Result<AppResponse> {
+        let dispatcher = self.dispatcher()?;
+        let key = Self::cache_key(req);
+        if let Some(key) = &key
+            && let Some(hit) = self.cache.get(key)
+        {
+            return Ok(hit.header("x-render-cache", "hit"));
+        }
+        self.cache.listen(cat);
+        let epoch = self.cache.epoch();
+        let trace = sc_expr::trace_sink();
         let caller = sc_api::caller_context(req.user.as_ref());
-        let answer = run_entry(
+        let answer = match run_entry(
             dispatcher,
             cat,
             &self.entry,
@@ -198,8 +338,14 @@ impl ServerRendered {
             self.app_id,
             request_binding(req, "render"),
             Some(&caller),
+            Some(trace.clone()),
         )
-        .await?;
+        .await
+        {
+            Ok(answer) => answer,
+            Err(e) => return self.server_error(req, cat, &caller, e).await,
+        };
+        let shareable = answer.get("cache") == Some(&Json::Bool(true));
         let mut out = response_from(&answer)?;
         if !out.headers.iter().any(|(k, _)| k == "cache-control") {
             // A rendered page may carry this visitor's CSRF token or data, so a
@@ -207,8 +353,88 @@ impl ServerRendered {
             out.headers
                 .push(("cache-control".to_owned(), "private, no-cache".to_owned()));
         }
+        if let Some(key) = key
+            && shareable
+            && matches!(out.status, 200 | 404)
+        {
+            let touched = sc_expr::read_trace(&trace);
+            if !touched.side_effects {
+                let tables: BTreeSet<String> = cache::watched_tables(cat, &touched.tables);
+                self.cache.insert(key, out.clone(), tables, epoch);
+            }
+        }
         Ok(out)
     }
+
+    /// A render failed with `err`: answer the site's `500.astro`, after raising
+    /// the failure as the `error` event the router would have raised. A
+    /// deliberate `httpError`, a site with no such page, or a 500 page that
+    /// fails too, hands `err` back to the router, which raises the event and
+    /// answers as it does for any application.
+    async fn server_error(
+        &self,
+        req: &AppRequest,
+        cat: &Catalog,
+        caller: &sc_catalog::CallerContext,
+        err: Error,
+    ) -> Result<AppResponse> {
+        if err.http_reply().is_some() {
+            return Err(err);
+        }
+        let Ok(dispatcher) = self.dispatcher() else {
+            return Err(err);
+        };
+        let mut binding = request_binding(req, "error");
+        binding["error"] = Json::String(err.to_string());
+        let answer = run_entry(
+            dispatcher,
+            cat,
+            &self.entry,
+            &self.run_name,
+            self.app_id,
+            binding,
+            Some(caller),
+            None,
+        )
+        .await;
+        let page = match answer {
+            Ok(answer) if answer.is_object() => match response_from(&answer) {
+                Ok(page) => page,
+                Err(_) => return Err(err),
+            },
+            Ok(_) => return Err(err),
+            Err(page_err) => {
+                eprintln!(
+                    "feldspar: rendering 500.astro failed too: {}",
+                    page_err.chain()
+                );
+                return Err(err);
+            }
+        };
+        eprintln!("feldspar: internal error: {}", err.chain());
+        let event = Event::error(err.kind(), err.to_string(), req.method.as_str(), &req.path)
+            .caused_by(caller);
+        dispatcher.fire(cat, &event).await;
+        let mut page = page;
+        page.status = 500;
+        page.headers.retain(|(k, _)| k != "cache-control");
+        page.headers
+            .push(("cache-control".to_owned(), "no-store".to_owned()));
+        Ok(page)
+    }
+}
+
+/// The refreshable prerendered pages a manifest lists, as `(bundle key, site
+/// path)`.
+fn refresh_pages(manifest: &Json) -> Vec<(String, String)> {
+    manifest
+        .get("refresh")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|path| path.as_str())
+        .map(|path| (prerendered_file(path), path.to_owned()))
+        .collect()
 }
 
 #[async_trait]
@@ -222,9 +448,23 @@ impl Framework for ServerRendered {
     }
 
     async fn handle(&self, req: AppRequest, cat: &Catalog) -> Result<AppResponse> {
+        if matches!(req.method, Method::Get) && req.path == images::IMAGE_PATH {
+            let source = req
+                .query
+                .get("src")
+                .and_then(|src| self.statics.asset(src.trim_start_matches('/')))
+                .map(|asset| asset.bytes.clone());
+            return Ok(self.images.serve(&req, source).await);
+        }
         if matches!(req.method, Method::Get)
             && let Some((key, asset)) = self.static_asset(&req.path)
         {
+            if let Some((path, current)) = self.cache.refresh_page(&key) {
+                return Ok(match current {
+                    Some(page) => Self::serve_rendered(&page, &req),
+                    None => self.refresh(&key, &path, asset, &req, cat).await,
+                });
+            }
             return Ok(self.serve_static(&key, asset, &req));
         }
         // Somebody the application does not let in gets its files — they are
@@ -278,6 +518,7 @@ fn request_binding(req: &AppRequest, mode: &str) -> Json {
         "origin": req.base_url,
         "locale": req.locale.to_string(),
         "csrfToken": req.csrf_token,
+        "cookies": req.cookies,
     });
     if !form.is_null() {
         binding["form"] = form;
@@ -288,7 +529,9 @@ fn request_binding(req: &AppRequest, mode: &str) -> Json {
     binding
 }
 
-/// Run `entry` once with `request` bound.
+/// Run `entry` once with `request` bound, recording what it touched into
+/// `trace` when one is given.
+#[allow(clippy::too_many_arguments)]
 async fn run_entry(
     dispatcher: &TriggerDispatcher,
     cat: &Catalog,
@@ -297,11 +540,22 @@ async fn run_entry(
     app: uuid::Uuid,
     request: Json,
     caller: Option<&sc_catalog::CallerContext>,
+    trace: Option<sc_expr::TraceSink>,
 ) -> Result<Json> {
     let mut scope = Attrs::new();
     scope.insert("request".to_owned(), request);
     dispatcher
-        .run_code(cat, RUN_JS, name, entry, scope, caller, Some(app), None)
+        .run_code_traced(
+            cat,
+            RUN_JS,
+            name,
+            entry,
+            scope,
+            caller,
+            Some(app),
+            None,
+            trace,
+        )
         .await
 }
 
@@ -396,6 +650,7 @@ pub async fn prerender(
         app.id.0,
         request_binding(&base, "prerender-list"),
         None,
+        None,
     )
     .await
     .map_err(|e| Error::invalid(format!("prerendering {}: {e}", app.name)))?;
@@ -422,6 +677,7 @@ pub async fn prerender(
             app.id.0,
             request_binding(&req, "prerender"),
             None,
+            None,
         )
         .await
         .map_err(|e| Error::invalid(format!("prerendering {path} of {}: {e}", app.name)))?;
@@ -439,6 +695,19 @@ pub async fn prerender(
         report.bundle.insert(&file, page.body.clone());
         written += 1;
     }
+    // The pages to render again when their data changes (`refresh = true`),
+    // beside the entry: the mount reads it, and nothing serves it.
+    let refresh: Vec<&str> = list
+        .get("refresh")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Json::as_str)
+        .collect();
+    let manifest = format!("{}/{PRERENDERED_MANIFEST}", server_dir(entry_path));
+    let body = Bytes::from(json!({ "refresh": refresh }).to_string());
+    write_output(&report.output_dir, &manifest, &body)?;
+    report.bundle.insert(&manifest, body);
     report
         .stdout
         .push_str(&format!("\nprerendered {written} page(s)\n"));
@@ -602,11 +871,45 @@ mod tests {
     }
 
     #[test]
+    fn only_an_anonymous_get_is_kept_and_its_query_is_part_of_the_key() {
+        let mut get = AppRequest::get("/blog");
+        get.query.insert("page".to_owned(), "2".to_owned());
+        let key = ServerRendered::cache_key(&get).unwrap();
+        assert_eq!(key.query, vec![("page".to_owned(), "2".to_owned())]);
+        assert!(ServerRendered::cache_key(&AppRequest::new(Method::Post, "/blog")).is_none());
+        let mut signed_in = AppRequest::get("/blog");
+        signed_in.user = Some(sc_auth::User::new(uuid::Uuid::nil(), 40).unwrap());
+        assert!(ServerRendered::cache_key(&signed_in).is_none());
+    }
+
+    #[test]
+    fn the_manifest_names_the_refreshable_pages_where_they_are_served() {
+        let manifest = json!({ "refresh": ["/", "/blog/hello"] });
+        assert_eq!(
+            refresh_pages(&manifest),
+            vec![
+                ("index.html".to_owned(), "/".to_owned()),
+                ("blog/hello/index.html".to_owned(), "/blog/hello".to_owned()),
+            ]
+        );
+        let built = bundle().with("_server/prerendered.json", manifest.to_string());
+        let fw = ServerRendered::new(&app(), built, spec(), "_server/entry.js", None).unwrap();
+        assert!(fw.cache.refresh_page("index.html").is_some());
+        assert!(fw.cache.refresh_page("about/index.html").is_none());
+        assert!(
+            fw.static_asset("/_server/prerendered.json").is_none(),
+            "the manifest is not served"
+        );
+    }
+
+    #[test]
     fn the_request_binding_carries_the_parsed_body_and_the_token() {
         let mut req = AppRequest::new(Method::Post, "/contact");
         req.body = RequestBody::Form(vec![("email".to_owned(), "a@b.c".to_owned())]);
         req.csrf_token = "tok".to_owned();
+        req.cookies.insert("theme".to_owned(), "dark".to_owned());
         let binding = request_binding(&req, "render");
+        assert_eq!(binding["cookies"], json!({ "theme": "dark" }));
         assert_eq!(binding["method"], "POST");
         assert_eq!(binding["form"], json!([["email", "a@b.c"]]));
         assert_eq!(binding["csrfToken"], "tok");

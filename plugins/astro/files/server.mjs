@@ -18,6 +18,12 @@
 //
 // What is deliberately not here: UI-framework islands (`client:*` directives),
 // view transitions, content collections, and streaming. Each fails by name.
+//
+// **The render cache.** The server keeps a rendered page for the next anonymous
+// visitor until a table it read is written. So every answer says whether it
+// may be kept (`cache`): not when the page read something that differs between
+// visitors — a cookie, a request header, the CSRF token — and not when it set
+// `Cache-Control: no-store`, which is how a page opts out.
 
 // ---------------------------------------------------------------------------
 // HTML strings
@@ -429,12 +435,19 @@ export class SearchParams {
 /** `Astro.request`: the method, URL and headers, and the body as a form, JSON
  * or text. The router hands the body over already parsed. */
 export class PageRequest {
-  constructor(input, url) {
+  constructor(input, url, vary) {
     this.method = input.method || "GET";
     this.url = url.href;
-    this.headers = new Headers(input.headers || {});
+    this._headers = input.headers || {};
+    this._vary = vary;
     this._form = input.form || null;
     this._json = input.json === undefined ? undefined : input.json;
+  }
+  /** The request's headers. Reading them makes the page this visitor's, so
+   * the render cache does not keep it. */
+  get headers() {
+    visitorSpecific(this._vary);
+    return new Headers(this._headers);
   }
   async formData() {
     if (!this._form) {
@@ -460,21 +473,34 @@ function isResponse(value) {
   return typeof Response !== "undefined" && value instanceof Response;
 }
 
-/** `Astro.cookies`, over the cookies the router chose to pass (none, today) and
- * the `Set-Cookie` headers a page adds. */
+/** Mark the page being rendered as one visitor's: it read something another
+ * visitor's request would answer differently, so the render cache must not
+ * serve it to anybody else. */
+function visitorSpecific(vary) {
+  if (vary) vary.cacheable = false;
+}
+
+/** `Astro.cookies`, over the request's cookies — every one but the server's
+ * own session and CSRF cookies, which the router keeps back — and the
+ * `Set-Cookie` headers a page adds. Reading or writing one makes the page this
+ * visitor's. */
 class Cookies {
-  constructor(initial, response) {
+  constructor(initial, response, vary) {
     this.values = { ...(initial || {}) };
     this.response = response;
+    this.vary = vary;
   }
   get(name) {
+    visitorSpecific(this.vary);
     const value = this.values[name];
     return value === undefined ? undefined : { value, json: () => JSON.parse(value) };
   }
   has(name) {
+    visitorSpecific(this.vary);
     return this.values[name] !== undefined;
   }
   set(name, value, options = {}) {
+    visitorSpecific(this.vary);
     const text = typeof value === "string" ? value : JSON.stringify(value);
     this.values[name] = text;
     let cookie = `${name}=${encodeURIComponent(text)}; Path=${options.path || "/"}`;
@@ -485,6 +511,7 @@ class Cookies {
     this.response.headers.append("set-cookie", cookie);
   }
   delete(name, options = {}) {
+    visitorSpecific(this.vary);
     delete this.values[name];
     this.response.headers.append(
       "set-cookie",
@@ -509,7 +536,7 @@ function createResult(site, page) {
     response,
     page,
   };
-  const cookies = new Cookies(page.cookies, response);
+  const cookies = new Cookies(page.cookies, response, page.vary);
   const shared = {
     url: page.url,
     request: page.request,
@@ -563,7 +590,16 @@ export async function renderPage(site, Component, page, props = {}) {
   if (!headers.some(([k]) => k === "content-type")) {
     headers.push(["content-type", "text/html; charset=utf-8"]);
   }
-  return { status: result.response.status, headers, body: html };
+  return { status: result.response.status, headers, body: html, cache: cacheable(page, headers) };
+}
+
+/** Whether the render cache may keep this answer for the next visitor: the
+ * page read nothing visitor-specific and did not say `no-store`. */
+function cacheable(page, headers) {
+  if (!page.vary || !page.vary.cacheable) return false;
+  return !headers.some(
+    ([k, v]) => (k === "cache-control" && /no-store|private/i.test(v)) || k === "set-cookie"
+  );
 }
 
 /** A `Response` as the host's response shape. */
@@ -723,16 +759,23 @@ export function createSite({ routes, styles, scripts, site }) {
 function pageContext(site, input, path, params, who) {
   const origin = site.site || input.origin || "";
   const url = new PageURL(origin.replace(/\/$/, ""), path, Object.entries(input.query || {}));
+  const vary = { cacheable: true };
+  const csrfToken = input.csrfToken || "";
   return {
     url,
     params,
     site: site.site ? new PageURL(site.site.replace(/\/$/, ""), "/", []) : undefined,
-    request: new PageRequest(input, url),
+    request: new PageRequest(input, url, vary),
     cookies: input.cookies,
+    vary,
     locals: {
       user: who ?? null,
       locale: input.locale,
-      csrfToken: input.csrfToken || "",
+      // The token is this browser's, so a page that renders it is too.
+      get csrfToken() {
+        visitorSpecific(vary);
+        return csrfToken;
+      },
     },
   };
 }
@@ -790,6 +833,7 @@ async function sitemap(site, input) {
     body:
       '<?xml version="1.0" encoding="UTF-8"?>' +
       `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls}</urlset>`,
+    cache: true,
   };
 }
 
@@ -801,6 +845,7 @@ function robots(site, input) {
     status: 200,
     headers: [["content-type", "text/plain; charset=utf-8"]],
     body: `User-agent: *\nAllow: /\n${origin ? `Sitemap: ${origin}/sitemap.xml\n` : ""}`,
+    cache: true,
   };
 }
 
@@ -812,11 +857,25 @@ async function notFound(site, input, who) {
       status: 404,
       headers: [["content-type", "text/html; charset=utf-8"]],
       body: "<!DOCTYPE html><title>Not found</title><h1>Not found</h1>",
+      cache: true,
     };
   }
   const page = pageContext(site, input, input.path || "/", {}, who);
   const out = await renderPage(site, route.module.default, page);
   return { ...out, status: out.status === 200 ? 404 : out.status };
+}
+
+/** `src/pages/500.astro`, for a render that failed: the page gets the error as
+ * `Astro.props.error` (its `message` is the one a visitor may be shown) and is
+ * answered with a 500. `null` when the site has no such page, so the server
+ * answers its own error response. */
+async function serverError(site, input, who) {
+  const route = site.routes.find((r) => r.file === "500.astro");
+  if (!route) return null;
+  const page = pageContext(site, input, input.path || "/", {}, who);
+  const error = new Error(String(input.error || "Internal error"));
+  const out = await renderPage(site, route.module.default, page, { error });
+  return { ...out, status: 500, cache: false };
 }
 
 /** An endpoint file (`rss.xml.ts`): its exported `GET`/`POST`/… (or `ALL`). */
@@ -836,18 +895,21 @@ async function endpoint(route, page, method) {
   if (!isResponse(out)) {
     throw new Error(`${route.file}: ${method} must return a Response`);
   }
-  return responseShape(out);
+  const shape = await responseShape(out);
+  return { ...shape, cache: cacheable(page, shape.headers) };
 }
 
 /** The pages to write at build time: every route that says
  * `export const prerender = true`, each of a dynamic one's `getStaticPaths`. */
 async function prerenderList(site) {
   const out = [];
+  const refresh = [];
   for (const route of site.routes) {
-    if (!route.prerender) continue;
+    if (!route.prerender || route.file === "500.astro") continue;
     const dynamic = route.segments.some((s) => s.text === undefined);
     if (!dynamic) {
       out.push(routePath(route, {}));
+      if (route.refresh) refresh.push(routePath(route, {}));
       continue;
     }
     if (!route.module.getStaticPaths) {
@@ -858,24 +920,98 @@ async function prerenderList(site) {
     }
     for (const entry of (await route.module.getStaticPaths({ paginate })) || []) {
       out.push(routePath(route, entry.params || {}));
+      if (route.refresh) refresh.push(routePath(route, entry.params || {}));
     }
   }
   // The 404 page is always written, so a missing static file costs nothing.
   if (site.routes.some((r) => r.file === "404.astro" && r.prerender)) out.push("/404");
-  return [...new Set(out)];
+  return { paths: [...new Set(out)], refresh: [...new Set(refresh)] };
 }
 
 /** One call from the host. `mode` is `render` (a request), `prerender-list`
- * (the build asking which pages to write) or `prerender` (one of them). */
+ * (the build asking which pages to write, and which of them to refresh when
+ * their data changes), `prerender` (one of them), or `error` (a render failed
+ * with `input.error`: the site's 500 page, or `null`). */
 export async function handle(site, input, who) {
-  if (input.mode === "prerender-list") return { paths: await prerenderList(site) };
+  if (input.mode === "prerender-list") return prerenderList(site);
   if (input.mode === "prerender" && input.path === "/404") return notFound(site, input, null);
+  if (input.mode === "error") return serverError(site, input, who);
   return serve(site, input, input.mode === "prerender" ? null : who);
 }
 
 // ---------------------------------------------------------------------------
 // `feldspar:components` — what Saltcorn adds to Astro
 // ---------------------------------------------------------------------------
+
+/** `<Image src={imported} alt="…" width={400} />`: an image resized on the
+ * server. `src` is an imported image (`import hero from "../hero.jpg"`, which
+ * carries its `width` and `height`) or a URL string, used as it is. Give a
+ * `width`, a `height` or both — the other follows the image's aspect ratio, and
+ * both crop to fill — and optionally `format` (`webp`, `png`, `jpeg`),
+ * `quality` (1–100), and `widths` with `sizes` for a `srcset`. An image is never
+ * made larger than it is. The resized files are made on first request and kept
+ * (`/_image?…`); an SVG is not resized. */
+export const Image = createComponent(async (result, props) => {
+  const { src, alt, width, height, format, quality, widths, sizes, ...rest } = props || {};
+  if (alt === undefined || alt === null) {
+    throw new Error(
+      "<Image> needs an `alt`: describe the image, or write alt=\"\" for one that is " +
+        "only decoration"
+    );
+  }
+  if (!src) throw new Error("<Image> needs a `src`: an imported image or a URL");
+  const attrs = { alt, loading: "lazy", decoding: "async", ...rest };
+  if (typeof src === "string") {
+    return markHTMLString(`<img${spreadAttributes({ src, width, height, ...attrs })}>`);
+  }
+  const box = imageBox(src, width, height);
+  if (src.format === "svg" || !src.width || !src.height) {
+    return markHTMLString(
+      `<img${spreadAttributes({ src: src.src, width: box.width, height: box.height, ...attrs })}>`
+    );
+  }
+  const cropped = width !== undefined && height !== undefined;
+  const url = (w) => {
+    const h = cropped ? Math.max(1, Math.round((w * box.height) / box.width)) : undefined;
+    return imageUrl(src, w, h, format, quality);
+  };
+  const out = { src: url(box.width), width: box.width, height: box.height, ...attrs };
+  if (Array.isArray(widths) && widths.length) {
+    const list = [...new Set(widths.map((w) => Math.min(Math.round(Number(w)), src.width)))]
+      .filter((w) => w > 0)
+      .sort((a, b) => a - b);
+    out.srcset = list.map((w) => `${url(w)} ${w}w`).join(", ");
+    if (sizes) out.sizes = sizes;
+  }
+  return markHTMLString(`<img${spreadAttributes(out)}>`);
+}, "feldspar:components/Image");
+
+/** The size an `<Image>` is drawn at: what was asked, the rest from the aspect
+ * ratio, never larger than the image itself. */
+export function imageBox(image, width, height) {
+  const iw = Number(image.width) || 0;
+  const ih = Number(image.height) || 0;
+  let w = width === undefined ? undefined : Math.round(Number(width));
+  let h = height === undefined ? undefined : Math.round(Number(height));
+  if (!iw || !ih) return { width: w, height: h };
+  if (w === undefined && h === undefined) return { width: iw, height: ih };
+  if (w === undefined) w = Math.round((h * iw) / ih);
+  if (h === undefined) h = Math.round((w * ih) / iw);
+  // Scale both down together when either is larger than the image.
+  const scale = Math.min(1, iw / w, ih / h);
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) };
+}
+
+/** The URL of one resized variant, or the original when nothing changes. */
+function imageUrl(image, w, h, format, quality) {
+  const same = w === image.width && h === undefined && !format && quality === undefined;
+  if (same) return image.src;
+  let url = `/_image?src=${encodeURIComponent(image.src)}&w=${w}`;
+  if (h !== undefined) url += `&h=${h}`;
+  if (format) url += `&f=${encodeURIComponent(String(format).toLowerCase())}`;
+  if (quality !== undefined) url += `&q=${Math.round(Number(quality))}`;
+  return url;
+}
 
 /** `<Csrf />`: the hidden field a form posting back to a page must carry. */
 export const Csrf = createComponent(async (result) => {

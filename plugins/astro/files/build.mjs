@@ -14,7 +14,9 @@
 //
 // Pages that say `export const prerender = true` are *not* written here: they
 // are rendered by the server right after this build, through the same code
-// body, so a prerendered page and a server-rendered one cannot disagree. This
+// body, so a prerendered page and a server-rendered one cannot disagree. (One
+// that also says `export const refresh = true` is rendered again when a table
+// it read is written.) This
 // script needs no database and no server, only `@astrojs/compiler` (for the
 // `.astro` syntax) and `esbuild` (for TypeScript, imports and bundling).
 
@@ -49,6 +51,61 @@ function walk(dir, base = dir) {
     else if (entry.isFile()) out.push(path.relative(base, full).split(path.sep).join("/"));
   }
   return out.sort();
+}
+
+/** An image's `{ width, height }` read from its header, or `{}` for a file
+ * that is not an image this knows (PNG, JPEG, GIF, WebP, SVG). */
+function imageSize(bytes, format) {
+  try {
+    if (format === "png" && bytes.readUInt32BE(12) === 0x49484452) {
+      return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+    }
+    if (format === "gif") return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+    if (format === "jpeg") {
+      let i = 2;
+      while (i + 9 < bytes.length) {
+        if (bytes[i] !== 0xff) {
+          i++;
+          continue;
+        }
+        const marker = bytes[i + 1];
+        const length = bytes.readUInt16BE(i + 2);
+        // Start-of-frame markers (C0–CF, but not DHT, JPG or DAC) carry the size.
+        if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+          return { width: bytes.readUInt16BE(i + 7), height: bytes.readUInt16BE(i + 5) };
+        }
+        i += 2 + length;
+      }
+    }
+    if (format === "webp" && bytes.toString("ascii", 8, 12) === "WEBP") {
+      const chunk = bytes.toString("ascii", 12, 16);
+      if (chunk === "VP8X") {
+        return { width: 1 + bytes.readUIntLE(24, 3), height: 1 + bytes.readUIntLE(27, 3) };
+      }
+      if (chunk === "VP8L") {
+        const b = bytes.readUInt32LE(21);
+        return { width: 1 + (b & 0x3fff), height: 1 + ((b >> 14) & 0x3fff) };
+      }
+      if (chunk === "VP8 ") {
+        return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+      }
+    }
+    if (format === "svg") {
+      const text = bytes.toString("utf8", 0, Math.min(bytes.length, 4096));
+      const tag = (text.match(/<svg\b[^>]*>/i) || [""])[0];
+      const attr = (name) => {
+        const m = tag.match(new RegExp(`\\s${name}=["']([\\d.]+)(px)?["']`, "i"));
+        return m ? Math.round(Number(m[1])) : undefined;
+      };
+      const box = (tag.match(/viewBox=["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i) || []);
+      const width = attr("width") ?? (box[1] ? Math.round(Number(box[1])) : undefined);
+      const height = attr("height") ?? (box[2] ? Math.round(Number(box[2])) : undefined);
+      return width && height ? { width, height } : {};
+    }
+  } catch {
+    // A truncated or odd header: the image is still served, just not sized.
+  }
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +199,8 @@ const astroPlugin = {
     });
 
     // An image (or any other file) a page imports is copied under `/_astro/`
-    // with a content hash, and the import answers `{ src }` — Astro's shape.
+    // with a content hash, and the import answers `{ src, width, height,
+    // format }` — Astro's shape, and what `<Image>` sizes from.
     build.onLoad(
       { filter: /\.(png|jpe?g|gif|webp|avif|svg|ico|pdf|mp4|webm|woff2?|ttf)$/i },
       async (args) => {
@@ -151,9 +209,10 @@ const astroPlugin = {
         const name = path.basename(args.path, ext).replace(/[^\w-]/g, "_");
         const url = `/_astro/${name}.${hash(bytes)}${ext.toLowerCase()}`;
         assets.set(args.path, url);
-        const format = ext.slice(1).toLowerCase();
+        const format = ext.slice(1).toLowerCase().replace("jpg", "jpeg");
+        const size = imageSize(bytes, format);
         return {
-          contents: `export default ${JSON.stringify({ src: url, format })};`,
+          contents: `export default ${JSON.stringify({ src: url, ...size, format })};`,
           loader: "js",
         };
       }
@@ -172,6 +231,7 @@ pages.forEach((file, i) => {
   imports.push(`import * as p${i} from ${JSON.stringify(spec)};`);
   routes.push(
     `{ file: ${JSON.stringify(file)}, module: p${i}, prerender: p${i}.prerender === true, ` +
+      `refresh: p${i}.prerender === true && p${i}.refresh === true, ` +
       `endpoint: ${!file.endsWith(".astro")} }`
   );
 });

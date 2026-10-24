@@ -20,15 +20,15 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## W2 — Speed and polish
 
-- [ ] W2.1 A render cache: key by path (and locale), record the tables a render read, and
+- [x] W2.1 A render cache: key by path (and locale), record the tables a render read, and
   invalidate on their write events. A page can opt out (`Astro.response.headers` `no-store`).
-- [ ] W2.2 Pass the request's cookies to the framework (`Astro.cookies.get`), excluding the
+- [x] W2.2 Pass the request's cookies to the framework (`Astro.cookies.get`), excluding the
   session and CSRF cookies.
-- [ ] W2.3 `500.astro` for a render error, with the error still raised as an `error` event.
-- [ ] W2.4 Image resizing (`<Image>` from `feldspar:components`), with `width`/`height` on an
+- [x] W2.3 `500.astro` for a render error, with the error still raised as an `error` event.
+- [x] W2.4 Image resizing (`<Image>` from `feldspar:components`), with `width`/`height` on an
   imported image.
-- [ ] W2.5 A preview/dev loop: rebuild on save from the IDE without a full `npm install` check.
-- [ ] W2.6 Rebuild a site's prerendered pages when a table they read changes (opt-in).
+- [x] W2.5 A preview/dev loop: rebuild on save from the IDE without a full `npm install` check.
+- [x] W2.6 Rebuild a site's prerendered pages when a table they read changes (opt-in).
 
 ## W3 — A/B optimisation of landing pages
 

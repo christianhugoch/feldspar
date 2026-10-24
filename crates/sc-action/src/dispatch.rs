@@ -503,6 +503,37 @@ impl TriggerDispatcher {
         application: Option<uuid::Uuid>,
         file_urls: Option<Arc<dyn crate::FileUrls>>,
     ) -> Result<Json> {
+        self.run_code_traced(
+            catalog,
+            action,
+            name,
+            code,
+            request,
+            caller,
+            application,
+            file_urls,
+            None,
+        )
+        .await
+    }
+
+    /// [`run_code`](TriggerDispatcher::run_code), recording into `trace` the
+    /// tables the body's `db` calls named and whether it wrote a row or ran a
+    /// trigger — what a cache of its answer needs to know (`sc_app`'s render
+    /// cache).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_code_traced(
+        &self,
+        catalog: &Catalog,
+        action: &str,
+        name: &str,
+        code: &str,
+        request: Attrs,
+        caller: Option<&CallerContext>,
+        application: Option<uuid::Uuid>,
+        file_urls: Option<Arc<dyn crate::FileUrls>>,
+        trace: Option<sc_expr::TraceSink>,
+    ) -> Result<Json> {
         let mut event = Event::new(EventKind::None);
         if let Some(caller) = caller {
             event = event.caused_by(caller);
@@ -518,6 +549,9 @@ impl TriggerDispatcher {
             .with_request(request)
             .with_application(application)
             .with_file_urls(file_urls);
+        if let Some(trace) = trace {
+            ctx = ctx.with_trace(trace);
+        }
         sc_catalog::with_origin(event.origin(), action.run(&mut ctx)).await
     }
 

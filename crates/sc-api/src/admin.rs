@@ -2097,6 +2097,7 @@ pub fn admin_endpoints() -> EndpointSet {
                 .param("id", ValueType::Uuid)
                 .lit("build"),
         )
+        .query([QueryParam::new("quick", ValueType::Bool)])
         .output(build_result_schema())
         // Tagged (§13.6) because of the one gap re-projection leaves: a schema
         // change rewrites an application's generated client but runs no bundler,

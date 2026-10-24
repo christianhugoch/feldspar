@@ -6324,7 +6324,11 @@ pub fn admin_handlers_with(
                 let app = load_application(&catalog, id)
                     .await?
                     .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
-                build_now(&catalog, &apps, app, String::new()).await
+                // `?quick=true` is the IDE's build on save (TODO-astro W2.5).
+                let quick = ctx
+                    .query_get("quick")
+                    .is_some_and(|q| q == "true" || q == "1");
+                build_now(&catalog, &apps, app, String::new(), quick).await
             }
         }
     });
@@ -6363,7 +6367,7 @@ pub fn admin_handlers_with(
                 } else {
                     format!("There was no {marker} to delete; installing.\n")
                 };
-                build_now(&catalog, &apps, app, log).await
+                build_now(&catalog, &apps, app, log, false).await
             }
         }
     });
@@ -10547,12 +10551,14 @@ fn refuse_self(ctx: &crate::handler::HandlerCtx, id: uuid::Uuid, verb: &str) -> 
 
 /// Build an application now and mount it, answering as `buildApplication`
 /// does, with `log` ahead of the build's own — Build's whole body, and the
-/// second half of Deep clean.
+/// second half of Deep clean. `quick` is the dev loop's build, which leaves the
+/// generated client as it is.
 async fn build_now(
     catalog: &Arc<Catalog>,
     apps: &Arc<AppMounts>,
     app: Application,
     mut log: String,
+    quick: bool,
 ) -> Result<HandlerResponse> {
     // Bring the generated code up to date first — the same call as
     // "Update client", so a project directory that was emptied is
@@ -10560,7 +10566,7 @@ async fn build_now(
     // build. (The build rewrites the generated files again on its
     // own; that is cheap, and it is what every other build path
     // relies on.) An app with nothing to build has no client.
-    let update = if sc_app::framework_factory(&app.framework.name).is_none() {
+    let update = if !quick && sc_app::framework_factory(&app.framework.name).is_none() {
         Some(update_app_client(catalog, &app, apps.triggers()).await?)
     } else {
         None
@@ -10568,7 +10574,7 @@ async fn build_now(
     // Build and mount live. A build failure propagates as an
     // Application error (§16) whose message is the bundler's own
     // diagnostics, and leaves any previously mounted version serving.
-    let report = build_and_mount(apps, app).await?;
+    let report = crate::apps::build_and_mount_with(apps, app, quick).await?;
     if let Some(update @ sc_app::ClientUpdate::Scaffolded(_)) = &update {
         // Only a scaffold is news: a regeneration is part of every
         // build, and saying so each time would bury the bundler's

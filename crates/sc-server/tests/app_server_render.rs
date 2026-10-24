@@ -13,7 +13,13 @@
 //! - `_server/` is never served, and an unknown path is the body's 404, not an
 //!   SPA fallback;
 //! - a form posts back with its CSRF field and gets the body's redirect;
-//! - prerendering writes the listed pages into the output and the bundle.
+//! - prerendering writes the listed pages into the output and the bundle, and
+//!   a refreshable one is rendered again after a table it read is written;
+//! - a rendered page is kept for the next visitor until a table it read is
+//!   written, and a page that is a visitor's own, or wrote, is not kept;
+//! - the request's own cookies reach the body, and the server's do not;
+//! - a failed render is the site's 500 page, raised as an `error` event;
+//! - `/_image` resizes an image the build wrote.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -41,9 +47,19 @@ const HOST: &str = "site.example.com";
 /// The code body, as `plugins/astro`'s build writes it: one function body that
 /// routes on `request` and answers `{ status, headers, body }`.
 const ENTRY: &str = r#"
-if (request.mode === "prerender-list") return { paths: ["/about"] };
-const html = (body, status = 200) =>
-  ({ status, headers: [["content-type", "text/html; charset=utf-8"]], body });
+if (request.mode === "prerender-list") return { paths: ["/about"], refresh: ["/about"] };
+if (request.mode === "error") {
+  return { status: 500, headers: [], body: "<h1>sorry: " + request.error + "</h1>" };
+}
+// `cache` is the runtime's word on whether another visitor may get this answer.
+const html = (body, status = 200, cache = true) =>
+  ({ status, headers: [["content-type", "text/html; charset=utf-8"]], body, cache });
+if (request.path === "/cookies") return html(JSON.stringify(request.cookies), 200, false);
+if (request.path === "/boom") throw new Error("the page fell over");
+if (request.path === "/visit") {
+  await db.visits.insert({ id: String(Math.random()) });
+  return html("<p>" + (await db.visits.count()) + " visits</p>");
+}
 if (request.path === "/posts") {
   const posts = await db.posts.orderBy("id").rows();
   return html("<ul>" + posts.map((p) => "<li>" + p.title + "</li>").join("") + "</ul>");
@@ -56,7 +72,7 @@ if (request.path === "/contact" && request.method === "POST") {
   return { status: 303, headers: [["location", "/contact?from=" + email]], body: "" };
 }
 if (request.path === "/contact") {
-  return html('<form method="post"><input name="_csrf" value="' + request.csrfToken + '"></form>');
+  return html('<form method="post"><input name="_csrf" value="' + request.csrfToken + '"></form>', 200, false);
 }
 return html("<h1>not found</h1>", 404);
 "#;
@@ -98,10 +114,18 @@ fn spec() -> BuildSpec {
     }
 }
 
+/// An 8×4 PNG, red.
+const PNG: [u8; 74] = [
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 4, 8, 2, 0,
+    0, 0, 60, 175, 233, 167, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 56, 33, 39, 135, 21, 49,
+    80, 79, 2, 0, 110, 254, 32, 129, 64, 71, 42, 1, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
 fn bundle() -> AssetBundle {
     AssetBundle::new()
         .with("index.html", "<!doctype html><h1>home</h1>")
         .with("_astro/site.abc123.css", "body{margin:0}")
+        .with("_astro/pic.abc123.png", PNG.to_vec())
         .with("_server/entry.js", ENTRY)
 }
 
@@ -129,6 +153,24 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<Server> {
                     .required()
                     .primary_key(),
                 DataField::plain("title", TypeRef::Basic(BasicType::Text)),
+            ],
+        )
+        .await?;
+    catalog
+        .create_table(
+            "visits",
+            &[DataField::plain("id", TypeRef::Basic(BasicType::Text))
+                .required()
+                .primary_key()],
+        )
+        .await?;
+    catalog
+        .create_table(
+            "journal",
+            &[
+                DataField::plain("id", TypeRef::Basic(BasicType::Int)).primary_key(),
+                DataField::plain("message", TypeRef::Basic(BasicType::Text)),
+                DataField::plain("route", TypeRef::Basic(BasicType::Text)),
             ],
         )
         .await?;
@@ -185,6 +227,25 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<Server> {
         dispatcher,
         app,
     })
+}
+
+impl Server {
+    /// Run `code` as a code action: a write through the row layer, which is
+    /// what a table's write event is raised from.
+    async fn code(&self, code: &str) -> sc_error::Result<serde_json::Value> {
+        self.dispatcher
+            .run_code(
+                &self.catalog,
+                "run_js_code",
+                "test",
+                code,
+                Attrs::new(),
+                None,
+                None,
+                None,
+            )
+            .await
+    }
 }
 
 struct Answer {
@@ -361,6 +422,29 @@ async fn prerendering_writes_the_listed_pages_through_the_same_body() -> sc_erro
         .await?;
     assert_eq!(&served.body[..], page.as_bytes());
 
+    // It says `refresh`: a write to the table it read renders it again on the
+    // next request, as the build did, and that is served until the next write.
+    assert!(report.bundle.get("_server/prerendered.json").is_some());
+    server
+        .code("await db.posts.insert({ id: 3, title: 'Three' });")
+        .await?;
+    let refreshed = framework
+        .handle(sc_app::AppRequest::get("/about"), &server.catalog)
+        .await?;
+    assert_eq!(
+        String::from_utf8_lossy(&refreshed.body),
+        "<h1>about 3 posts, prerender</h1>"
+    );
+    let tag = refreshed
+        .headers
+        .iter()
+        .find(|(k, _)| k == "etag")
+        .map(|(_, v)| v.clone())
+        .expect("a refreshed page has an etag");
+    let mut again = sc_app::AppRequest::get("/about");
+    again.headers.insert("if-none-match".to_owned(), tag);
+    assert_eq!(framework.handle(again, &server.catalog).await?.status, 304);
+
     // A build with no server to run the pages on skips the step and says so.
     let mut bare = report.clone();
     bare.stdout.clear();
@@ -501,5 +585,144 @@ for (const f of require(plugin).frameworks.astro.scaffold(ctx)) {
     assert!(
         String::from_utf8_lossy(&sitemap.body).contains("<loc>http://site.example.com/posts</loc>")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rendered_page_is_kept_until_a_table_it_read_is_written() -> sc_error::Result<()> {
+    let tmp = TempDir::new("cache");
+    let server = setup(&tmp).await?;
+    let hit = |answer: &Answer| answer.headers.get("x-render-cache").is_some();
+
+    let first = get(&server.router, "/posts").await;
+    assert_eq!(first.body, "<ul><li>Hello</li><li>World</li></ul>");
+    assert!(!hit(&first));
+    let second = get(&server.router, "/posts").await;
+    assert!(hit(&second), "the second visitor gets the kept page");
+    assert_eq!(second.body, first.body);
+    assert_eq!(second.headers[header::CACHE_CONTROL], "private, no-cache");
+
+    // A write to a table the page read drops it; the next render shows it.
+    server
+        .code("await db.posts.insert({ id: 3, title: 'Again' });")
+        .await?;
+    let third = get(&server.router, "/posts").await;
+    assert!(!hit(&third));
+    assert_eq!(
+        third.body,
+        "<ul><li>Hello</li><li>World</li><li>Again</li></ul>"
+    );
+    // A write to a table it did not read leaves it.
+    server
+        .code("await db.journal.insert({ id: 9, message: 'x' });")
+        .await?;
+    assert!(hit(&get(&server.router, "/posts").await));
+
+    // A query is part of what was asked.
+    assert!(!hit(&get(&server.router, "/posts?page=2").await));
+
+    // The visitor's own page (its CSRF token) is never kept.
+    get(&server.router, "/contact").await;
+    assert!(!hit(&get(&server.router, "/contact").await));
+
+    // Nor is a render that wrote: each visit must run.
+    let one = get(&server.router, "/visit").await;
+    let two = get(&server.router, "/visit").await;
+    assert!(!hit(&two));
+    assert_ne!(one.body, two.body, "{} / {}", one.body, two.body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_page_sees_the_requests_cookies_but_not_the_servers() -> sc_error::Result<()> {
+    let tmp = TempDir::new("cookies");
+    let server = setup(&tmp).await?;
+    let request = Request::builder()
+        .uri("/cookies")
+        .header(header::HOST, HOST)
+        .header(
+            header::COOKIE,
+            format!("theme=dark; sc_session=secret; {CSRF_COOKIE}=token; sc_guest=g"),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let answer = send(&server.router, request).await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(answer.body, r#"{"theme":"dark"}"#);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_render_is_the_500_page_and_still_an_error_event() -> sc_error::Result<()> {
+    let tmp = TempDir::new("error");
+    let server = setup(&tmp).await?;
+    sc_action::save_trigger(
+        &server.catalog,
+        &server.dispatcher.registry(),
+        &sc_action::Trigger::new("on_error", sc_action::EventKind::Error, "insert_row")
+            .config("table", "journal")
+            .config(
+                "values",
+                serde_json::json!({ "id": "1", "message": "payload.message", "route": "payload.path" }),
+            ),
+    )
+    .await?;
+    server.dispatcher.reload(&server.catalog).await?;
+
+    let answer = get(&server.router, "/boom").await;
+    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        answer.body.starts_with("<h1>sorry: ") && answer.body.contains("the page fell over"),
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.headers[header::CACHE_CONTROL], "no-store");
+    let journal = server.code("return await db.journal.rows();").await?;
+    assert_eq!(journal[0]["route"], "/boom", "{journal}");
+    assert!(
+        journal[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the page fell over")),
+        "{journal}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_image_the_build_wrote_is_resized_once_and_kept() -> sc_error::Result<()> {
+    let tmp = TempDir::new("image");
+    let server = setup(&tmp).await?;
+    let answer = get(&server.router, "/_image?src=%2F_astro%2Fpic.abc123.png&w=4").await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(answer.headers[header::CONTENT_TYPE], "image/png");
+    assert!(
+        answer.headers[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    // Not the bytes as text: a PNG header says its size, 4×2.
+    let response = server
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_image?src=%2F_astro%2Fpic.abc123.png&w=4")
+                .header(header::HOST, HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let side = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    assert_eq!((side(16), side(20)), (4, 2));
+
+    let elsewhere = get(&server.router, "/_image?src=%2Ffavicon.png&w=4").await;
+    assert_eq!(elsewhere.status, StatusCode::BAD_REQUEST);
+    let missing = get(&server.router, "/_image?src=%2F_astro%2Fnope.png&w=4").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
     Ok(())
 }

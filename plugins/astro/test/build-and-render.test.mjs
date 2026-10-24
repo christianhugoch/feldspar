@@ -78,6 +78,18 @@ function fakeDb(tables) {
   return { db: new Proxy({ table }, { get: (t, k) => (k in t ? t[k] : table(k)) }), asked };
 }
 
+/** The smallest PNG header that says `width`×`height` (the build reads only
+ * the header to size an import). */
+function png(width, height) {
+  const out = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(out, 0);
+  out.writeUInt32BE(13, 8);
+  out.write("IHDR", 12, "ascii");
+  out.writeUInt32BE(width, 16);
+  out.writeUInt32BE(height, 20);
+  return out;
+}
+
 let body;
 const run = (request, { db, user = null, trigger = {} } = {}) => {
   const AsyncFunction = (async () => {}).constructor;
@@ -121,7 +133,58 @@ if (!post) return Astro.redirect("/404", 302);
       path: "src/pages/_draft.astro",
       contents: "<p>not a route</p>",
     },
+    {
+      path: "src/pages/theme.astro",
+      contents: `---
+const theme = Astro.cookies.get("theme")?.value ?? "light";
+---
+<p class="theme">{theme}</p>`,
+    },
+    {
+      path: "src/pages/fresh.astro",
+      contents: `---
+Astro.response.headers.set("cache-control", "no-store");
+---
+<p>always fresh</p>`,
+    },
+    {
+      path: "src/pages/broken.astro",
+      contents: `---
+throw new Error("the database is on fire");
+---
+<p>never</p>`,
+    },
+    {
+      path: "src/pages/500.astro",
+      contents: `---
+const { error } = Astro.props;
+---
+<h1>Something went wrong</h1><p class="why">{error.message}</p>`,
+    },
+    {
+      path: "src/pages/latest.astro",
+      contents: `---
+export const prerender = true;
+export const refresh = true;
+const posts = await db.posts.rows();
+---
+<p>{posts.length} posts</p>`,
+    },
+    {
+      path: "src/pages/gallery.astro",
+      contents: `---
+import { Image } from "feldspar:components";
+import hero from "../hero.png";
+---
+<Image src={hero} alt="A hero" width={20} />
+<Image src={hero} alt="" widths={[10, 20, 400]} sizes="50vw" format="webp" />
+<Image src={hero} alt="Square" width={10} height={10} />
+<Image src={hero} alt="Original" />
+<Image src="/logo.svg" alt="Logo" width={32} height={32} />`,
+    },
   ]);
+  // A 40×20 PNG, as the gallery imports it.
+  fs.writeFileSync(path.join(project, "src/hero.png"), png(40, 20));
   const shared = process.env.SC_ASTRO_NODE_MODULES;
   if (shared) fs.symlinkSync(shared, path.join(project, "node_modules"), "dir");
   else execFileSync("npm", ["install", "--no-audit", "--no-fund"], { cwd: project, stdio: "inherit" });
@@ -216,7 +279,8 @@ test("endpoints, the sitemap, robots.txt and the 404 page", async () => {
 test("prerendering: the build is asked which pages, then renders each", async () => {
   const { db } = fakeDb({ posts });
   const list = await run({ mode: "prerender-list" }, { db });
-  assert.deepEqual(list.paths.sort(), ["/", "/404"]);
+  assert.deepEqual(list.paths.sort(), ["/", "/404", "/latest"]);
+  assert.deepEqual(list.refresh, ["/latest"], "only the page that says refresh");
   const index = await run({ mode: "prerender", path: "/" }, { db, user: { id: 7 } });
   assert.equal(index.status, 200);
   assert.match(index.body, /Rockets, fast\./);
@@ -238,4 +302,64 @@ import Counter from "../components/Feature.astro";
   body = fs.readFileSync(path.join(project, "dist/_server/entry.js"), "utf8");
   await assert.rejects(run({ path: "/island" }, fakeDb({})), /islands .* are not supported/);
   fs.rmSync(path.join(project, "src/pages/island.astro"));
+});
+
+test("the render cache: an answer says whether another visitor may be given it", async () => {
+  const { db } = fakeDb({ posts });
+  const shared = await run({ path: "/posts" }, { db });
+  assert.equal(shared.cache, true, "a page of rows is the same for everybody");
+  const form = await run({ path: "/contact", csrfToken: "tok" }, { db });
+  assert.equal(form.cache, false, "a page with this browser's CSRF token is not");
+  const optedOut = await run({ path: "/fresh" }, { db });
+  assert.equal(optedOut.cache, false, "Cache-Control: no-store opts out");
+  assert.deepEqual(optedOut.headers.find(([k]) => k === "cache-control"), ["cache-control", "no-store"]);
+  const missing = await run({ path: "/no/such/page" }, { db });
+  assert.equal(missing.cache, true, "the 404 page is shared too");
+  const redirect = await run({ path: "/blog/nope" }, { db });
+  assert.notEqual(redirect.cache, true, "a redirect is not kept");
+});
+
+test("cookies reach Astro.cookies, and reading one makes the page the visitor's", async () => {
+  const { db } = fakeDb({});
+  const dark = await run({ path: "/theme", cookies: { theme: "dark" } }, { db });
+  assert.match(dark.body, /<p class="theme[^"]*">dark<\/p>/);
+  assert.equal(dark.cache, false);
+  const none = await run({ path: "/theme" }, { db });
+  assert.match(none.body, />light<\/p>/);
+});
+
+test("a render error is answered by 500.astro, given the error", async () => {
+  const { db } = fakeDb({});
+  await assert.rejects(run({ path: "/broken" }, { db }), /the database is on fire/);
+  const page = await run({ mode: "error", path: "/broken", error: "the database is on fire" }, { db });
+  assert.equal(page.status, 500);
+  assert.equal(page.cache, false);
+  assert.match(page.body, /Something went wrong/);
+  assert.match(page.body, /the database is on fire/);
+  const list = await run({ mode: "prerender-list" }, { db });
+  assert.ok(!list.paths.includes("/500"), "the 500 page is never a file");
+});
+
+test("<Image>: an imported image carries its size, and variants point at /_image", async () => {
+  const { db } = fakeDb({});
+  const out = await run({ path: "/gallery" }, { db });
+  assert.equal(out.status, 200, out.body);
+  const imgs = out.body.match(/<img[^>]*>/g);
+  assert.equal(imgs.length, 5, out.body);
+  const [resized, srcset, square, original, remote] = imgs;
+  assert.match(resized, /src="\/_image\?src=%2F_astro%2Fhero\.[0-9a-f]{10}\.png&amp;w=20"/);
+  assert.match(resized, /width="20" height="10"/, "the height follows the aspect ratio");
+  assert.match(resized, /alt="A hero" loading="lazy" decoding="async"/);
+  assert.match(srcset, /srcset="[^"]*&amp;w=10&amp;f=webp 10w, [^"]*&amp;w=20&amp;f=webp 20w, [^"]*&amp;w=40&amp;f=webp 40w"/, "never larger than the image");
+  assert.match(srcset, /sizes="50vw"/);
+  assert.match(square, /&amp;w=10&amp;h=10"/);
+  assert.match(square, /width="10" height="10"/);
+  assert.match(original, /src="\/_astro\/hero\.[0-9a-f]{10}\.png" width="40" height="20"/, "unchanged is the original");
+  assert.match(remote, /src="\/logo\.svg" width="32" height="32"/);
+
+  write([{ path: "src/pages/noalt.astro", contents: `---\nimport { Image } from "feldspar:components";\nimport hero from "../hero.png";\n---\n<Image src={hero} />` }]);
+  execFileSync("npm", ["run", "build"], { cwd: project, stdio: "pipe" });
+  body = fs.readFileSync(path.join(project, "dist/_server/entry.js"), "utf8");
+  await assert.rejects(run({ path: "/noalt" }, { db }), /<Image> needs an `alt`/);
+  fs.rmSync(path.join(project, "src/pages/noalt.astro"));
 });

@@ -1218,6 +1218,17 @@ impl sc_action::TriggerObserver for AppMounts {
 /// runs to completion before anything is mounted, so an `Err` here — carrying the
 /// bundler's own diagnostics (§16) — never disturbs what is already up.
 pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_app::BuildReport> {
+    build_and_mount_with(apps, app, false).await
+}
+
+/// [`build_and_mount`], or with `quick` the dev loop's build
+/// ([`sc_app::build_application_quick`]): no install, no regenerated client, no
+/// prerendering — what the IDE runs on save.
+pub async fn build_and_mount_with(
+    apps: &AppMounts,
+    app: Application,
+    quick: bool,
+) -> Result<sc_app::BuildReport> {
     let catalog = apps.catalog().ok_or_else(|| {
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
@@ -1238,7 +1249,11 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
         });
     }
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(catalog, &app, &source, apps.triggers()).await?;
+    let report = if quick {
+        sc_app::build_application_quick(catalog, &app, &source, apps.triggers()).await?
+    } else {
+        build_application(catalog, &app, &source, apps.triggers()).await?
+    };
     // The build step travels onto the mounted framework, as
     // [`sc_app::build_code_framework`] already does it: `Framework::build()` is
     // how the rest of the process asks "is this application served from a bundle

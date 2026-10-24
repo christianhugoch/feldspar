@@ -98,9 +98,10 @@ pub use applications::{
 pub use build::{
     AppSource, BuildReport, TargetInfo, TargetReadiness, TargetReport, app_output_dir,
     app_source_from_config, app_source_in, app_target_readiness, app_target_spec, build_app,
-    build_application, build_application_if_changed, build_application_target,
-    build_code_framework, emit_app_client, emit_client, framework_build_targets, load_app_bundle,
-    remove_app_dependencies, remove_dependencies, require_target_ready, run_build, target_log_path,
+    build_application, build_application_if_changed, build_application_quick,
+    build_application_target, build_code_framework, emit_app_client, emit_client,
+    framework_build_targets, load_app_bundle, remove_app_dependencies, remove_dependencies,
+    require_target_ready, run_build, target_log_path,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, HTTP_NAME_WEB, TRAIT_CFG_APPLICATION,

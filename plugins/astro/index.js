@@ -536,7 +536,24 @@ Everything a visitor sees is rendered on the server.
   once, after the build, into a static file. Use it for every page that shows no
   live data. A dynamic route (\`[slug].astro\`) that prerenders exports
   \`getStaticPaths()\`, which may read \`db\` too.
-- **Everything else renders per request**, so it is always current.
+- **Refreshing a prerendered page**: add \`export const refresh = true\` beside
+  \`prerender\`, and the page is rendered again whenever a table it read is
+  written — a blog index that is a file, and still shows the new post.
+- **Everything else renders per request**, so it is always current. A page
+  rendered for a signed-out visitor is **kept** and served to the next one,
+  until a table it read is written (or ten minutes pass). A page that reads a
+  cookie, a request header or the CSRF token is never kept, nor is one that
+  writes a row. To opt a page out, set
+  \`Astro.response.headers.set("cache-control", "no-store")\`.
+- **Cookies**: \`Astro.cookies.get("name")\` reads the visitor's cookies — all
+  but the server's own session and CSRF cookies.
+- **Errors**: a page that throws is answered by \`src/pages/500.astro\`, if
+  there is one, with the error as \`Astro.props.error\` (show its \`message\`
+  at most). The failure is still raised as an \`error\` event.
+- **Images**: \`import hero from "../assets/hero.jpg"\` gives
+  \`{ src, width, height }\`, and \`<Image src={hero} alt="…" width={600} />\`
+  from \`feldspar:components\` serves it resized (\`format\`, \`quality\`,
+  \`widths\` and \`sizes\` too). Images are never enlarged.
 - **Forms** post back to their page as \`application/x-www-form-urlencoded\` and
   must include \`<Csrf />\` from \`feldspar:components\`. See
   \`src/pages/contact.astro\`.
@@ -603,17 +620,33 @@ declare module "*.astro" {
   export default Component;
 }
 
+/** An imported image: its URL, and its size when the build could read it. */
+type ImageMetadata = { src: string; width?: number; height?: number; format: string };
+
 declare module "feldspar:components" {
   /** The hidden \`_csrf\` field a form posting back to a page must carry. */
   export const Csrf: any;
+  /** An image resized on the server: \`<Image src={imported} alt="…" width={400} />\`. */
+  export const Image: (props: {
+    src: ImageMetadata | string;
+    alt: string;
+    width?: number;
+    height?: number;
+    format?: "webp" | "png" | "jpeg";
+    quality?: number;
+    widths?: number[];
+    sizes?: string;
+    [attribute: string]: unknown;
+  }) => any;
 }
 
-declare module "*.png" { const image: { src: string; format: string }; export default image; }
-declare module "*.jpg" { const image: { src: string; format: string }; export default image; }
-declare module "*.jpeg" { const image: { src: string; format: string }; export default image; }
-declare module "*.webp" { const image: { src: string; format: string }; export default image; }
-declare module "*.avif" { const image: { src: string; format: string }; export default image; }
-declare module "*.svg" { const image: { src: string; format: string }; export default image; }
+declare module "*.png" { const image: ImageMetadata; export default image; }
+declare module "*.jpg" { const image: ImageMetadata; export default image; }
+declare module "*.jpeg" { const image: ImageMetadata; export default image; }
+declare module "*.gif" { const image: ImageMetadata; export default image; }
+declare module "*.webp" { const image: ImageMetadata; export default image; }
+declare module "*.avif" { const image: ImageMetadata; export default image; }
+declare module "*.svg" { const image: ImageMetadata; export default image; }
 `;
 
 function runtimeReadme(ctx) {

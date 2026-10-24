@@ -69,8 +69,9 @@ pub use code::{
     DEFAULT_MAX_TRIGGER_RUNS, DocRequest, FETCH_MARGIN, FetchHost, FileHost, LiveHost, LiveTopics,
     MAX_CODE_TIMEOUT, MAX_CONSOLE_LINES, MAX_LIVE_PUBLISHES, MIN_FETCH_WINDOW,
     MIN_MODULE_FN_WINDOW, MIN_TRIGGER_WINDOW, MODULE_FN_MARGIN, ModuleFnArg, ModuleFnHost,
-    ModuleFnHosts, ModuleFunction, PYTHON, SchemaSnapshot, TRIGGER_MARGIN, TriggerHost, V1_API_JS,
-    console_sink, document_request, set_isolate_prime, take_console,
+    ModuleFnHosts, ModuleFunction, PYTHON, RunTrace, SchemaSnapshot, TRIGGER_MARGIN, TraceSink,
+    TriggerHost, V1_API_JS, console_sink, document_request, read_trace, set_isolate_prime,
+    take_console, trace_sink,
 };
 pub use code_library::{CodeLibraries, check_code_library, imported_libraries};
 pub use code_reply::{

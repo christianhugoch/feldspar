@@ -6220,12 +6220,54 @@ pages are written, and cannot run anything); a generated `/sitemap.xml` (static 
 built from the framework's `site` setting (or the request's origin); forms that post back to
 their page with `<Csrf />` from `feldspar:components` and redirect after the write.
 
-**Not done yet.** A render cache: today every non-prerendered request runs the body. The body
-already reports which tables it read (every read is a `db` plan), so a cache keyed by path and
-invalidated by those tables' write events is the natural next step, and it would make "rebuild
-to refresh a prerendered page" unnecessary for most sites. Also: images are copied, not resized
-(no `<Image>`); a render error is answered by the router's generic error response, not
-`500.astro`; cookies are not passed in, so `Astro.cookies.get` sees only what the page set.
+**The render cache** (`server_render::cache`). A rendered page is kept, keyed by origin, path,
+query and locale, with the tables its render read, and dropped when one of them is written. The
+read set is the host's, not the page's: `TriggerDispatcher::run_code_traced` hands the run a
+`sc_expr::TraceSink`, and the isolate records every table a `db` plan names (and whether the
+run wrote a row or ran a trigger) as the calls happen. The set is closed over keys — a table a
+read table reaches through a key field, and a table with a key into a read table, since a
+Ⱶ-path or a child aggregation reads those. Writes arrive on the catalog's emit seam through one
+process-wide listener (`render_cache`) that holds each site's cache weakly, so a remount needs
+no unregistering. What is kept is narrow on purpose: an **anonymous `GET`** only, an answer the
+runtime marks shareable (it read no cookie, no request header, no CSRF token, and did not say
+`no-store` or `private`), from a run with no side effects, a 200 or 404, at most ten minutes
+old (a `fetch` or the clock is not a table), 1000 pages a site. A render that overlapped a write
+is not stored. Writes outside the row layer — raw SQL, another process — are not seen; the ten
+minutes bound that.
+
+**Refreshable prerendered pages.** `export const refresh = true` beside `prerender = true` puts
+the page in `_server/prerendered.json`. The mount treats each such page as stale (a boot cannot
+know what was written since the build), renders it on its next request exactly as the build did
+— no user, no cookies — keeps that render in memory with its read set, and serves it as a file
+with an ETag until one of those tables is written. Rendering on the next request rather than at
+the write keeps the writer's request free of a page render, and a site nobody visits costs
+nothing.
+
+**Cookies** reach the body as `request.cookies` (`AppRequest::cookies`): every cookie but the
+server's own (`sc_*` and the shared session cookie), which are credentials a page must not be
+able to echo. Reading one makes the page unshareable.
+
+**`500.astro`.** A render that fails with anything but a deliberate `httpError` is rendered
+again in `mode: "error"`, which answers the site's 500 page with `Astro.props.error`. Because the
+router then sees a success, the framework raises the `error` event itself, with the same
+payload `error_out` would have given it; with no 500 page, or one that fails too, the original
+error goes to the router as before, which raises it once.
+
+**Images** (`server_render::images`). The build reads an imported image's size from its header,
+so the import is Astro's `{ src, width, height, format }`. `<Image>` from `feldspar:components`
+computes the box (never larger than the image) and points at `/_image?src=/_astro/…&w=…`, which
+the framework answers in Rust with the `image` crate: decoded with limits, resized (cropped to
+fill when both sides are given), encoded as PNG, JPEG or (lossless) WebP, and kept — 32 sizes of
+one image and 64 MB a site at most. Only a file under `/_astro/` can be resized: the build put it
+there and its name is its content hash, so a variant is cached `immutable`, and nobody can point
+the resizer anywhere else. Resizing at request time rather than build time is what lets a
+server-rendered page choose a size from data.
+
+**The dev loop.** `buildApplication?quick=true` (`sc_app::build_application_quick`) is the
+bundler alone: no install step, no regenerated client, no prerendering (those pages render per
+request until the next full build); with no dependencies installed yet it is a full build. The
+IDE's **Build on save** switch runs it for the application whose source holds the saved file,
+once per burst of saves and never two at a time.
 
 ##### Designed for later: A/B optimisation of landing pages
 
@@ -6253,11 +6295,12 @@ How it fits what exists:
   of the control and no client-side testing script. `<Optimise>` renders one of its `<Variant>`
   slots; the runtime already gives a component the per-request `result`, which is where the
   choice is made and remembered for the rest of the page.
-- **Stable assignment** needs a visitor id. The router passes no cookies to a framework today
-  (`AppRequest` carries headers only, by design), so this needs one small addition: an anonymous
-  visitor cookie the router reads and hands over (the guest-session cookie of TODO-payments P1.5
-  is the precedent), and `Astro.cookies` already writes `Set-Cookie`. Assignment is
-  `hash(visitor, experiment) → arm`, so it needs no write per page view.
+- **Stable assignment** needs a visitor id. The router hands a framework the application's own
+  cookies (`AppRequest::cookies`), but a visitor id must be the server's, so this needs one small
+  addition: an anonymous `sc_*` visitor cookie the router mints, reads and hands over on its own
+  (the guest-session cookie of TODO-payments P1.5 is the precedent). Assignment is
+  `hash(visitor, experiment) → arm`, so it needs no write per page view. A page that reads it is
+  per visitor, so the render cache leaves it alone.
 - **Exposure and conversion are events**, recorded into two tables the module declares
   (`tables: [...]`, Step 7 of the modules tutorial): an exposure when a page renders a variant,
   a conversion when a `<Goal>` is reached. `<Goal>` wraps a link or a form: a link goes through a

@@ -190,8 +190,23 @@ To send an email instead of (or as well as) storing the message, make an insert 
   `<script is:inline>` is **blocked** by the site's Content-Security-Policy unless you loosen
   `script-src` on the application.
 - **Images**: put them in `public/` and refer to them as `/hero.png`, or import one in a
-  frontmatter (`import hero from "../assets/hero.png"`) and use `hero.src` — it is copied under
-  `/_astro/` with a hash in its name. Images are not resized.
+  frontmatter (`import hero from "../assets/hero.png"`) — it is copied under `/_astro/` with a
+  hash in its name, and the import is `{ src, width, height, format }`. To serve it resized, use
+  `<Image>`:
+
+  ```astro
+  ---
+  import { Image } from "feldspar:components";
+  import hero from "../assets/hero.jpg";
+  ---
+  <Image src={hero} alt="The team at work" width={800} />
+  <Image src={hero} alt="" widths={[400, 800, 1200]} sizes="100vw" format="webp" />
+  ```
+
+  Give a `width` or a `height` (the other follows the image's proportions) or both (the image is
+  cropped to fill). `alt` is required: write `alt=""` for decoration. The server resizes each
+  size once, on first request, and browsers keep it for good. Images are never enlarged, and an
+  SVG is used as it is.
 - **Endpoints**: `src/pages/rss.xml.ts` exporting `async function GET()` that returns a
   `Response` answers `/rss.xml`.
 - A file or directory whose name starts with `_` in `src/pages` is not a route.
@@ -207,16 +222,34 @@ Saltcorn uses Astro's **compiler**, not Astro. So:
 | Markdown/MDX pages, content collections | not supported; keep content in a table |
 | `output: "static"` (prerender by default) | the opposite: **per request** by default, `prerender = true` to opt in |
 | `Astro.url` is a `URL` | an object with `origin`, `pathname`, `search`, `searchParams`, `href` — the server has no `URL` class |
-| `Astro.cookies.get` reads the request's cookies | sees only cookies the page itself set |
-| `<Image />`, `astro:assets` | not yet |
+| `Astro.cookies.get` reads the request's cookies | the same, except the server's own session and CSRF cookies |
+| `<Image />` from `astro:assets` | `<Image />` from `feldspar:components`; no `<Picture />`, no remote images resized |
+| `src/pages/500.astro` | the same: a page that throws is answered with it, and `Astro.props.error` is the error |
 
 ## Speed and search engines
 
 - Prerendered pages and everything in `public/` and `/_astro/` are served as files, with ETags;
   hashed files are cached by browsers indefinitely.
+- **A prerendered page can stay current**: `export const refresh = true` beside
+  `export const prerender = true` renders it again the first time it is asked for after a
+  table it read was written. A blog index can be a file and still show the new post.
+- **The render cache.** A page rendered for a signed-out visitor is kept and given to the next
+  one until a table it read is written, so a busy page runs its frontmatter once per change
+  rather than once per visit. The server knows which tables a page read because every `db` call
+  goes through it. A page is not kept when it reads a cookie, a request header or the CSRF
+  token (a form page), when it writes a row or runs a trigger, or when it says
+  `Astro.response.headers.set("cache-control", "no-store")` — which is how to opt out a page
+  that shows something no table holds, like the result of a `fetch`. Nothing is kept longer
+  than ten minutes.
 - Per-request pages are sent `Cache-Control: private, no-cache` unless the page says otherwise,
   because they may carry the visitor's CSRF token. A page that is the same for everyone can
   say so: `Astro.response.headers.set("cache-control", "public, max-age=60")`.
+- **Errors.** Add `src/pages/500.astro` to answer a page that fails with your own layout. It
+  gets the error as `Astro.props.error`; show its `message` at most. The failure is still
+  raised as an `error` event, so a trigger that alerts on errors still hears about it.
+- **Build on save.** In the IDE, the **Build on save** switch in the status bar runs a quick
+  build whenever you save a file of the site: the bundler only, with no install and no
+  prerendering (those pages render per request until the next full Build).
 - The scaffolded layout writes the title, description, canonical link and Open Graph tags from
   each page's props. Give every page a `title` and a `description`.
 - Each page runs within a code action's limits (5 s, and its call budget). A page making dozens

@@ -212,6 +212,9 @@ pub struct Hosts<'a> {
     /// capability: every body has a console, and this is only whether anybody
     /// is reading it.
     console: Option<ConsoleSink>,
+    /// Where this run records what it touched, when the context wants it (a
+    /// render cache).
+    trace: Option<sc_expr::TraceSink>,
     /// The code libraries this run's `lib()` may import (TODO F3.2).
     libraries: Option<Arc<sc_expr::CodeLibraries>>,
     /// Where this run's `ratelimit` counts (TODO F4.5): its application, or
@@ -298,6 +301,7 @@ impl<'a> Hosts<'a> {
             live: ctx.catalog.live_host(),
             // Whoever asked for the transcript, if anyone did.
             console: ctx.console().cloned(),
+            trace: ctx.trace().cloned(),
             // What `lib()` may import (TODO F3.2): the application's libraries
             // over the instance's for a custom query, the instance's alone for
             // a trigger.
@@ -347,6 +351,7 @@ impl<'a> Hosts<'a> {
             live: surfaces.live,
             schema: self.schema(),
             console: self.console.clone(),
+            trace: self.trace.clone(),
             timeout,
             libraries: self.libraries.clone(),
             ratelimit_scope: self.ratelimit_scope.clone(),

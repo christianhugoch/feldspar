@@ -160,6 +160,7 @@ export type CreateApplicationResponse = { id: string; name: string; description:
 export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string };
 export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string> } }> };
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
+export type BuildApplicationQuery = { quick?: boolean };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type DeepCleanApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type BuildApplicationTargetResponse = { target: string; label: string; status: string; store: string; log_path: string; started_at: string; finished_at?: string | null; artifact?: string | null; size?: number | null; log?: string | null; error?: string | null };
@@ -529,7 +530,7 @@ export interface ApiClient {
   createApplication(body: CreateApplicationRequest): Promise<CreateApplicationResponse>;
   updateApplication(id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse>;
   deleteApplication(id: string): Promise<DeleteApplicationResponse>;
-  buildApplication(id: string): Promise<BuildApplicationResponse>;
+  buildApplication(id: string, query?: BuildApplicationQuery): Promise<BuildApplicationResponse>;
   deepCleanApplication(id: string): Promise<DeepCleanApplicationResponse>;
   buildApplicationTarget(id: string, target: string): Promise<BuildApplicationTargetResponse>;
   runApplicationTargetOperation(id: string, target: string, operation: string, body: RunApplicationTargetOperationRequest): Promise<RunApplicationTargetOperationResponse>;
@@ -1613,8 +1614,11 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("deleteApplication", res);
       return (await res.json()) as DeleteApplicationResponse;
     },
-    async buildApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build`, {
+    async buildApplication(id, query) {
+      const search = new URLSearchParams();
+      if (query?.quick !== undefined && query?.quick !== null) search.append("quick", String(query?.quick));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build${qs ? `?${qs}` : ""}`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });

@@ -53,6 +53,10 @@ pub struct AppRequest {
     /// The headers a framework may read, lower-cased — `referer`,
     /// `x-requested-with`, `accept`. Not every header: a cookie is the router's.
     pub headers: BTreeMap<String, String>,
+    /// The request's cookies **the application owns** — every cookie but the
+    /// server's own (`sc_*`: the session, the CSRF token, the guest session),
+    /// which stay the router's. What `Astro.cookies.get` reads.
+    pub cookies: BTreeMap<String, String>,
     /// Who is looking, from the application's session; `None` for nobody.
     pub user: Option<User>,
     /// The application's own origin, `https://books.example.com` — v1's
@@ -96,6 +100,7 @@ impl AppRequest {
             query: BTreeMap::new(),
             body: RequestBody::Empty,
             headers: BTreeMap::new(),
+            cookies: BTreeMap::new(),
             user: None,
             base_url: String::new(),
             csrf_token: String::new(),
