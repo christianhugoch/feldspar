@@ -191,7 +191,8 @@ pub use security::{
 };
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{
-    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, GUEST_COOKIE, PREVIEW_COOKIE, SESSION_COOKIE,
+    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, GUEST_COOKIE, PREVIEW_COOKIE,
+    SESSION_COOKIE, VISITOR_COOKIE,
 };
 pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};

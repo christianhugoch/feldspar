@@ -49,6 +49,12 @@ pub const GUEST_COOKIE: &str = "sc_guest";
 /// previews whether or not it is signed in (see
 /// [`AppMounts::allow_preview_token`](crate::AppMounts::allow_preview_token)).
 pub const PREVIEW_COOKIE: &str = "sc_preview";
+/// Name of the **anonymous visitor** cookie (TODO-astro W3.1): a random id an
+/// A/B test on a server-rendered site assigns its variant by. The application's
+/// own (its host only), set only by a response that used it, and kept a year.
+pub const VISITOR_COOKIE: &str = "sc_visitor";
+/// How long the visitor cookie lasts, in days.
+pub const VISITOR_COOKIE_DAYS: i64 = 365;
 /// Name of the CSRF double-submit cookie (readable by the SPA), and the header a
 /// mutating request must echo it in.
 ///
@@ -299,6 +305,39 @@ pub fn builder_content_security_policy(application_origin: Option<&str>) -> Stri
 /// A fresh, unguessable CSRF token (256 bits from two v4 UUIDs, hex-encoded).
 pub(crate) fn new_csrf_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// The visitor id a request carries in [`VISITOR_COOKIE`], when it is one this
+/// server could have minted (32 lower-case hex digits); anything else is
+/// treated as no cookie, so a page never sees a value a visitor made up the
+/// shape of.
+pub(crate) fn visitor_id(jar: &CookieJar) -> Option<String> {
+    let value = jar.get(VISITOR_COOKIE)?.value();
+    (value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then(|| value.to_owned())
+}
+
+/// A new visitor id.
+pub(crate) fn new_visitor_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+/// The cookie that keeps a newly minted visitor id: `HttpOnly`, the host's own,
+/// a year long, and `SameSite=Lax` rather than `Strict` — a visitor arriving
+/// from a search result or an advert is exactly the one an A/B test must
+/// recognise on their next page.
+pub(crate) fn visitor_cookie(id: String, secure: bool) -> Cookie<'static> {
+    let mut cookie = Cookie::build((VISITOR_COOKIE, id))
+        .path("/")
+        .same_site(SameSite::Lax)
+        .http_only(true)
+        .secure(secure)
+        .build();
+    cookie.set_max_age(time::Duration::days(VISITOR_COOKIE_DAYS));
+    cookie
 }
 
 /// Build a cookie with the shared security attributes.

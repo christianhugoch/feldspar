@@ -56,22 +56,51 @@ function write(files) {
   }
 }
 
-/** A `db` that answers rows of `tables` and records what was asked. */
+/** A `db` that answers rows of `tables` and records what was asked. Writes
+ * go into `tables` too, and `groupBy(...).aggregate({ n: "count()", s:
+ * "sum(f)" })` groups, which is what the A/B runtime asks. */
 function fakeDb(tables) {
   const asked = [];
-  const table = (name, conds = []) => {
+  let ids = 0;
+  const table = (name, conds = [], group = null, agg = null) => {
     const matching = () =>
       (tables[name] || []).filter((row) => conds.every((c) => Object.entries(c).every(([k, v]) => row[k] === v)));
+    const grouped = () => {
+      const out = new Map();
+      for (const row of matching()) {
+        const key = row[group];
+        const acc = out.get(key) || { [group]: key };
+        for (const [alias, spec] of Object.entries(agg)) {
+          const [, fn, arg] = spec.match(/^(\w+)\((\w*)\)$/);
+          acc[alias] = (acc[alias] || 0) + (fn === "count" ? 1 : Number(row[arg]) || 0);
+        }
+        out.set(key, acc);
+      }
+      return [...out.values()];
+    };
     const chain = {
-      where: (c) => table(name, [...conds, c]),
+      where: (c) => table(name, [...conds, c], group, agg),
+      groupBy: (g) => table(name, conds, g, agg),
+      aggregate: (a) => table(name, conds, group, a),
       orderBy: () => chain,
       limit: () => chain,
       asUser: () => chain,
       rows: async () => {
         asked.push(name);
-        return matching();
+        return agg ? grouped() : matching();
       },
       first: async () => matching()[0] ?? null,
+      insert: async (values) => {
+        const rows = (tables[name] ||= []);
+        if (name === "astro_exposures" && rows.some((r) => r.site === values.site && r.experiment === values.experiment && r.visitor === values.visitor)) {
+          throw new Error("duplicate key");
+        }
+        rows.push({ id: ++ids, ...values });
+        return ids;
+      },
+      update: async (values) => {
+        for (const row of matching()) Object.assign(row, values);
+      },
     };
     return chain;
   };
@@ -169,6 +198,33 @@ export const refresh = true;
 const posts = await db.posts.rows();
 ---
 <p>{posts.length} posts</p>`,
+    },
+    {
+      path: "src/pages/landing.astro",
+      contents: `---
+import { Optimise, Variant, Goal } from "feldspar:components";
+---
+<h1><Optimise name="hero">
+  <Variant>The best tool for the job</Variant>
+  <Variant name="speed">Be done in <em>no time</em>!</Variant>
+</Optimise></h1>
+<p class="again"><Optimise name="hero"><Variant>A</Variant><Variant name="speed">B</Variant></Optimise></p>
+<Goal name="signup"><a class="button" href="https://app.example.com/signup?plan=pro&ref=x">Sign up</a></Goal>`,
+    },
+    {
+      path: "src/pages/bandit.astro",
+      contents: `---
+import { Optimise, Variant } from "feldspar:components";
+---
+<Optimise name="cta" allocate="thompson"><Variant name="a">A</Variant><Variant name="b">B</Variant></Optimise>`,
+    },
+    {
+      path: "src/pages/signup.astro",
+      contents: `---
+import { goal } from "feldspar:components";
+const counted = Astro.request.method === "POST" ? await goal("signup") : -1;
+---
+<p class="counted">{counted}</p>`,
     },
     {
       path: "src/pages/gallery.astro",
@@ -362,4 +418,107 @@ test("<Image>: an imported image carries its size, and variants point at /_image
   body = fs.readFileSync(path.join(project, "dist/_server/entry.js"), "utf8");
   await assert.rejects(run({ path: "/noalt" }, { db }), /<Image> needs an `alt`/);
   fs.rmSync(path.join(project, "src/pages/noalt.astro"));
+});
+
+test("A/B: one variant per visitor, kept for them, recorded once; crawlers get the first", async () => {
+  const tables = {};
+  const { db } = fakeDb(tables);
+  const visit = (visitor, extra = {}) => run({ path: "/landing", visitor, site: "Acme", ...extra }, { db });
+  const shown = (out) => (/no time/.test(out.body) ? "speed" : /best tool/.test(out.body) ? "control" : "none");
+
+  const first = await visit("v-1");
+  assert.equal(first.status, 200, first.body);
+  assert.equal(first.cache, false, "a page with an experiment is the visitor's own");
+  assert.equal(first.visitor, true, "the router must keep the visitor cookie");
+  assert.equal((first.body.match(/best tool|no time/g) || []).length, 1, "only the chosen variant is in the HTML");
+  const again = first.body.match(/<p class="again[^"]*">([AB])<\/p>/)[1];
+  assert.equal(again, shown(first) === "speed" ? "B" : "A", "one experiment twice on a page shows one arm");
+
+  for (let i = 0; i < 3; i++) assert.equal(shown(await visit("v-1")), shown(first), "the same visitor sees the same arm");
+  assert.equal(tables.astro_exposures.length, 1, "an exposure is recorded once per visitor");
+  assert.deepEqual(
+    { site: tables.astro_exposures[0].site, experiment: tables.astro_exposures[0].experiment, converted: tables.astro_exposures[0].converted },
+    { site: "Acme", experiment: "hero", converted: 0 }
+  );
+
+  // An even split, by hash: across many visitors both arms are shown.
+  const arms = new Set();
+  for (let i = 0; i < 40; i++) arms.add(shown(await visit(`many-${i}`)));
+  assert.deepEqual([...arms].sort(), ["control", "speed"]);
+  const counted = tables.astro_exposures.length;
+
+  const bot = await visit("v-bot", { headers: { "user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1)" } });
+  assert.equal(shown(bot), "control", "a crawler always gets the first variant");
+  const anonymous = await visit("");
+  assert.equal(shown(anonymous), "control");
+  assert.equal(anonymous.visitor, false, "no visitor id, nothing to keep");
+  assert.equal(tables.astro_exposures.length, counted, "and neither is counted");
+});
+
+test("A/B: <Goal> links go through /_goal/, which counts once per experiment and redirects", async () => {
+  const tables = {};
+  const { db } = fakeDb(tables);
+  const page = await run({ path: "/landing", visitor: "v-2", site: "Acme" }, { db });
+  const href = page.body.match(/<a rel="nofollow" class="button[^"]*" href="([^"]+)"/)[1].replace(/&amp;/g, "&");
+  assert.match(href, /^\/_goal\/signup\?to=https%3A%2F%2Fapp\.example\.com%2Fsignup%3Fplan%3Dpro%26ref%3Dx&s=[0-9a-f]{16}$/);
+  const [path, qs] = href.split("?");
+  const query = Object.fromEntries(qs.split("&").map((kv) => kv.split("=").map(decodeURIComponent)));
+  const follow = (extra = {}) => run({ path, query, visitor: "v-2", site: "Acme", ...extra }, { db });
+
+  const out = await follow();
+  assert.equal(out.status, 302);
+  assert.deepEqual(out.headers.find(([k]) => k === "location"), ["location", "https://app.example.com/signup?plan=pro&ref=x"]);
+  assert.equal(out.cache, false);
+  assert.equal(tables.astro_conversions.length, 1);
+  assert.equal(tables.astro_conversions[0].experiment, "hero");
+  assert.equal(tables.astro_conversions[0].variant, tables.astro_exposures[0].variant);
+  assert.equal(tables.astro_exposures[0].converted, 1, "the exposure says it converted");
+  await follow();
+  assert.equal(tables.astro_conversions.length, 1, "a second click is not a second conversion");
+
+  const forged = await run({ path, query: { ...query, to: "https://evil.example/" }, visitor: "v-2", site: "Acme" }, { db });
+  assert.equal(forged.status, 200, "a link this site did not sign is not followed");
+  assert.match(forged.body, /This link leads to <a rel="nofollow noopener" href="https:\/\/evil\.example\/">/);
+  const local = await run({ path: "/_goal/signup", query: { to: "/thanks" }, visitor: "v-9", site: "Acme" }, { db });
+  assert.equal(local.status, 302, "a path on this site needs no signature");
+  assert.equal(tables.astro_conversions.at(-1).experiment, undefined, "a visitor who saw no experiment converts on none");
+
+  // A form's success, counted from the frontmatter.
+  await run({ path: "/landing", visitor: "v-3", site: "Acme" }, { db });
+  const posted = await run({ path: "/signup", method: "POST", form: [], visitor: "v-3", site: "Acme" }, { db });
+  assert.match(posted.body, /<p class="counted[^"]*">1<\/p>/);
+});
+
+test("A/B: Thompson sampling favours the arm that converts", async () => {
+  const exposures = [];
+  for (let i = 0; i < 200; i++) {
+    exposures.push({ site: "Acme", experiment: "cta", variant: "a", visitor: `old-a${i}`, converted: i < 5 ? 1 : 0 });
+    exposures.push({ site: "Acme", experiment: "cta", variant: "b", visitor: `old-b${i}`, converted: i < 60 ? 1 : 0 });
+  }
+  const tables = { astro_exposures: exposures };
+  const { db } = fakeDb(tables);
+  let b = 0;
+  for (let i = 0; i < 40; i++) {
+    const out = await run({ path: "/bandit", visitor: `new-${i}`, site: "Acme" }, { db });
+    if (out.body.trim().endsWith("B")) b++;
+  }
+  assert.ok(b >= 36, `the better arm was shown ${b} times in 40`);
+});
+
+test("A/B: a page with an <Optimise> cannot be prerendered", async () => {
+  write([
+    {
+      path: "src/pages/static-test.astro",
+      contents: `---\nexport const prerender = true;\nimport { Optimise, Variant } from "feldspar:components";\n---\n<Optimise name="x"><Variant>a</Variant></Optimise>`,
+    },
+  ]);
+  execFileSync("npm", ["run", "build"], { cwd: project, stdio: "pipe" });
+  body = fs.readFileSync(path.join(project, "dist/_server/entry.js"), "utf8");
+  await assert.rejects(
+    run({ mode: "prerender", path: "/static-test" }, fakeDb({})),
+    /src\/pages\/static-test\.astro has an A\/B test .* cannot be prerendered/
+  );
+  fs.rmSync(path.join(project, "src/pages/static-test.astro"));
+  execFileSync("npm", ["run", "build"], { cwd: project, stdio: "pipe" });
+  body = fs.readFileSync(path.join(project, "dist/_server/entry.js"), "utf8");
 });

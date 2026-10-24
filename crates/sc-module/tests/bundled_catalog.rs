@@ -376,6 +376,42 @@ fn the_mail_module_ships_and_declares_the_tables_its_card_lists() {
     assert_eq!(names, imap.tables);
 }
 
+#[test]
+fn the_astro_module_declares_the_ab_tables_its_card_lists() {
+    // TODO-astro W3.3: the exposures and conversions an A/B test records.
+    let catalog = catalog();
+    let astro = catalog.get("astro").expect("the Astro module ships");
+    assert_eq!(astro.tables, ["astro_exposures", "astro_conversions"]);
+    let script = "console.log(JSON.stringify(require(process.argv[1]).tables))";
+    let output = match std::process::Command::new("node")
+        .args(["-e", script])
+        .arg(astro.directory.join("index.js"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "the Astro module's tables: skipped, there is no `node` to evaluate index.js"
+            );
+            return;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let declared: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("`tables` is JSON");
+    let (decls, issues) = sc_module::tables::parse_declarations(&declared);
+    assert!(issues.is_empty(), "{issues:?}");
+    let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, astro.tables);
+    // One exposure per visitor and experiment is what keeps an arm stable.
+    assert_eq!(decls[0].unique, [["site", "experiment", "visitor"]]);
+}
+
 /// Every mail action declares what an application sends it and gets back, and
 /// each declaration lowers — so `api.runMailSend()` and the rest are typed, and
 /// no declaration is dropped as "not a type" when the module loads.

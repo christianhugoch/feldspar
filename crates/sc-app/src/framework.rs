@@ -57,6 +57,14 @@ pub struct AppRequest {
     /// server's own (`sc_*`: the session, the CSRF token, the guest session),
     /// which stay the router's. What `Astro.cookies.get` reads.
     pub cookies: BTreeMap<String, String>,
+    /// This browser's **anonymous visitor id** (TODO-astro W3.1): the server's
+    /// `sc_visitor` cookie, or one the router minted for this request when it
+    /// carried none. What an A/B test assigns a variant by. It is the router's
+    /// cookie, so it is not among [`cookies`](Self::cookies); a framework that
+    /// read it says so with [`AppResponse::keeps_visitor`], and only then does
+    /// the router set a newly minted one. Empty when there is none (a build's
+    /// prerender, a test).
+    pub visitor: String,
     /// Who is looking, from the application's session; `None` for nobody.
     pub user: Option<User>,
     /// The application's own origin, `https://books.example.com` — v1's
@@ -101,6 +109,7 @@ impl AppRequest {
             body: RequestBody::Empty,
             headers: BTreeMap::new(),
             cookies: BTreeMap::new(),
+            visitor: String::new(),
             user: None,
             base_url: String::new(),
             csrf_token: String::new(),
@@ -157,6 +166,10 @@ pub struct AppResponse {
     /// §2.2): the router answers it through its one file response builder —
     /// streamed, with Range and the file's name. The access check is made.
     pub file: Option<Box<sc_files::ServeFile>>,
+    /// The answer depends on [`AppRequest::visitor`] (an A/B test chose a
+    /// variant by it, TODO-astro W3.1), so the router must make the id last:
+    /// it sets the visitor cookie when it minted the id for this request.
+    pub keeps_visitor: bool,
 }
 
 impl AppResponse {
@@ -179,6 +192,7 @@ impl AppResponse {
             headers: Vec::new(),
             session: SessionAction::Keep,
             file: None,
+            keeps_visitor: false,
         }
     }
 

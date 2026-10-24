@@ -127,6 +127,9 @@ pub struct ServerRendered {
     entry: Arc<str>,
     etags: HashMap<String, String>,
     app_id: uuid::Uuid,
+    /// The application's name, which the page is bound as `request.site`: what
+    /// an A/B test's rows are kept under (TODO-astro W3.3).
+    site: String,
     run_name: String,
     dispatcher: Option<Arc<TriggerDispatcher>>,
     cache: Arc<cache::SiteCache>,
@@ -172,6 +175,7 @@ impl ServerRendered {
             entry: Arc::from(source),
             etags,
             app_id: app.id.0,
+            site: app.name.clone(),
             run_name: format!("page of {}", app.subdomain.trim()),
             dispatcher,
             cache: Arc::new(cache::SiteCache::new(refresh)),
@@ -265,7 +269,7 @@ impl ServerRendered {
                 &self.entry,
                 &self.run_name,
                 self.app_id,
-                request_binding(&page_req, "prerender"),
+                request_binding(&page_req, "prerender", &self.site),
                 None,
                 Some(trace.clone()),
             )
@@ -336,7 +340,7 @@ impl ServerRendered {
             &self.entry,
             &self.run_name,
             self.app_id,
-            request_binding(req, "render"),
+            request_binding(req, "render", &self.site),
             Some(&caller),
             Some(trace.clone()),
         )
@@ -347,6 +351,8 @@ impl ServerRendered {
         };
         let shareable = answer.get("cache") == Some(&Json::Bool(true));
         let mut out = response_from(&answer)?;
+        // An A/B test chose by the visitor id, so it must outlast this request.
+        out.keeps_visitor = answer.get("visitor") == Some(&Json::Bool(true));
         if !out.headers.iter().any(|(k, _)| k == "cache-control") {
             // A rendered page may carry this visitor's CSRF token or data, so a
             // shared cache must not keep it unless the page says it may.
@@ -384,7 +390,7 @@ impl ServerRendered {
         let Ok(dispatcher) = self.dispatcher() else {
             return Err(err);
         };
-        let mut binding = request_binding(req, "error");
+        let mut binding = request_binding(req, "error", &self.site);
         binding["error"] = Json::String(err.to_string());
         let answer = run_entry(
             dispatcher,
@@ -499,8 +505,8 @@ fn etag(bytes: &[u8]) -> String {
     format!("\"{:016x}-{:x}\"", hasher.finish(), bytes.len())
 }
 
-/// What the entry is bound as `request`.
-fn request_binding(req: &AppRequest, mode: &str) -> Json {
+/// What the entry is bound as `request`. `site` is the application's name.
+fn request_binding(req: &AppRequest, mode: &str, site: &str) -> Json {
     let (form, json_body) = match &req.body {
         RequestBody::Empty => (Json::Null, Json::Null),
         RequestBody::Form(pairs) => (
@@ -519,6 +525,8 @@ fn request_binding(req: &AppRequest, mode: &str) -> Json {
         "locale": req.locale.to_string(),
         "csrfToken": req.csrf_token,
         "cookies": req.cookies,
+        "visitor": req.visitor,
+        "site": site,
     });
     if !form.is_null() {
         binding["form"] = form;
@@ -648,7 +656,7 @@ pub async fn prerender(
         &entry,
         &name,
         app.id.0,
-        request_binding(&base, "prerender-list"),
+        request_binding(&base, "prerender-list", &app.name),
         None,
         None,
     )
@@ -675,7 +683,7 @@ pub async fn prerender(
             &entry,
             &name,
             app.id.0,
-            request_binding(&req, "prerender"),
+            request_binding(&req, "prerender", &app.name),
             None,
             None,
         )
@@ -908,11 +916,14 @@ mod tests {
         req.body = RequestBody::Form(vec![("email".to_owned(), "a@b.c".to_owned())]);
         req.csrf_token = "tok".to_owned();
         req.cookies.insert("theme".to_owned(), "dark".to_owned());
-        let binding = request_binding(&req, "render");
+        req.visitor = "v1".to_owned();
+        let binding = request_binding(&req, "render", "Site");
         assert_eq!(binding["cookies"], json!({ "theme": "dark" }));
         assert_eq!(binding["method"], "POST");
         assert_eq!(binding["form"], json!([["email", "a@b.c"]]));
         assert_eq!(binding["csrfToken"], "tok");
+        assert_eq!(binding["visitor"], "v1");
+        assert_eq!(binding["site"], "Site");
         assert!(binding.get("json").is_none());
     }
 }

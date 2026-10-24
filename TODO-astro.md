@@ -32,11 +32,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## W3 — A/B optimisation of landing pages
 
-- [ ] W3.1 A visitor cookie the router reads and hands to the framework.
-- [ ] W3.2 `<Optimise name>` / `<Variant name?>` in `feldspar:components`: deterministic
+- [x] W3.1 A visitor cookie the router reads and hands to the framework.
+- [x] W3.2 `<Optimise name>` / `<Variant name?>` in `feldspar:components`: deterministic
   assignment `hash(visitor, experiment)`, crawlers always get the first variant.
-- [ ] W3.3 Exposure and conversion tables declared by the module; `<Goal>` (link redirect
+- [x] W3.3 Exposure and conversion tables declared by the module; `<Goal>` (link redirect
   endpoint) and `goal(name)` for form posts.
-- [ ] W3.4 Thompson-sampling allocation over the counts; a fixed split as the default.
-- [ ] W3.5 Prerender: refuse a page with `<Optimise>`; later, one file per arm.
-- [ ] W3.6 An Analytics workspace over the two tables.
+- [x] W3.4 Thompson-sampling allocation over the counts; a fixed split as the default.
+- [x] W3.5 Prerender: refuse a page with `<Optimise>`; later, one file per arm (not built:
+  it needs the assignment and its exposure row in Rust).
+- [x] W3.6 An Analytics workspace over the two tables.

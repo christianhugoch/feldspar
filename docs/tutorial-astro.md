@@ -255,9 +255,56 @@ Saltcorn uses Astro's **compiler**, not Astro. So:
 - Each page runs within a code action's limits (5 s, and its call budget). A page making dozens
   of queries is a page to rewrite with one `.select(...)` and a Ⱶ-join.
 
-## Next: A/B testing
+## Step 8 — A/B test the landing page
 
-Optimising a landing page's copy is designed but not built: `<Optimise>` and `<Variant>`
-components that pick a variant on the server, so there is no flicker and no testing script, and
-a `<Goal>` that records conversions. See the design document, §13.3, "Designed for later: A/B
-optimisation of landing pages".
+Which headline makes more visitors sign up? Show each visitor one of two, and count.
+
+```astro
+---
+// src/pages/index.astro — no `prerender` now: each visitor gets their own variant.
+import Layout from "../layouts/Layout.astro";
+import { Optimise, Variant, Goal } from "feldspar:components";
+---
+<Layout title="Acme">
+  <h1>
+    <Optimise name="hero-headline">
+      <Variant name="best">The best tool for the job</Variant>
+      <Variant name="speed">Be done in no time!</Variant>
+    </Optimise>
+  </h1>
+  <Goal name="signup"><a class="button" href="https://app.example.com/signup">Sign up</a></Goal>
+</Layout>
+```
+
+- **`<Optimise name>`** is one experiment and renders exactly one of the `<Variant>`s directly
+  inside it. The choice is made on the server, so the HTML holds only that variant: no flicker,
+  and no testing script. Name every `<Variant>`: the names are what is recorded.
+- **Each visitor always sees the same variant.** The server gives each browser an anonymous
+  visitor cookie (`sc_visitor`, a random id, a year long) the first time a page uses one, and a
+  visitor's first view of an experiment is recorded in the table `astro_exposures`. Search
+  engines and link previews always get the first variant and are never counted.
+- **`<Goal name>`** marks success. Each link inside it goes through `/_goal/signup?to=…`, which
+  records a conversion in `astro_conversions` (once per visitor) and redirects to where the
+  link pointed. For a form, count the success in the frontmatter of the page it posts to:
+
+  ```astro
+  ---
+  import { goal } from "feldspar:components";
+  if (Astro.request.method === "POST") {
+    // … store the sign-up …
+    await goal("signup");
+    return Astro.redirect("/thanks", 303);
+  }
+  ---
+  ```
+- **Allocation.** By default the visitors are split evenly. `weights={[80, 20]}` gives another
+  fixed split. `allocate="thompson"` lets the results decide: each new visitor is shown the
+  variant that a draw from each variant's conversion rate so far favours (Thompson sampling), so
+  the better headline is shown more and more as the evidence builds. Add `goal="signup"` to
+  optimise for one goal rather than any.
+- **The results** are in the Analytics UI: the first full build of the site makes a dashboard,
+  *A/B tests: <site>*, with the visitors and conversion rate of each variant and the
+  conversions by goal. It is an ordinary dashboard; add a plot or a test to it like to any
+  other. A difference over a few dozen visitors is usually chance.
+- A page with an `<Optimise>` cannot be prerendered: the build stops and says so. It is never
+  kept by the render cache either, so keep the experiment on the pages it is about.

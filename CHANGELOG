@@ -2,6 +2,65 @@
 
 Changes in reverse chronological order.
 
+## Astro websites, W3: A/B optimisation of landing pages
+
+Milestone W3 of `TODO-astro.md`. A landing page can test its copy: each visitor is shown one
+variant, chosen on the server, and what they then do is counted and reported in the Analytics UI.
+
+- **A visitor cookie** (W3.1). The router reads `sc_visitor` (a random 32-hex id; any other
+  value is ignored) or mints one per request, and hands it to the framework as
+  `AppRequest::visitor`. It is not among `AppRequest::cookies`. The cookie is set only when the
+  response says it used the id (`AppResponse::keeps_visitor`, from the entry's
+  `visitor: true`), so a site with no experiment sets none. It is `HttpOnly`, host-only, a year
+  long and `SameSite=Lax`. A server-rendered page is also bound `request.site`, the
+  application's name.
+- **`<Optimise name>` / `<Variant name?>`** (W3.2), in `feldspar:components`.
+  - Only the chosen variant's slot is rendered. Each `<Variant>` registers itself with the
+    `<Optimise>` it is directly inside, synchronously, while the slot's template is evaluated.
+  - The choice is `hash(visitor, experiment)` (SHA-256), seeding a PRNG. A visitor's first view
+    inserts an exposure; later views read it back, so the arm is stable even when the
+    allocation moves.
+  - Crawlers (by `user-agent`) and requests with no visitor id get the first variant and are
+    not counted.
+  - A page with an experiment is per visitor, so the render cache does not keep it.
+- **Tables and goals** (W3.3).
+  - The module now declares `astro_exposures` (unique by site, experiment and visitor, with a
+    `converted` flag) and `astro_conversions` (unique by site, experiment, goal and visitor).
+    Only the admin can read them, and the module card lists them.
+  - `<Goal name>` rewrites the links inside it to `/_goal/<name>?to=…&s=…` (`rel="nofollow"`).
+    The runtime answers that path itself: it records one conversion per experiment the visitor
+    saw, marks the exposures converted, and redirects.
+  - The signature is SHA-256 over a per-build secret the build writes into the never-served
+    entry, so this is not an open redirect. A path on the site needs no signature. An unsigned
+    web address is shown as a link to click rather than followed.
+  - `goal("signup")` counts a form's success from a frontmatter.
+- **Allocation** (W3.4). A fixed split is the default: even, or `weights`.
+  `allocate="thompson"` uses Thompson sampling, one Beta(1 + conversions, 1 + failures) draw per
+  arm from the grouped counts, optionally for one `goal`. The draws use the visitor's seeded
+  PRNG, so the same visitor and counts always give the same choice.
+- **Prerendering** (W3.5). A page with an `<Optimise>` is refused at prerender, and when a
+  refreshable page is rendered again, with a sentence naming the page. One file per arm is left
+  for later.
+- **Reporting** (W3.6). `sc_analytics::ab::ensure_ab_workspace` makes two datasets filtered to
+  the site and an `A/B tests: <site>` dashboard: a reading note, visitors and conversion rate by
+  experiment and variant, and conversions by goal. It runs after each full build of an `astro`
+  application when the tables exist. It finds an existing dashboard by name, so it is made only
+  once, and a failure is only logged.
+- **Docs.** The tutorial has a new Step 8 (`docs/tutorial-astro.md`). §13.3's "Designed for
+  later" section is now what was built. The scaffold's `AGENTS.md` and `env.d.ts` describe the
+  components.
+- **Tests.**
+  - `plugins/astro/test/` has four new tests: stable per-visitor variants, crawlers and
+    dedupe; `<Goal>` signing, redirect, forgery and `goal()`; Thompson favouring the better
+    arm; the prerender refusal.
+  - `app_server_render` has two new tests. One checks the visitor cookie through the real
+    router: set only when used, not reset, a forged value replaced, kept out of the page's
+    cookies, and the runtime's query shapes on the real host. The other checks the workspace
+    over the tables as the module declares them, rendered and filtered to the site.
+  - The npm end-to-end test now runs an `<Optimise>` and a `<Goal>`.
+  - `bundled_catalog` checks the declared tables against the card.
+- No migration: the module creates its tables when it loads.
+
 ## Astro websites, W2: a render cache, cookies, 500.astro, images and build on save
 
 Milestone W2 of `TODO-astro.md`. Server-rendered pages are now fast without prerendering, can

@@ -19,7 +19,10 @@
 //!   written, and a page that is a visitor's own, or wrote, is not kept;
 //! - the request's own cookies reach the body, and the server's do not;
 //! - a failed render is the site's 500 page, raised as an `error` event;
-//! - `/_image` resizes an image the build wrote.
+//! - `/_image` resizes an image the build wrote;
+//! - the router hands the body a visitor id, and keeps it as a cookie only when
+//!   the page used it (an A/B test); the A/B queries the runtime makes run on
+//!   the real host, and the Analytics workspace reports on the two tables.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -35,8 +38,8 @@ use sc_catalog::{Catalog, DataField};
 use sc_db::DatabaseDriver;
 use sc_db_sqlite::SqliteDriver;
 use sc_server::{
-    AppMounts, CSRF_COOKIE, MountedApp, ServerConfig, admin_handlers, build_router_with_apps,
-    default_js_evaluator, install_triggers,
+    AppMounts, CSRF_COOKIE, MountedApp, ServerConfig, VISITOR_COOKIE, admin_handlers,
+    build_router_with_apps, default_js_evaluator, install_triggers,
 };
 use sc_types::{Attrs, BasicType, TypeRef};
 use tower::ServiceExt;
@@ -55,6 +58,22 @@ if (request.mode === "error") {
 const html = (body, status = 200, cache = true) =>
   ({ status, headers: [["content-type", "text/html; charset=utf-8"]], body, cache });
 if (request.path === "/cookies") return html(JSON.stringify(request.cookies), 200, false);
+if (request.path === "/ab") {
+  // What the runtime's <Optimise> asks of the host, in its own words.
+  const site = request.site, visitor = request.visitor;
+  let seen = await db.astro_exposures.where({ site, experiment: "hero", visitor }).first();
+  if (!seen) {
+    await db.astro_exposures.insert({ site, experiment: "hero", variant: "speed", visitor,
+                                      path: request.path, converted: 0,
+                                      created_at: new Date().toISOString() });
+    seen = await db.astro_exposures.where({ site, experiment: "hero", visitor }).first();
+  }
+  const counts = await db.astro_exposures.where({ site, experiment: "hero" })
+    .groupBy("variant").aggregate({ n: "count()", won: "sum(converted)" }).rows();
+  await db.astro_exposures.where({ id: seen.id }).update({ converted: 1 });
+  return { ...html(JSON.stringify({ site, visitor, variant: seen.variant, counts }), 200, false),
+           visitor: true };
+}
 if (request.path === "/boom") throw new Error("the page fell over");
 if (request.path === "/visit") {
   await db.visits.insert({ id: String(Math.random()) });
@@ -174,7 +193,6 @@ async fn setup(tmp: &TempDir) -> sc_error::Result<Server> {
             ],
         )
         .await?;
-
     let evaluator = default_js_evaluator();
     let agents = sc_server::install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
@@ -469,6 +487,10 @@ async fn the_bundled_astro_module_builds_a_site_this_server_renders() -> sc_erro
     }
     let tmp = TempDir::new("astro-e2e");
     let server = setup(&tmp).await?;
+    assert!(
+        astro_tables(&server.catalog).await,
+        "the npm build needs node"
+    );
     let project = tmp.path().join("site");
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/astro/index.js");
     // What the module worker does on Scaffold, in Node: the same functions.
@@ -509,7 +531,23 @@ for (const f of require(plugin).frameworks.astro.scaffold(ctx)) {
             project.to_str().unwrap(),
         ],
     );
-    run("npm", &["install", "--no-audit", "--no-fund"]);
+    // An A/B test, as the tutorial writes one.
+    std::fs::write(
+        project.join("src/pages/landing.astro"),
+        r#"---
+import { Optimise, Variant, Goal } from "feldspar:components";
+---
+<h1><Optimise name="hero" allocate="thompson">
+  <Variant name="best">The best tool for the job</Variant>
+  <Variant name="speed">Be done in no time!</Variant>
+</Optimise></h1>
+<Goal name="signup"><a href="https://app.example.com/signup">Sign up</a></Goal>"#,
+    )
+    .unwrap();
+    match std::env::var("SC_ASTRO_NODE_MODULES") {
+        Ok(shared) => std::os::unix::fs::symlink(shared, project.join("node_modules")).unwrap(),
+        Err(_) => run("npm", &["install", "--no-audit", "--no-fund"]),
+    }
     run("npm", &["run", "build"]);
 
     let mut report = BuildReport {
@@ -585,7 +623,84 @@ for (const f of require(plugin).frameworks.astro.scaffold(ctx)) {
     assert!(
         String::from_utf8_lossy(&sitemap.body).contains("<loc>http://site.example.com/posts</loc>")
     );
+
+    // The A/B test: one variant, an exposure in the real table, the goal link
+    // counted and redirected.
+    let visit = |path: &str, query: &[(&str, &str)]| {
+        let framework = framework.clone();
+        let catalog = server.catalog.clone();
+        let mut req = sc_app::AppRequest::get(path);
+        req.visitor = "0123456789abcdef0123456789abcdef".to_owned();
+        for (k, v) in query {
+            req.query.insert((*k).to_owned(), (*v).to_owned());
+        }
+        async move { framework.handle(req, &catalog).await }
+    };
+    let landing = visit("/landing", &[]).await?;
+    let html = String::from_utf8_lossy(&landing.body).into_owned();
+    assert_eq!(landing.status, 200, "{html}");
+    assert!(landing.keeps_visitor, "the router is told to keep the id");
+    assert_eq!(
+        html.matches("The best tool").count() + html.matches("no time").count(),
+        1,
+        "{html}"
+    );
+    let exposures = server
+        .code("return await db.astro_exposures.rows();")
+        .await?;
+    assert_eq!(exposures.as_array().unwrap().len(), 1, "{exposures}");
+    assert_eq!(exposures[0]["site"], "Site");
+    let href = html
+        .split("href=\"/_goal/signup?")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no goal link in {html}"))
+        .replace("&amp;", "&");
+    let query: Vec<(String, String)> = href
+        .split('&')
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap();
+            (k.to_owned(), urlencoding_decode(v))
+        })
+        .collect();
+    let query: Vec<(&str, &str)> = query
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let followed = visit("/_goal/signup", &query).await?;
+    assert_eq!(followed.status, 302);
+    assert!(followed.headers.contains(&(
+        "location".to_owned(),
+        "https://app.example.com/signup".to_owned()
+    )));
+    let converted = server
+        .code("return await db.astro_conversions.rows();")
+        .await?;
+    assert_eq!(
+        converted[0]["variant"], exposures[0]["variant"],
+        "{converted}"
+    );
     Ok(())
+}
+
+/// Percent-decoding, for a query value the page wrote.
+fn urlencoding_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap()
 }
 
 #[tokio::test]
@@ -724,5 +839,207 @@ async fn an_image_the_build_wrote_is_resized_once_and_kept() -> sc_error::Result
     assert_eq!(elsewhere.status, StatusCode::BAD_REQUEST);
     let missing = get(&server.router, "/_image?src=%2F_astro%2Fnope.png&w=4").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+/// Create the Astro module's A/B tables from its own declaration — node
+/// evaluates `plugins/astro/index.js`'s `tables`, and the module table facility
+/// creates them as it does at install. `false` (and the test skips) when there
+/// is no `node`.
+async fn astro_tables(catalog: &Catalog) -> bool {
+    let index = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/astro/index.js");
+    let output = match std::process::Command::new("node")
+        .args([
+            "-e",
+            "console.log(JSON.stringify(require(process.argv[1]).tables))",
+        ])
+        .arg(&index)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => panic!("{}", String::from_utf8_lossy(&output.stderr)),
+        Err(_) => {
+            eprintln!("skipping: there is no `node` to read plugins/astro's tables");
+            return false;
+        }
+    };
+    let raw: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let (decls, issues) = sc_module::tables::parse_declarations(&raw);
+    assert!(issues.is_empty(), "{issues:?}");
+    let report = sc_module::tables::sync(
+        catalog,
+        "@feldspar/astro",
+        &decls,
+        &sc_module::tables::claims([("@feldspar/astro", &decls[..])]),
+    )
+    .await;
+    assert!(report.issues.is_empty(), "{:?}", report.issues);
+    assert_eq!(
+        report.tables_created,
+        ["astro_exposures", "astro_conversions"]
+    );
+    true
+}
+
+/// The `sc_visitor` cookie a response set, if any.
+fn visitor_set(answer: &Answer) -> Option<String> {
+    answer
+        .headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with(&format!("{VISITOR_COOKIE}=")))
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn the_visitor_id_is_handed_over_and_kept_only_when_used() -> sc_error::Result<()> {
+    let tmp = TempDir::new("visitor");
+    let server = setup(&tmp).await?;
+    if !astro_tables(&server.catalog).await {
+        return Ok(());
+    }
+    let with_cookie = |path: &str, cookie: &str| {
+        Request::builder()
+            .uri(path)
+            .header(header::HOST, HOST)
+            .header(header::COOKIE, cookie.to_owned())
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // A page that does not use the id sets no cookie.
+    assert_eq!(visitor_set(&get(&server.router, "/posts").await), None);
+
+    // One that does gets a fresh id, kept for a year, sent on arrival from
+    // another site, and not readable by the page's scripts.
+    let first = get(&server.router, "/ab").await;
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let cookie = visitor_set(&first).expect("an A/B page keeps the visitor");
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+    assert!(cookie.contains("Max-Age=31536000"), "{cookie}");
+    let id = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches(&format!("{VISITOR_COOKIE}="))
+        .to_owned();
+    assert_eq!(id.len(), 32);
+    let body: serde_json::Value = serde_json::from_str(&first.body).unwrap();
+    assert_eq!(body["visitor"], id.as_str(), "the body saw the id it set");
+    assert_eq!(
+        body["site"], "Site",
+        "rows are kept under the application's name"
+    );
+    assert_eq!(
+        body["counts"],
+        serde_json::json!([{ "variant": "speed", "n": 1, "won": 0 }]),
+        "grouped counts, as Thompson sampling reads them"
+    );
+
+    // The visitor comes back: the same id, the same exposure, no new cookie.
+    let again = send(
+        &server.router,
+        with_cookie("/ab", &format!("{VISITOR_COOKIE}={id}")),
+    )
+    .await;
+    assert_eq!(
+        visitor_set(&again),
+        None,
+        "an id the browser has is not set again"
+    );
+    let body: serde_json::Value = serde_json::from_str(&again.body).unwrap();
+    assert_eq!(body["visitor"], id.as_str());
+    assert_eq!(
+        body["counts"],
+        serde_json::json!([{ "variant": "speed", "n": 1, "won": 1 }]),
+        "one exposure, now converted"
+    );
+
+    // A value the server could not have minted is not passed on.
+    let forged = send(
+        &server.router,
+        with_cookie("/ab", &format!("{VISITOR_COOKIE}=<script>")),
+    )
+    .await;
+    let body: serde_json::Value = serde_json::from_str(&forged.body).unwrap();
+    assert_ne!(body["visitor"], "<script>");
+    assert!(visitor_set(&forged).is_some(), "and is replaced");
+    // Nor is the id one of the application's own cookies.
+    let cookies = send(
+        &server.router,
+        with_cookie("/cookies", &format!("{VISITOR_COOKIE}={id}; theme=dark")),
+    )
+    .await;
+    assert_eq!(cookies.body, r#"{"theme":"dark"}"#);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_ab_workspace_reports_on_the_two_tables_for_its_site() -> sc_error::Result<()> {
+    use sc_analytics::plot::{RenderedTable, render_table};
+    let tmp = TempDir::new("ab-workspace");
+    let server = setup(&tmp).await?;
+    assert!(
+        sc_analytics::ab::ensure_ab_workspace(&server.catalog, "Site")
+            .await?
+            .is_none(),
+        "no A/B tables (the module is not installed), no workspace"
+    );
+    if !astro_tables(&server.catalog).await {
+        return Ok(());
+    }
+    server
+        .code(
+            r#"let id = 0;
+               const add = (site, variant, converted) => db.astro_exposures.insert({
+                 site, experiment: "hero", variant, visitor: "v" + ++id, converted });
+               for (let i = 0; i < 4; i++) await add("Site", "control", i < 1 ? 1 : 0);
+               for (let i = 0; i < 4; i++) await add("Site", "speed", i < 3 ? 1 : 0);
+               await add("Other", "speed", 1);
+               await db.astro_conversions.insert({ site: "Site", goal: "signup",
+                 experiment: "hero", variant: "speed", visitor: "v5" });"#,
+        )
+        .await?;
+
+    let workspace = sc_analytics::ab::ensure_ab_workspace(&server.catalog, "Site")
+        .await?
+        .expect("the tables are there");
+    assert_eq!(workspace.name, "A/B tests: Site");
+    assert_eq!(workspace.kind, sc_analytics::WorkspaceKind::Dashboard);
+    let again = sc_analytics::ab::ensure_ab_workspace(&server.catalog, "Site")
+        .await?
+        .unwrap();
+    assert_eq!(again.id, workspace.id, "made once");
+    assert_eq!(
+        sc_analytics::list_workspaces(&server.catalog)
+            .await?
+            .iter()
+            .filter(|w| w.name == workspace.name)
+            .count(),
+        1
+    );
+
+    // The rates table: this site's rows only, by variant.
+    let panel = &workspace.state["tiles"][1]["panel"];
+    let spec: sc_analytics::plot::TableSpec =
+        serde_json::from_value(panel["content"]["spec"].clone()).unwrap();
+    let RenderedTable::Table(table) =
+        render_table(&server.catalog, &sc_dataset::Caller::admin(), &spec).await?
+    else {
+        panic!("the rates table did not render");
+    };
+    let rows: Vec<String> = table
+        .body
+        .rows
+        .iter()
+        .map(|r| serde_json::to_string(r).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].starts_with(r#"["hero","control",4,"#), "{rows:?}");
+    assert!(rows[0].ends_with(",0.25]"), "{rows:?}");
+    assert!(rows[1].starts_with(r#"["hero","speed",4,"#), "{rows:?}");
+    assert!(rows[1].ends_with(",0.75]"), "{rows:?}");
     Ok(())
 }

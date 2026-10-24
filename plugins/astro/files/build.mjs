@@ -22,7 +22,7 @@
 
 import { transform } from "@astrojs/compiler";
 import * as esbuild from "esbuild";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -244,6 +244,7 @@ const site = createSite({
   styles: __feldsparManifest.styles,
   scripts: __feldsparManifest.scripts,
   site: ${JSON.stringify(config.site || "")},
+  secret: __feldsparManifest.secret,
 });
 export function handle(input, who) { return handleSite(site, input, who); }
 `;
@@ -331,7 +332,9 @@ for (const file of walk(publicDir)) {
 // The server runs this as the body of a JavaScript code run, so `db`, `fetch`,
 // `fs`, `Table`, `user` and the rest are in scope for every page, exactly as in
 // a code action; `request` is what the host bound for this one request.
-const manifest = { styles, scripts: scriptUrls };
+// `secret` signs `<Goal>` links, so `/_goal/` redirects only where this site's
+// own pages pointed. The entry is never served, so it stays the server's.
+const manifest = { styles, scripts: scriptUrls, secret: randomBytes(16).toString("hex") };
 const body = `const __feldsparManifest = ${JSON.stringify(manifest)};
 ${server.outputFiles[0].text}
 return await __feldsparSite.handle(request, typeof user === "undefined" ? null : user);

@@ -24,6 +24,11 @@
 // may be kept (`cache`): not when the page read something that differs between
 // visitors — a cookie, a request header, the CSRF token — and not when it set
 // `Cache-Control: no-store`, which is how a page opts out.
+//
+// **A/B tests.** `<Optimise>` renders one of its `<Variant>`s, chosen per
+// visitor; `<Goal>` and `goal()` count what visitors then do. The choice is
+// made here, on the server, so a visitor's HTML holds only their variant. See
+// "A/B optimisation" below.
 
 // ---------------------------------------------------------------------------
 // HTML strings
@@ -529,6 +534,7 @@ class Cookies {
 function createResult(site, page) {
   const response = { status: 200, statusText: "", headers: new Headers() };
   const result = {
+    site,
     styles: site.styles,
     scriptFor: (id) => site.scripts[id],
     _headRendered: false,
@@ -590,7 +596,13 @@ export async function renderPage(site, Component, page, props = {}) {
   if (!headers.some(([k]) => k === "content-type")) {
     headers.push(["content-type", "text/html; charset=utf-8"]);
   }
-  return { status: result.response.status, headers, body: html, cache: cacheable(page, headers) };
+  return {
+    status: result.response.status,
+    headers,
+    body: html,
+    cache: cacheable(page, headers),
+    visitor: page.vary.visitor === true,
+  };
 }
 
 /** Whether the render cache may keep this answer for the next visitor: the
@@ -746,17 +758,17 @@ function paginate(items, { pageSize = 10, params = {}, props = {} } = {}) {
 // ---------------------------------------------------------------------------
 
 /** Build the site object `handle` serves from what `build.mjs` generated. */
-export function createSite({ routes, styles, scripts, site }) {
+export function createSite({ routes, styles, scripts, site, secret = "" }) {
   const ordered = routes
     .map((r) => ({ ...r, segments: parseRoute(r.file) }))
     .sort(compareRoutes);
-  return { routes: ordered, styles, scripts, site };
+  return { routes: ordered, styles, scripts, site, secret };
 }
 
 /** The page context for one request. `input` is what the host bound as
  * `request`: `{ method, path, query, headers, form, json, origin, locale,
  * csrfToken, mode }`. `who` is the run's `user`, if any. */
-function pageContext(site, input, path, params, who) {
+function pageContext(site, input, path, params, who, route = null) {
   const origin = site.site || input.origin || "";
   const url = new PageURL(origin.replace(/\/$/, ""), path, Object.entries(input.query || {}));
   const vary = { cacheable: true };
@@ -764,6 +776,9 @@ function pageContext(site, input, path, params, who) {
   return {
     url,
     params,
+    route,
+    input,
+    assignments: new Map(),
     site: site.site ? new PageURL(site.site.replace(/\/$/, ""), "/", []) : undefined,
     request: new PageRequest(input, url, vary),
     cookies: input.cookies,
@@ -793,10 +808,11 @@ async function serve(site, input, who) {
       if (!entry) continue;
       props = entry.props || {};
     }
-    const page = pageContext(site, input, path, params, who);
+    const page = pageContext(site, input, path, params, who, route);
     if (route.endpoint) return endpoint(route, page, input.method || "GET");
     return renderPage(site, route.module.default, page, props);
   }
+  if (path.startsWith(GOAL_PREFIX)) return goalRedirect(site, input, path);
   if (path === "/sitemap.xml") return sitemap(site, input);
   if (path === "/robots.txt") return robots(site, input);
   return notFound(site, input, who);
@@ -896,7 +912,7 @@ async function endpoint(route, page, method) {
     throw new Error(`${route.file}: ${method} must return a Response`);
   }
   const shape = await responseShape(out);
-  return { ...shape, cache: cacheable(page, shape.headers) };
+  return { ...shape, cache: cacheable(page, shape.headers), visitor: page.vary.visitor === true };
 }
 
 /** The pages to write at build time: every route that says
@@ -933,6 +949,9 @@ async function prerenderList(site) {
  * their data changes), `prerender` (one of them), or `error` (a render failed
  * with `input.error`: the site's 500 page, or `null`). */
 export async function handle(site, input, who) {
+  // The body runs afresh for every request, so this module-level state is this
+  // request's alone: it is what `goal()` in a frontmatter records against.
+  active = { site, input };
   if (input.mode === "prerender-list") return prerenderList(site);
   if (input.mode === "prerender" && input.path === "/404") return notFound(site, input, null);
   if (input.mode === "error") return serverError(site, input, who);
@@ -1018,3 +1037,451 @@ export const Csrf = createComponent(async (result) => {
   const token = result.page.locals.csrfToken;
   return markHTMLString(`<input type="hidden" name="_csrf" value="${escapeHTML(token)}">`);
 }, "feldspar:components/Csrf");
+
+// ---------------------------------------------------------------------------
+// A/B optimisation (TODO-astro W3): `<Optimise>`, `<Variant>`, `<Goal>`, `goal()`
+// ---------------------------------------------------------------------------
+//
+//     <Optimise name="hero-headline">
+//       <Variant>The best tool for the job</Variant>
+//       <Variant name="speed">Be done in no time!</Variant>
+//     </Optimise>
+//     <Goal name="signup"><a href="https://app.example.com/signup">Sign up</a></Goal>
+//
+// - **The choice is the server's.** `<Optimise>` collects its `<Variant>`s,
+//   chooses one for this visitor and renders only that one, so there is no
+//   flash of the other and no testing script in the browser.
+// - **Stable per visitor.** The visitor is the router's anonymous
+//   `sc_visitor` id (`request.visitor`). A visitor's first view of an
+//   experiment chooses an arm from `hash(visitor, experiment)` and records an
+//   **exposure** (`astro_exposures`); every later view finds that row and shows
+//   the same arm, however the weights have moved since.
+// - **Allocation**: an even split by default, `weights={[…]}` for another
+//   fixed one, or `allocate="thompson"`: Thompson sampling over the exposure
+//   and conversion counts, so the better arm is shown more as evidence builds.
+// - **Conversions**: `<Goal name>` around a link sends it through
+//   `/_goal/<name>?to=…`, which records a conversion (`astro_conversions`)
+//   for every experiment the visitor was exposed to and redirects. A form that
+//   posts back to its page calls `goal("signup")` from its frontmatter.
+// - **Crawlers** always get the first variant and are never counted, so a
+//   test does not show search engines alternating content.
+// - A page with an `<Optimise>` is per visitor: the render cache never keeps
+//   it, and it cannot be prerendered.
+
+/** The tables the module declares for this (`index.js`'s `tables`). */
+const EXPOSURES = "astro_exposures";
+const CONVERSIONS = "astro_conversions";
+
+/** Where a `<Goal>` link goes first. */
+const GOAL_PREFIX = "/_goal/";
+
+/** User agents that are search engines, link previews and other robots. */
+const CRAWLER =
+  /bot\b|crawl|spider|slurp|bingpreview|facebookexternalhit|embedly|quora link preview|outbrain|pinterest|vkshare|w3c_validator|whatsapp|lighthouse|headlesschrome|preview/i;
+
+/** This request's site and input, for `goal()`; set by `handle`. */
+let active = null;
+
+/** Whether the request is a crawler's. Reading the user agent makes the page
+ * this visitor's. */
+function isCrawler(page) {
+  visitorSpecific(page.vary);
+  return CRAWLER.test(String((page.input.headers || {})["user-agent"] || ""));
+}
+
+/** The visitor id, which makes the answer depend on it: the render cache does
+ * not keep it, and the router keeps a newly minted id as a cookie. */
+function visitorOf(page) {
+  visitorSpecific(page.vary);
+  if (page.input.visitor) page.vary.visitor = true;
+  return String(page.input.visitor || "");
+}
+
+/** The code run's `db`, or a sentence saying it is missing. */
+function database() {
+  if (typeof db === "undefined") throw new Error("A/B tests need the code run's `db`");
+  return db;
+}
+
+/** SHA-256 of `text`, as hex. */
+async function sha256(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** `hash(visitor, experiment)` as a 32-bit unsigned integer: what an arm is
+ * chosen by, so the same visitor gets the same choice from the same counts. */
+export async function assignmentSeed(visitor, experiment) {
+  return parseInt((await sha256(`${visitor}\n${experiment}`)).slice(0, 8), 16) >>> 0;
+}
+
+/** A small seeded generator (mulberry32): uniform in [0, 1). */
+export function seededRandom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A standard normal draw (Box–Muller). */
+function normal(random) {
+  const u = Math.max(random(), 1e-12);
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * random());
+}
+
+/** A Gamma(shape, 1) draw (Marsaglia–Tsang; boosted below shape 1). */
+function gamma(shape, random) {
+  if (shape < 1) return gamma(shape + 1, random) * Math.pow(Math.max(random(), 1e-12), 1 / shape);
+  const d = shape - 1 / 3;
+  const c = 1 / Math.sqrt(9 * d);
+  for (;;) {
+    let x, v;
+    do {
+      x = normal(random);
+      v = 1 + c * x;
+    } while (v <= 0);
+    v = v * v * v;
+    const u = random();
+    if (u < 1 - 0.0331 * x ** 4) return d * v;
+    if (Math.log(Math.max(u, 1e-300)) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+  }
+}
+
+/** A Beta(a, b) draw. */
+export function betaSample(a, b, random) {
+  const x = gamma(a, random);
+  const y = gamma(b, random);
+  return x / (x + y);
+}
+
+/** **Thompson sampling**: one draw from each arm's Beta(1 + conversions,
+ * 1 + exposures − conversions) posterior, and the arm with the largest draw.
+ * `arms` is `[{ exposures, conversions }]` in variant order. */
+export function thompsonChoice(arms, random) {
+  let best = 0;
+  let bestDraw = -1;
+  arms.forEach((arm, i) => {
+    const n = Math.max(0, Number(arm.exposures) || 0);
+    const won = Math.min(n, Math.max(0, Number(arm.conversions) || 0));
+    const draw = betaSample(1 + won, 1 + n - won, random);
+    if (draw > bestDraw) {
+      best = i;
+      bestDraw = draw;
+    }
+  });
+  return best;
+}
+
+/** A **fixed split**: the arm whose share of `[0, 1)` holds `u`. `weights` are
+ * the variants' relative weights, all equal when not given. */
+export function fixedChoice(weights, u) {
+  const total = weights.reduce((a, w) => a + w, 0);
+  let at = 0;
+  for (let i = 0; i < weights.length; i++) {
+    at += weights[i] / total;
+    if (u < at) return i;
+  }
+  return weights.length - 1;
+}
+
+/** The variants' weights from `<Optimise weights>`: a list in variant order, or
+ * `{ name: weight }`. Equal when not given. */
+function weightsOf(experiment, variants, given) {
+  if (given === undefined || given === null) return variants.map(() => 1);
+  const list = Array.isArray(given)
+    ? given
+    : variants.map((v) => (given[v.name] === undefined ? 0 : given[v.name]));
+  if (
+    list.length !== variants.length ||
+    list.some((w) => typeof w !== "number" || !Number.isFinite(w) || w < 0) ||
+    !list.some((w) => w > 0)
+  ) {
+    throw new Error(
+      `<Optimise name="${experiment}"> weights: one number per variant (${variants.length}), ` +
+        "none negative and not all zero, e.g. weights={[80, 20]}"
+    );
+  }
+  return list;
+}
+
+/** Each variant's exposures and conversions so far, for Thompson sampling. A
+ * conversion is a goal reached after the exposure: `goal`'s, when the
+ * experiment names one, else any. */
+async function armCounts(site, experiment, variants, goal) {
+  const d = database();
+  const exposures = await d[EXPOSURES].where({ site, experiment })
+    .groupBy("variant")
+    .aggregate({ n: "count()", won: "sum(converted)" })
+    .rows();
+  let won = new Map(exposures.map((r) => [r.variant, Number(r.won) || 0]));
+  if (goal) {
+    const conversions = await d[CONVERSIONS].where({ site, experiment, goal })
+      .groupBy("variant")
+      .aggregate({ won: "count()" })
+      .rows();
+    won = new Map(conversions.map((r) => [r.variant, Number(r.won) || 0]));
+  }
+  const seen = new Map(exposures.map((r) => [r.variant, Number(r.n) || 0]));
+  return variants.map((v) => ({ exposures: seen.get(v.name) || 0, conversions: won.get(v.name) || 0 }));
+}
+
+/** Choose `group`'s variant for this request, recording the exposure: the
+ * visitor's earlier arm if they have one, else a new one by the allocation. */
+async function chooseVariant(page, group) {
+  const { name, variants, props } = group;
+  if (page.input.mode === "prerender") {
+    const file = page.route ? `src/pages/${page.route.file}` : "this page";
+    throw new Error(
+      `${file} has an A/B test (<Optimise name="${name}">), which shows each visitor their ` +
+        "own variant, so it cannot be prerendered into one file: remove " +
+        "`export const prerender = true` from it"
+    );
+  }
+  if (isCrawler(page)) return 0;
+  const visitor = visitorOf(page);
+  // No visitor id — a request from a test, or a server too old to mint one —
+  // is shown the first variant and not counted.
+  if (!visitor) return 0;
+  const site = String(page.input.site || "");
+  const d = database();
+  const before = await d[EXPOSURES].where({ site, experiment: name, visitor }).first();
+  if (before) {
+    const index = variants.findIndex((v) => v.name === before.variant);
+    // A variant that has since been removed: the visitor sees the first one.
+    return index < 0 ? 0 : index;
+  }
+  const seed = await assignmentSeed(visitor, name);
+  const random = seededRandom(seed);
+  let chosen;
+  if (props.allocate === "thompson") {
+    if (props.weights !== undefined) {
+      throw new Error(`<Optimise name="${name}"> has weights and allocate="thompson"; give one of them`);
+    }
+    chosen = thompsonChoice(await armCounts(site, name, variants, props.goal), random);
+  } else if (props.allocate === undefined || props.allocate === "fixed") {
+    chosen = fixedChoice(weightsOf(name, variants, props.weights), random());
+  } else {
+    throw new Error(`<Optimise name="${name}"> allocate is "fixed" (the default) or "thompson"`);
+  }
+  try {
+    await d[EXPOSURES].insert({
+      site,
+      experiment: name,
+      variant: variants[chosen].name,
+      visitor,
+      path: page.url.pathname,
+      converted: 0,
+      created_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    // The same visitor's other request recorded it first (the table is
+    // unique by site, experiment and visitor): show what that one chose.
+    const again = await d[EXPOSURES].where({ site, experiment: name, visitor }).first();
+    if (!again) throw e;
+    const index = variants.findIndex((v) => v.name === again.variant);
+    return index < 0 ? 0 : index;
+  }
+  return chosen;
+}
+
+/** `<Optimise name="…">`: an experiment. Renders exactly one of the
+ * `<Variant>`s directly inside it, chosen for this visitor. Props: `name`
+ * (required, unique on the site), `allocate` (`"fixed"`, the default, or
+ * `"thompson"`), `weights` (a fixed split's weights, in variant order or by
+ * name) and `goal` (the goal Thompson sampling optimises; any goal when not
+ * given). */
+export const Optimise = createComponent(async (result, props = {}, slots = {}) => {
+  const name = typeof props.name === "string" ? props.name.trim() : "";
+  if (!name) throw new Error('<Optimise> needs a `name`: the experiment\'s, e.g. <Optimise name="hero-headline">');
+  const group = { name, props, variants: [] };
+  let decide;
+  group.decided = new Promise((resolve) => (decide = resolve));
+  // Each `<Variant>` registers itself while the slot's template is evaluated
+  // — synchronously, so this stack says which `<Optimise>` it is inside.
+  const stack = (result._optimise ||= []);
+  stack.push(group);
+  let template;
+  try {
+    template = slots.default ? slots.default(result) : null;
+  } finally {
+    stack.pop();
+  }
+  try {
+    if (!group.variants.length) {
+      throw new Error(`<Optimise name="${name}"> has no <Variant>: put each version in one`);
+    }
+    const names = new Set();
+    for (const v of group.variants) {
+      if (names.has(v.name)) {
+        throw new Error(`<Optimise name="${name}"> has two variants called "${v.name}"; name each <Variant> differently`);
+      }
+      names.add(v.name);
+    }
+    // One experiment shown twice on a page shows the same arm twice.
+    const page = result.page;
+    if (!page.assignments.has(name)) page.assignments.set(name, chooseVariant(page, group));
+    const chosen = await page.assignments.get(name);
+    decide(Math.min(chosen, group.variants.length - 1));
+  } catch (e) {
+    decide(-1);
+    throw e;
+  }
+  return template;
+}, "feldspar:components/Optimise");
+
+/** `<Variant name?>`: one version inside an `<Optimise>`. Only the chosen one
+ * is rendered. Name every variant: the names are what the tables record, so
+ * an unnamed one is `control` if it is the first and `variant-<n>` otherwise,
+ * and moving it changes what it is counted as. */
+export const Variant = createComponent((result, props = {}, slots = {}) => {
+  const stack = result._optimise || [];
+  const group = stack[stack.length - 1];
+  if (!group) {
+    throw new Error('<Variant> belongs directly inside an <Optimise name="…">, not in another component');
+  }
+  const index = group.variants.length;
+  const given = typeof props.name === "string" ? props.name.trim() : "";
+  group.variants.push({ name: given || (index === 0 ? "control" : `variant-${index + 1}`) });
+  return group.decided.then(async (chosen) =>
+    chosen === index && slots.default ? markHTMLString(await renderValue(slots.default(result))) : ""
+  );
+}, "feldspar:components/Variant");
+
+/** The signature on a `<Goal>` link, so `/_goal/` redirects only where this
+ * site's own pages pointed — not anywhere a stranger's link says. */
+async function goalSignature(site, name, to) {
+  return (await sha256(`${site.secret}\n${name}\n${to}`)).slice(0, 16);
+}
+
+/** The text of an escaped attribute value. */
+function unescapeAttribute(text) {
+  return text.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]);
+}
+
+/** `<Goal name="signup">`: a conversion goal. Each link inside it goes through
+ * `/_goal/signup?to=…`, which counts the conversion and redirects to where the
+ * link pointed. A form inside it is rendered as it is: count its success with
+ * `goal("signup")` in the frontmatter of the page it posts to. */
+export const Goal = createComponent(async (result, props = {}, slots = {}) => {
+  const name = typeof props.name === "string" ? props.name.trim() : "";
+  if (!name) throw new Error('<Goal> needs a `name`, e.g. <Goal name="signup">');
+  const inner = slots.default ? await renderValue(slots.default(result)) : "";
+  const site = result.site;
+  const links = [...inner.matchAll(/<a\b[^>]*?\shref="([^"]*)"[^>]*>/gi)];
+  let out = "";
+  let last = 0;
+  for (const m of links) {
+    const to = unescapeAttribute(m[1]);
+    const sig = await goalSignature(site, name, to);
+    const href = `${GOAL_PREFIX}${encodeURIComponent(name)}?to=${encodeURIComponent(to)}&s=${sig}`;
+    let tag = m[0].replace(` href="${m[1]}"`, ` href="${escapeHTML(href)}"`);
+    // A search engine following the goal link would count nothing and learn
+    // nothing; the destination is still linked from where it is.
+    if (!/\srel=/i.test(tag)) tag = tag.replace(/^<a\b/i, '<a rel="nofollow"');
+    out += inner.slice(last, m.index) + tag;
+    last = m.index + m[0].length;
+  }
+  return markHTMLString(out + inner.slice(last));
+}, "feldspar:components/Goal");
+
+/** Record that this visitor reached the goal `name`: one conversion for each
+ * experiment they were exposed to (once per experiment and goal), or one with
+ * no experiment when they saw none. Crawlers are not counted. */
+async function recordGoal(input, name, path) {
+  if (CRAWLER.test(String((input.headers || {})["user-agent"] || ""))) return 0;
+  const visitor = String(input.visitor || "");
+  if (!visitor) return 0;
+  const site = String(input.site || "");
+  const d = database();
+  const exposures = await d[EXPOSURES].where({ site, visitor }).rows();
+  const now = new Date().toISOString();
+  if (!exposures.length) {
+    await d[CONVERSIONS].insert({ site, goal: name, visitor, path, created_at: now });
+    return 1;
+  }
+  let recorded = 0;
+  for (const exposure of exposures) {
+    const already = await d[CONVERSIONS].where({
+      site,
+      goal: name,
+      visitor,
+      experiment: exposure.experiment,
+    }).first();
+    if (already) continue;
+    try {
+      await d[CONVERSIONS].insert({
+        site,
+        goal: name,
+        experiment: exposure.experiment,
+        variant: exposure.variant,
+        visitor,
+        path,
+        created_at: now,
+      });
+      recorded++;
+    } catch {
+      // Recorded by the same visitor's other request a moment ago.
+    }
+    if (!Number(exposure.converted)) {
+      await d[EXPOSURES].where({ id: exposure.id }).update({ converted: 1 });
+    }
+  }
+  return recorded;
+}
+
+/** `goal("signup")` in a page's frontmatter: count the goal for this visitor,
+ * after a form posted to the page succeeded. Answers how many conversions
+ * were recorded (0 for a crawler, a repeat or a visitor with no id). */
+export async function goal(name) {
+  if (!active) throw new Error("goal() is called from a page's frontmatter, while it renders");
+  const text = typeof name === "string" ? name.trim() : "";
+  if (!text) throw new Error('goal() needs the goal\'s name, e.g. await goal("signup")');
+  if (active.input.mode === "prerender") {
+    throw new Error("goal() records a visitor's conversion, which a prerendered page has none of");
+  }
+  return recordGoal(active.input, text, active.input.path || "/");
+}
+
+/** `/_goal/<name>?to=…&s=…`: count the goal, then redirect to `to` — when the
+ * site's own page made the link (its signature checks), or `to` is a path on
+ * this site. Any other web address — a link from a page built before the last
+ * build, which signed with another secret, or one a stranger made — is neither
+ * counted nor followed: the visitor is shown where it leads and may click on.
+ * Never kept by the render cache: it writes. */
+async function goalRedirect(site, input, path) {
+  const name = decodeSegment(path.slice(GOAL_PREFIX.length).replace(/\/$/, ""));
+  const to = String((input.query || {}).to || "");
+  const local = to.startsWith("/") && !to.startsWith("//") && !to.startsWith("/\\");
+  const signed = name && to && (await goalSignature(site, name, to)) === String((input.query || {}).s || "");
+  if (!name || !to || !(local || signed)) {
+    const web = /^https?:\/\//i.test(to);
+    return {
+      status: web ? 200 : 400,
+      headers: [
+        ["content-type", "text/html; charset=utf-8"],
+        ["cache-control", "no-store"],
+      ],
+      body: web
+        ? `<!DOCTYPE html><title>Leaving this site</title><p>This link leads to ` +
+          `<a rel="nofollow noopener" href="${escapeHTML(to)}">${escapeHTML(to)}</a>.</p>`
+        : "<!DOCTYPE html><title>Bad link</title><p>This link was not made by this site.</p>",
+      cache: false,
+    };
+  }
+  if ((input.method || "GET") === "GET" || input.method === "HEAD") {
+    await recordGoal(input, name, String((input.headers || {}).referer || path));
+  }
+  return {
+    status: 302,
+    headers: [
+      ["location", to],
+      ["cache-control", "no-store"],
+    ],
+    body: "",
+    cache: false,
+  };
+}

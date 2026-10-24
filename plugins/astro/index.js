@@ -554,6 +554,16 @@ Everything a visitor sees is rendered on the server.
   \`{ src, width, height }\`, and \`<Image src={hero} alt="…" width={600} />\`
   from \`feldspar:components\` serves it resized (\`format\`, \`quality\`,
   \`widths\` and \`sizes\` too). Images are never enlarged.
+- **A/B tests**: wrap the versions of a headline (or a section) in
+  \`<Optimise name="hero">\` with one \`<Variant name="…">\` each, from
+  \`feldspar:components\`. Each visitor is shown one version, always the same
+  one; search engines always get the first. Mark what counts as success with
+  \`<Goal name="signup">\` around a link, or \`await goal("signup")\` in the
+  frontmatter of a page a form posts to. \`allocate="thompson"\` shows the
+  better version more as results come in (the default is an even split, or
+  \`weights={[80, 20]}\`). A page with an \`<Optimise>\` cannot be prerendered.
+  The results are in the tables \`astro_exposures\` and \`astro_conversions\`,
+  and in the Analytics UI's *A/B tests* workspace.
 - **Forms** post back to their page as \`application/x-www-form-urlencoded\` and
   must include \`<Csrf />\` from \`feldspar:components\`. See
   \`src/pages/contact.astro\`.
@@ -626,6 +636,21 @@ type ImageMetadata = { src: string; width?: number; height?: number; format: str
 declare module "feldspar:components" {
   /** The hidden \`_csrf\` field a form posting back to a page must carry. */
   export const Csrf: any;
+  /** An A/B test: renders one of the \`<Variant>\`s directly inside it, chosen per visitor. */
+  export const Optimise: (props: {
+    name: string;
+    /** \`fixed\` (the default: an even split, or \`weights\`) or \`thompson\`. */
+    allocate?: "fixed" | "thompson";
+    weights?: number[] | Record<string, number>;
+    /** The goal \`thompson\` optimises; any goal when not given. */
+    goal?: string;
+  }) => any;
+  /** One version inside an \`<Optimise>\`. Name it: the name is what is recorded. */
+  export const Variant: (props: { name?: string }) => any;
+  /** A conversion goal: each link inside it is counted when followed. */
+  export const Goal: (props: { name: string }) => any;
+  /** Count the goal \`name\` for this visitor (after a form posted successfully). */
+  export function goal(name: string): Promise<number>;
   /** An image resized on the server: \`<Image src={imported} alt="…" width={400} />\`. */
   export const Image: (props: {
     src: ImageMetadata | string;
@@ -708,9 +733,68 @@ function runtime(ctx) {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// The A/B test tables (TODO-astro W3.3)
+// ---------------------------------------------------------------------------
+
+/** What `<Optimise>`, `<Goal>` and `goal()` record (`files/server.mjs`), kept
+ * per site — the application's name — so several sites share the two tables.
+ * An **exposure** is one visitor's first view of one experiment: the arm they
+ * were given, and whether they have converted on any goal since. A
+ * **conversion** is one goal reached by one visitor, once per experiment they
+ * were exposed to (or once with no experiment, when they saw none). Only the
+ * admin reads them: the server's pages write them with a code action's
+ * authority, and the Analytics UI reports on them. */
+const tables = [
+  {
+    name: "astro_exposures",
+    label: "A/B exposures",
+    description: "One row per visitor and experiment: the variant an Astro site showed them.",
+    fields: [
+      { name: "site", type: "text", required: true, label: "Site" },
+      { name: "experiment", type: "text", required: true, label: "Experiment" },
+      { name: "variant", type: "text", required: true, label: "Variant" },
+      { name: "visitor", type: "text", required: true, label: "Visitor" },
+      { name: "path", type: "text", label: "First seen on" },
+      {
+        name: "converted",
+        type: "int",
+        required: true,
+        default: 0,
+        label: "Converted",
+        description: "1 once the visitor has reached any goal after seeing the variant",
+      },
+      { name: "created_at", type: "timestamp", label: "Seen at" },
+    ],
+    unique: [["site", "experiment", "visitor"]],
+    indexes: [["site", "visitor"], ["site", "experiment", "variant"]],
+    min_role_read: 1,
+    min_role_write: 1,
+  },
+  {
+    name: "astro_conversions",
+    label: "A/B conversions",
+    description: "One row per goal a visitor reached, for each experiment they had seen.",
+    fields: [
+      { name: "site", type: "text", required: true, label: "Site" },
+      { name: "goal", type: "text", required: true, label: "Goal" },
+      { name: "experiment", type: "text", label: "Experiment" },
+      { name: "variant", type: "text", label: "Variant" },
+      { name: "visitor", type: "text", required: true, label: "Visitor" },
+      { name: "path", type: "text", label: "Reached from" },
+      { name: "created_at", type: "timestamp", label: "Reached at" },
+    ],
+    unique: [["site", "experiment", "goal", "visitor"]],
+    indexes: [["site", "experiment", "goal", "variant"]],
+    min_role_read: 1,
+    min_role_write: 1,
+  },
+];
+
 module.exports = {
   sc_plugin_api_version: 1,
   plugin_name: "astro",
+  tables,
   frameworks: {
     astro: {
       label: "Astro (website)",

@@ -1790,6 +1790,18 @@ async fn dispatch_app(
         .or_else(|| jar.get(CSRF_COOKIE).map(|c| c.value().to_owned()))
         .unwrap_or_default();
     req.cookies = app_cookies(&jar);
+    // The anonymous visitor id an A/B test assigns by (TODO-astro W3.1): the
+    // cookie's, or a new one, which is only kept if the answer used it.
+    let minted_visitor = match crate::security::visitor_id(&jar) {
+        Some(id) => {
+            req.visitor = id;
+            None
+        }
+        None => {
+            req.visitor = crate::security::new_visitor_id();
+            Some(req.visitor.clone())
+        }
+    };
     match app.framework.handle(req, catalog).await {
         // A store file (`/files/serve/*`) through the shared builder.
         Ok(sc_app::AppResponse {
@@ -1808,7 +1820,13 @@ async fn dispatch_app(
                 Ok(cookies) => cookies,
                 Err(rejection) => return with_csp(*rejection, &csp),
             };
-            let mut out = (status, cookies.jar, cookies.stale, resp.body).into_response();
+            let jar = match minted_visitor {
+                Some(id) if resp.keeps_visitor => cookies
+                    .jar
+                    .add(crate::security::visitor_cookie(id, state.secure_cookies)),
+                _ => cookies.jar,
+            };
+            let mut out = (status, jar, cookies.stale, resp.body).into_response();
             if let Ok(ct) = HeaderValue::from_str(&resp.content_type) {
                 out.headers_mut().insert(header::CONTENT_TYPE, ct);
             }

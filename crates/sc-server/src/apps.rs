@@ -1265,10 +1265,25 @@ pub async fn build_and_mount_with(
         source.build.clone(),
         apps.triggers().cloned(),
     )?;
+    // A website's A/B tests are reported in the Analytics UI (TODO-astro
+    // W3.6): its workspace is there from the first full build, made once and
+    // the admin's after that. Nothing to report must not fail a build.
+    let site = (app.framework.name == ASTRO_FRAMEWORK && !quick).then(|| app.name.clone());
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
+    if let Some(site) = site
+        && let Err(e) = sc_analytics::ab::ensure_ab_workspace(catalog, &site).await
+    {
+        eprintln!(
+            "feldspar: making the A/B tests workspace of {site}: {}",
+            e.chain()
+        );
+    }
     Ok(report)
 }
+
+/// The Astro module's framework, whose sites may run A/B tests.
+const ASTRO_FRAMEWORK: &str = "astro";
 
 /// Mount `app` from what its last build left on disk, **running no bundler** —
 /// what boot ([`mount_all`]) and a `SIGHUP` reload both do. Returns how many

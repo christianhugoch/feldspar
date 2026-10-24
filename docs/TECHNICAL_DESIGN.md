@@ -114,7 +114,8 @@ feldspar/
 │  │                              #    (`_fd_workspaces`), the demo data, plot specs and their
 │  │                              #    stats, tests, a fit's outputs drawn (above sc-model), and —
 │  │                              #    as the analytics milestones arrive — panels, map layers,
-│  │                              #    and the Analytics framework's policy (`app.rs`, §14.9)
+│  │                              #    the Analytics framework's policy (`app.rs`, §14.9), and
+│  │                              #    the Astro sites' A/B tests dashboard (`ab.rs`, §13.3)
 │  ├─ sc-stan/                    # 6. Bayesian models with Stan, beside sc-model (§14.2,
 │  │                              #    "Bayesian models"): CmdStan discovery (`--cmdstan`,
 │  │                              #    `$CMDSTAN`, `~/.cmdstan`) and `feldspar cmdstan install`;
@@ -6269,10 +6270,9 @@ request until the next full build); with no dependencies installed yet it is a f
 IDE's **Build on save** switch runs it for the application whose source holds the saved file,
 once per burst of saves and never two at a time.
 
-##### Designed for later: A/B optimisation of landing pages
+##### A/B optimisation of landing pages
 
-The intended authoring syntax is a pair of components (and a goal marker) from
-`feldspar:components` (the virtual module that already carries `<Csrf />`):
+A pair of components and a goal marker from `feldspar:components` (TODO-astro W3):
 
 ```astro
 ---
@@ -6288,36 +6288,67 @@ import { Optimise, Variant, Goal } from "feldspar:components";
 <Goal name="signup"><a class="button" href="https://app.example.com/signup">Sign up</a></Goal>
 ```
 
-How it fits what exists:
-
 - **Choosing a variant is a server-side render decision**, which is why this framework is the
   right place for it: the visitor's HTML contains only the chosen variant, so there is no flash
-  of the control and no client-side testing script. `<Optimise>` renders one of its `<Variant>`
-  slots; the runtime already gives a component the per-request `result`, which is where the
-  choice is made and remembered for the rest of the page.
-- **Stable assignment** needs a visitor id. The router hands a framework the application's own
-  cookies (`AppRequest::cookies`), but a visitor id must be the server's, so this needs one small
-  addition: an anonymous `sc_*` visitor cookie the router mints, reads and hands over on its own
-  (the guest-session cookie of TODO-payments P1.5 is the precedent). Assignment is
-  `hash(visitor, experiment) → arm`, so it needs no write per page view. A page that reads it is
-  per visitor, so the render cache leaves it alone.
-- **Exposure and conversion are events**, recorded into two tables the module declares
-  (`tables: [...]`, Step 7 of the modules tutorial): an exposure when a page renders a variant,
-  a conversion when a `<Goal>` is reached. `<Goal>` wraps a link or a form: a link goes through a
-  tiny redirect endpoint (`/_goal/<name>?to=…`) the runtime routes itself, and a form posting
-  back to a page calls `goal("signup")` from its frontmatter. Recording from the body is one
-  `db.insert`, on the call budget every page already has.
-- **Allocation** starts as a fixed even split and moves to Thompson sampling over the conversion
-  counts (a beta–binomial bandit is a few lines, and `sc-stan` exists for anything richer). The
-  arm weights are read once per render from the exposure/conversion tables — or from the render
-  cache's neighbour, an in-isolate snapshot refreshed every few seconds.
-- **Prerendering and variants**: a page with an `<Optimise>` cannot be one static file. The
-  prerender step will refuse such a page with a sentence saying so (cheap, honest), and a later
-  version can prerender one file per arm and pick among them in Rust without running the body.
-- **SEO**: crawlers (`user-agent` is passed to the framework for this) always get the first
-  variant and are never counted, so a test does not show search engines alternating content.
-- **Reporting** is an Analytics workspace over the two tables (`sc-analytics`), so no new admin
-  screen is needed for a first version.
+  of the control and no client-side testing script. Each `<Variant>` registers itself with the
+  enclosing `<Optimise>` while the slot's template is evaluated — synchronously, through a stack
+  on the per-request `result` — and answers a promise of its content; `<Optimise>` decides and
+  resolves them, so only the chosen variant's slot is ever rendered. A `<Variant>` inside another
+  component inside the `<Optimise>` is refused by name. One experiment twice on a page shows one
+  arm (the choice is kept on the page context). Unnamed variants are `control` (the first) and
+  `variant-<n>`.
+- **The visitor id** is the server's: `sc_visitor`, a random 32-hex id the router reads
+  (`security::visitor_id`, which ignores a value of any other shape) or mints per request, and
+  hands over as `AppRequest::visitor` (`request.visitor`). It is not among `request.cookies`. A
+  framework that used it says so (`AppResponse::keeps_visitor`, from the entry's `visitor: true`),
+  and only then does the router set a minted one — `HttpOnly`, host-only, a year, and
+  `SameSite=Lax`, because the visitor who arrives from a search result is the one to recognise.
+  So a site that runs no experiment sets no cookie. A page that read the id is the visitor's
+  own: the render cache never keeps it.
+- **Assignment** is `hash(visitor, experiment)` (SHA-256 through the isolate's `crypto.subtle`),
+  which seeds a small PRNG. On a visitor's first view of an experiment the arm is chosen from it
+  and an **exposure** row is inserted; every later view reads that row and shows the same arm,
+  however the allocation has moved since. A concurrent second insert loses to the table's unique
+  constraint and shows what the first chose. That is one read per render of an experiment, and
+  one write per new visitor, on the call budget every page already has.
+- **Allocation**: a fixed split — even, or `weights={[…]}` (or `{ name: weight }`) — is the
+  default; `allocate="thompson"` is Thompson sampling, a beta–binomial bandit: one
+  Beta(1 + conversions, 1 + exposures − conversions) draw per arm from the grouped counts
+  (`groupBy("variant").aggregate({ n: "count()", won: "sum(converted)" })`), and the largest
+  wins. The draws come from the visitor's seeded PRNG, so the same visitor gets the same choice
+  from the same counts. `goal="signup"` counts only that goal's conversions; without it, any
+  goal (the exposure's `converted` flag). The counts are read only for a new visitor, so a
+  returning visitor's render does not pay for them.
+- **The tables** are the module's own (`tables` in `plugins/astro/index.js`, created when the
+  module loads), kept per site (`request.site`, the application's name) so several sites share
+  them, and readable by the admin only:
+  - `astro_exposures(site, experiment, variant, visitor, path, converted, created_at)`, unique by
+    `(site, experiment, visitor)`;
+  - `astro_conversions(site, goal, experiment, variant, visitor, path, created_at)`, unique by
+    `(site, experiment, goal, visitor)` — one row per goal and experiment the visitor was
+    exposed to, or one with no experiment for a visitor who saw none; reaching a goal also sets
+    the exposures' `converted` to 1.
+- **Goals.** `<Goal name>` rewrites each `<a href>` inside it to
+  `/_goal/<name>?to=…&s=<signature>` (with `rel="nofollow"`), which the runtime answers itself
+  before routing: it records the conversion and redirects. The signature is SHA-256 over a
+  random secret the build writes into the entry (which is never served), the goal and the
+  target, so `/_goal/` is not an open redirect. A path on the site needs no signature; an
+  unsigned web address — a link from a page built before the last build, or a stranger's — is
+  neither counted nor followed, but shown as a link to click. A form that posts back calls
+  `goal("signup")` from its frontmatter; it reads this request from module-level state, which is
+  per request because the body (and so the bundled runtime) runs afresh for each one.
+- **Prerendering and variants**: a page with an `<Optimise>` cannot be one static file, and the
+  prerender step (and a refreshable page's re-render) refuses it with a sentence naming the
+  page. One file per arm, chosen in Rust without running the body, is left for later: it would
+  need the assignment (and its exposure row) in Rust too.
+- **SEO**: crawlers (by `user-agent`) always get the first variant and are never counted, at
+  render or at `/_goal/`, so a test does not show search engines alternating content.
+- **Reporting** is an Analytics dashboard (`sc_analytics::ab::ensure_ab_workspace`), made after
+  the first full build of an `astro` application when the two tables exist: two datasets
+  filtered to the site (`A/B exposures: <site>`, `A/B conversions: <site>`) and a dashboard
+  `A/B tests: <site>` with a sentence on reading it, visitors and mean `converted` by experiment
+  and variant, and conversions by goal. Made once and found by name afterwards, so the admin's
+  changes stand; a failure is logged and does not fail the build. No new admin screen.
 
 #### Saltcorn UI: v1's views, hosted rather than reimplemented
 
