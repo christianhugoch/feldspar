@@ -836,18 +836,43 @@ impl SaltcornUiFramework {
     /// A wrong password, an unknown email and a disabled account are one answer,
     /// as they are everywhere else: telling them apart would tell a stranger
     /// which addresses have accounts.
+    ///
+    /// Throttled exactly as the admin and REST logins are, under the same keys
+    /// ([`sc_api::throttle`]): the users table is the instance's, so a guess
+    /// through an application's form counts against the same account and the
+    /// same address as one through the admin's (security review 2026-10 #7).
     async fn login(&self, req: &AppRequest, cat: &Catalog, dest: &str) -> Result<AppResponse> {
         let email = field_of(req, "email");
         let password = field_of(req, "password");
-        match sc_auth::authenticate(cat, &email, &password).await? {
-            Some(user) => Ok(signed_in(user, dest)),
-            None => Ok(self.auth_form(
+        if let Err(limited) = sc_api::throttle::login_attempt(req.client_ip, &email) {
+            let mut out = self.auth_form(
                 req,
                 AuthForm::Login,
-                401,
+                429,
                 email.trim(),
-                Some(&t!(req.locale, "Incorrect email or password.")),
-            )),
+                Some(&t!(
+                    req.locale,
+                    "Too many sign-in attempts. Try again in a few minutes."
+                )),
+            );
+            out.headers.push((
+                "retry-after".to_owned(),
+                limited.retry_after_secs().to_string(),
+            ));
+            return Ok(out);
+        }
+        match sc_auth::authenticate(cat, &email, &password).await? {
+            Some(user) => Ok(signed_in(user, dest)),
+            None => {
+                sc_api::throttle::login_failed(&email);
+                Ok(self.auth_form(
+                    req,
+                    AuthForm::Login,
+                    401,
+                    email.trim(),
+                    Some(&t!(req.locale, "Incorrect email or password.")),
+                ))
+            }
         }
     }
 
@@ -1675,7 +1700,11 @@ pub async fn serve_store_file(
     rest: &[&str],
 ) -> Result<AppResponse> {
     let parts: Vec<String> = rest.iter().map(|p| percent_decode(p)).collect();
-    if !confined(&parts) {
+    // No dotfile and no dot-directory, whatever the rules on the files say: a
+    // store that is a checkout holds `.git` and `.env` beside its content, and
+    // nothing Saltcorn stores (uploads are named with a UUID prefix) starts
+    // with a dot.
+    if !confined(&parts) || parts.iter().any(|p| p.starts_with('.')) {
         return Ok(AppResponse::not_found());
     }
     let stores = &app.file_stores;

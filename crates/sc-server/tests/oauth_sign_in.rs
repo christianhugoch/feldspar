@@ -256,6 +256,10 @@ async fn fake_provider(seen: Arc<Mutex<Seen>>) -> String {
             .strip_prefix("Bearer tok:")
             .unwrap_or_default()
             .to_owned();
+        // `silent…` gets no `email_verified` at all, as Microsoft's userinfo.
+        if email.starts_with("silent") {
+            return axum::Json(json!({ "sub": "1", "email": email }));
+        }
         let verified = !email.starts_with("unverified");
         axum::Json(json!({ "sub": "1", "email": email, "email_verified": verified }))
     };
@@ -513,6 +517,16 @@ async fn an_application_and_the_admin_ui_sign_in_with_an_identity_provider() -> 
             .await?
             .is_none()
     );
+    // So is one the provider does not say it verified, unless the admin
+    // trusts its addresses.
+    let mut other = Browser::new(router.clone(), APP_HOST);
+    let (_, back) = sign_in(&router, &mut other, &seen, "silent@example.com", "/x").await;
+    assert!(back.unwrap().starts_with("/x?oauth_error="));
+    assert!(
+        load_user_by_email(&catalog, "silent@example.com")
+            .await?
+            .is_none()
+    );
 
     // --- finished in another browser: refused -----------------------------
     let mut starter = Browser::new(router.clone(), APP_HOST);
@@ -571,6 +585,17 @@ async fn an_application_and_the_admin_ui_sign_in_with_an_identity_provider() -> 
     let (status, _) = sign_in(&router, &mut admin_ui, &seen, ADMIN_EMAIL, "/").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(admin_ui.admin_user().await.as_deref(), Some(ADMIN_EMAIL));
+    // A flow started on a host this server does not serve by name — which
+    // routes to the admin, as any unknown host does — is refused: its
+    // completion token would be sent back there, to whoever runs that host.
+    for forged in ["attacker.example", "evil.com:8080"] {
+        let mut attacker = Browser::new(router.clone(), forged);
+        let (status, _) = attacker
+            .raw("GET", "/_feldspar/oauth/corp/start?return_to=/", None)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{forged}");
+        assert!(!attacker.cookies.contains_key(OAUTH_BINDING_COOKIE));
+    }
     // The admin host does not create accounts, whatever the provider says.
     let mut stranger = Browser::new(router.clone(), BASE_DOMAIN);
     sign_in(&router, &mut stranger, &seen, "stranger@example.com", "/").await;

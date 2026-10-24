@@ -13,6 +13,15 @@
 //!   must echo it in the `x-csrf-token` header. A cross-site page can send the
 //!   cookie but cannot read it to set the header, so the forgery fails.
 //!
+//!   Behind TLS the cookie is named `__Host-sc_csrf`. Sibling subdomains are
+//!   *same-site*, so script on one of them (an application's own code, an
+//!   upload) could otherwise **toss** a `sc_csrf; Domain=<base>` cookie of its
+//!   choosing and then forge a form post to another host carrying the same
+//!   value; the `__Host-` prefix makes the browser refuse a cookie with a
+//!   `Domain`, so only this host can set the one the check reads. A plain-`http`
+//!   (development) server cannot use the prefix — it requires `Secure` — and
+//!   keeps the plain name.
+//!
 //!   The token is also sent as an `x-csrf-token` **response header** on API
 //!   answers (JSON) and on the refusal. A browser page reads it from the cookie;
 //!   a native app — React Native on a phone — has no `document.cookie` to read,
@@ -62,7 +71,9 @@ pub const VISITOR_COOKIE_DAYS: i64 = 365;
 /// server enforces the check here and the generated TypeScript client satisfies
 /// it, and a second spelling of either name is exactly how those two stop
 /// agreeing.
-pub use sc_api::auth::{CLIENT_KIND_HEADER, CSRF_COOKIE, CSRF_HEADER, NATIVE_CLIENT};
+pub use sc_api::auth::{
+    CLIENT_KIND_HEADER, CSRF_COOKIE, CSRF_HEADER, NATIVE_CLIENT, SECURE_CSRF_COOKIE, csrf_cookie,
+};
 
 /// The strict Content-Security-Policy served with every response. No
 /// `unsafe-inline` **script**: executable code loads only from the app's own
@@ -464,6 +475,65 @@ fn authority(host_and_port: &str, scheme: Option<&str>) -> String {
     }
 }
 
+/// Whether a `Host` header is a plain `host[:port]`: a DNS name (letters,
+/// digits, `-`, `.`, `_`) or a bracketed IPv6 literal, then at most one port of
+/// digits.
+///
+/// Anything else is refused before routing ([`host_header_guard`]), because the
+/// server builds links from the `Host` a request arrived on — a password reset's,
+/// an invitation's, an OAuth flow's way home — and every reader of it cuts the
+/// port at the first `:`. `blog.example.com:@evil.com` would route to `blog`
+/// while a link built from it lands a browser on `evil.com`, carrying its token.
+pub(crate) fn is_valid_host_header(host: &str) -> bool {
+    let digits =
+        |port: &str| (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit());
+    let (name, port) = if let Some(rest) = host.strip_prefix('[') {
+        let Some((literal, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if literal.is_empty()
+            || !literal
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+        {
+            return false;
+        }
+        return match after {
+            "" => true,
+            _ => after.strip_prefix(':').is_some_and(digits),
+        };
+    } else {
+        match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        }
+    };
+    !name.is_empty()
+        && name.len() <= 253
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+        && port.is_none_or(digits)
+}
+
+/// Refuse a request whose `Host` header is not [`is_valid_host_header`] with a
+/// `400`, before anything reads it. A request without one passes: nothing is
+/// built from a host it did not name.
+pub(crate) async fn host_header_guard(request: Request, next: Next) -> Response {
+    let valid = match request.headers().get(axum::http::header::HOST) {
+        None => true,
+        Some(value) => value.to_str().is_ok_and(is_valid_host_header),
+    };
+    if !valid {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": "malformed Host header" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 /// Whether a method may change server state (and so needs CSRF protection).
 fn is_mutating(method: &Method) -> bool {
     !matches!(
@@ -531,8 +601,9 @@ pub(crate) struct AnonymousCaller;
 
 /// CSRF middleware implementing the double-submit-cookie check.
 ///
-/// On a mutating request the token must equal the existing `sc_csrf` cookie,
-/// else the request is rejected `403`. The token may come in any of three
+/// On a mutating request the token must equal the existing CSRF cookie
+/// ([`csrf_cookie`]: `__Host-sc_csrf` behind TLS, `sc_csrf` otherwise), else
+/// the request is rejected `403`. The comparison is constant-time. The token may come in any of three
 /// places, all the same check against the same cookie:
 ///
 /// - the `x-csrf-token` header — the admin SPA and the generated client;
@@ -560,7 +631,8 @@ pub(crate) async fn csrf_middleware(
     next: Next,
 ) -> Response {
     let secure = policy.secure;
-    let existing = jar.get(CSRF_COOKIE).map(|c| c.value().to_owned());
+    let cookie_name = csrf_cookie(secure);
+    let existing = jar.get(cookie_name).map(|c| c.value().to_owned());
     let mut request = request;
 
     if is_mutating(request.method()) && !is_bearer_authenticated(&request) {
@@ -569,7 +641,8 @@ pub(crate) async fn csrf_middleware(
             .find_map(|name| request.headers().get(*name))
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let mut valid = matches!((&existing, &header), (Some(cookie), Some(hdr)) if cookie == hdr);
+        let mut valid =
+            matches!((&existing, &header), (Some(cookie), Some(hdr)) if tokens_match(cookie, hdr));
         if !valid && header.is_none() && is_form(&request) {
             let (parts, body) = request.into_parts();
             let bytes = match axum::body::to_bytes(body, MAX_CSRF_FORM_BODY).await {
@@ -579,7 +652,8 @@ pub(crate) async fn csrf_middleware(
                 }
             };
             valid = existing.as_deref().is_some_and(|cookie| {
-                form_field(&bytes, CSRF_FORM_FIELD).as_deref() == Some(cookie)
+                form_field(&bytes, CSRF_FORM_FIELD)
+                    .is_some_and(|field| tokens_match(&field, cookie))
             });
             request = Request::from_parts(parts, axum::body::Body::from(bytes));
         }
@@ -598,7 +672,7 @@ pub(crate) async fn csrf_middleware(
             let token = existing.clone().unwrap_or_else(new_csrf_token);
             let jar = match existing {
                 Some(_) => jar,
-                None => jar.add(build_cookie(CSRF_COOKIE, token.clone(), false, secure)),
+                None => jar.add(build_cookie(cookie_name, token.clone(), false, secure)),
             };
             let mut refused =
                 (StatusCode::FORBIDDEN, jar, "CSRF token missing or invalid").into_response();
@@ -612,11 +686,19 @@ pub(crate) async fn csrf_middleware(
     let response = next.run(request).await;
     let jar = match existing {
         Some(_) => jar,
-        None => jar.add(build_cookie(CSRF_COOKIE, token.clone(), false, secure)),
+        None => jar.add(build_cookie(cookie_name, token.clone(), false, secure)),
     };
     let mut response = (jar, response).into_response();
     expose_csrf_token(&mut response, &token);
     response
+}
+
+/// Whether a submitted CSRF token equals the cookie's, compared in constant time
+/// (for equal lengths) so the check leaks nothing about how much of a guess was
+/// right.
+fn tokens_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Name the request's CSRF token in the response's `x-csrf-token` header — how a
@@ -692,7 +774,46 @@ fn form_field(body: &[u8], name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_KIND_HEADER, NATIVE_CLIENT, SESSION_COOKIE, upgrade_origin_allowed};
+    use super::{
+        CLIENT_KIND_HEADER, NATIVE_CLIENT, SESSION_COOKIE, is_valid_host_header,
+        upgrade_origin_allowed,
+    };
+
+    #[test]
+    fn only_a_plain_host_and_port_is_a_valid_host_header() {
+        for good in [
+            "example.com",
+            "blog.example.com:3032",
+            "localhost",
+            "127.0.0.1:8080",
+            "[::1]",
+            "[::1]:443",
+            "blog.example.com.",
+            "my_box",
+        ] {
+            assert!(is_valid_host_header(good), "{good}");
+        }
+        for bad in [
+            "",
+            "blog.example.com:@evil.com",
+            "blog.example.com:80@evil.com",
+            "user@blog.example.com",
+            "blog.example.com/evil",
+            "blog.example.com\\evil",
+            "blog.example.com:80:81",
+            "blog.example.com:",
+            "blog.example.com:123456",
+            "blog.example.com#x",
+            "blog.example.com?x",
+            ":80",
+            "[::1",
+            "[::1]x",
+            "[evil.com]",
+            "[::1]:",
+        ] {
+            assert!(!is_valid_host_header(bad), "{bad}");
+        }
+    }
 
     fn upgrade(host: &str, origin: Option<&str>, cookie: bool, native: bool) -> bool {
         let mut headers = axum::http::HeaderMap::new();
