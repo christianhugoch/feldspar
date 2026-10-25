@@ -14,12 +14,16 @@ export type BuildHost = ListBuildHostsResponse[number];
 /** Where the agent reads its token from on the build host. */
 export const TOKEN_FILE = "~/.feldspar-build-token";
 
-/** The badge beside a host's name: whether its agent is heard from. */
-export function hostBadge(host: BuildHost): { label: string; tone: string } {
-  if (refusal(host)) return { label: "Needs update", tone: "bg-red-lt" };
-  if (host.online) return { label: "Online", tone: "bg-green-lt" };
-  if (!host.last_seen_at) return { label: "Never connected", tone: "bg-secondary-lt" };
-  return { label: "Offline", tone: "bg-yellow-lt" };
+/** The badge beside a host's name: whether its agent is heard from. `t` is the
+ * screen's translator, called here with each label written out. */
+export function hostBadge(
+  t: (text: string) => string,
+  host: BuildHost,
+): { label: string; tone: string } {
+  if (refusal(host)) return { label: t("Needs update"), tone: "bg-red-lt" };
+  if (host.online) return { label: t("Online"), tone: "bg-green-lt" };
+  if (!host.last_seen_at) return { label: t("Never connected"), tone: "bg-secondary-lt" };
+  return { label: t("Offline"), tone: "bg-yellow-lt" };
 }
 
 /** Why the server turned the host's agent away at its last heartbeat (an

@@ -5906,6 +5906,13 @@ fn application_schema() -> TypeSchema {
                 TypeSchema::struct_of([
                     StructField::new("ready", TypeSchema::bool()),
                     StructField::new("missing", TypeSchema::array(TypeSchema::text())),
+                    // The required variables no setting fills, which come from
+                    // the environment the server was started with, one sentence
+                    // each with the value.
+                    StructField::new("from_environment", TypeSchema::array(TypeSchema::text())),
+                    // The build host it is built on when this server cannot
+                    // build it itself (`TODO-build-hosts.md` B2.2).
+                    StructField::new("build_host", TypeSchema::optional(TypeSchema::text())),
                 ]),
             ),
         ])),
@@ -6274,8 +6281,10 @@ fn target_build_schema() -> TypeSchema {
     TypeSchema::struct_of([
         StructField::new("target", TypeSchema::text()),
         StructField::new("label", TypeSchema::text()),
-        // `running`, `succeeded` or `failed`.
+        // `queued` (waiting for a build host), `running`, `succeeded` or `failed`.
         StructField::new("status", TypeSchema::text()),
+        // The build host it is built on; none for a build on this server.
+        StructField::new("build_host", TypeSchema::optional(TypeSchema::text())),
         StructField::new("store", TypeSchema::text()),
         StructField::new("log_path", TypeSchema::text()),
         StructField::new("started_at", TypeSchema::timestamp()),
@@ -6960,6 +6969,15 @@ fn form_field_schema() -> TypeSchema {
         // (v1's `regexp`), and what to say when it does not, or null.
         StructField::new("pattern", TypeSchema::optional(TypeSchema::text())),
         StructField::new("pattern_error", TypeSchema::optional(TypeSchema::text())),
+        // The environment variable a blank value leaves the job to, and its
+        // value in the server's environment now (null when unset), or null.
+        StructField::new(
+            "env_fallback",
+            TypeSchema::optional(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("value", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
         // When the setting applies: every named setting holds one of its
         // values. Empty means always. The form hides a setting that does not
         // apply, and the server does not require it.

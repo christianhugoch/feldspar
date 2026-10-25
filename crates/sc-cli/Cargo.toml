@@ -115,6 +115,8 @@ sc-stan.workspace = true
 axum.workspace = true
 tower.workspace = true
 serde_json.workspace = true
+# A stub framework's templates, for the build agent's job test.
+sc-expr.workspace = true
 
 [lints]
 workspace = true
@@ -122,3 +124,8 @@ workspace = true
 [[test]]
 name = "it"
 path = "tests/it.rs"
+
+# Installs a framework, which is process-wide, so it is a binary of its own.
+[[test]]
+name = "build_agent_jobs"
+path = "tests/build_agent_jobs.rs"

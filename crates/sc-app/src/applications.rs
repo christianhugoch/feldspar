@@ -163,6 +163,7 @@ pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
     crate::uploads::bootstrap_uploads(catalog).await?;
     // …and the machines that build its native apps (`TODO-build-hosts.md`).
     crate::build_hosts::bootstrap_build_hosts(catalog).await?;
+    crate::build_jobs::bootstrap_build_jobs(catalog).await?;
     Ok(table)
 }
 

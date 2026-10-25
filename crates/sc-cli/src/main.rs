@@ -1182,8 +1182,8 @@ async fn set_cfg_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `feldspar build-agent --server URL [--token-file PATH] [--once]` — run this
-/// machine as a build host (`TODO-build-hosts.md`). See `sc_cli::build_agent`.
+/// `feldspar build-agent --server URL [--token-file PATH] [--workspace DIR] [--insecure-http]
+/// [--once]` — run this machine as a build host (`TODO-build-hosts.md`). See `sc_cli::build_agent`.
 async fn build_agent_command(args: &[String]) -> Result<()> {
     sc_cli::build_agent::run(&sc_cli::build_agent::parse_args(args)?).await
 }
@@ -2363,7 +2363,8 @@ fn print_usage() {
     eprintln!("                      [--allow-modules|--no-allow-modules]");
     eprintln!("                      [--url ORIGIN] [--name NAME] [database flags]");
     eprintln!("  feldspar mcp-token list [--json] [database flags]");
-    eprintln!("  feldspar build-agent --server URL [--token-file PATH] [--once]");
+    eprintln!("  feldspar build-agent --server URL [--token-file PATH] [--workspace DIR]");
+    eprintln!("                      [--insecure-http] [--once]");
     eprintln!("                      (or the token in FELDSPAR_BUILD_TOKEN)");
     eprintln!("  feldspar mcp-token revoke ID [database flags]");
     eprintln!("  feldspar add-user EMAIL --role ROLE [--password [VALUE]] [database flags]");

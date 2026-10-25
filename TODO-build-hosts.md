@@ -31,27 +31,37 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## B2 — Jobs
 
-- [ ] B2.1 `_fd_build_jobs`: a queued target build, with the application, the target, the build
-      host that took it, its state and its lease. Jobs survive a restart, unlike today's jobs,
-      which live in memory.
-- [ ] B2.2 The build button: when the target's requirements do not hold on the server but an
-      online build host builds it, the job is queued instead of run here.
-- [ ] B2.3 Before queueing, the server regenerates the client and runtime as for a local build,
-      then packs the project as a `tar.gz`. It leaves out what the backup leaves out
-      (`node_modules`) and what the build makes (`android`, `ios`, `*-output`, `build-logs`).
-      Android signing keys (`*.p12`, `*.jks`) stay out of iOS jobs.
-- [ ] B2.4 The agent claims a job by long-polling. The answer is the archive and the rendered
-      target: command, arguments, environment (the iOS secrets included) and artifact path.
-- [ ] B2.5 The agent unpacks into a workspace it keeps per application, runs the install step and
-      the command, and checks that the artifact is there. It reuses the local build's code.
-- [ ] B2.6 The log goes back in chunks while the build runs. The server writes it to
+- [x] B2.1 `_fd_build_jobs`: a queued target build, with the application, the target, the build
+      host that took it, its state and its lease. Jobs survive a restart, unlike local target
+      builds, which live in memory.
+- [x] B2.2 The build button: when the target's requirements do not hold on the server but an
+      online build host builds it and last reported it ready, the job is queued instead of run
+      here. A second press joins the queued or running job. The applications list says the
+      target is ready, on that host.
+- [x] B2.3 Before queueing, the server regenerates the client and runtime as for a local build.
+      The project is packed as a zip when the agent fetches it, leaving out what the backup
+      leaves out (`node_modules`), `.git`, and what the build makes (`android`, `ios`,
+      `*-output`, `build-logs`). Signing keys (`*.jks`, `*.keystore`, `*.p12`) go only to an
+      Android job.
+- [x] B2.4 The agent claims a job by long-polling. The answer is the rendered target: command,
+      arguments, environment (the iOS secrets included) and artifact path; the project comes
+      from a second route.
+- [x] B2.5 The agent unpacks into a workspace it keeps per application (`--workspace`, by default
+      in Feldspar's data directory), runs the install step and the command with the local
+      build's code (`run_target`), and checks that the artifact is there.
+- [x] B2.6 The log goes back in chunks while the build runs. The server writes it to
       `build-logs/` as a local build does, so the admin can follow it.
-- [ ] B2.7 The artifact is uploaded and written into the store at the usual path
+- [x] B2.7 The artifact is streamed up and written into the store at the usual path
       (`ios-output/app.ipa`), so it is downloaded from Files as before.
-- [ ] B2.8 A heartbeat renews the lease while the job runs. A job whose lease runs out fails with
-      a reason saying the build host stopped answering.
-- [ ] B2.9 Tests: a fake agent in the test suite claims a job, sends a log and an artifact, and the
-      file is in the store; a lost agent fails its job; a wrong token opens nothing.
+- [x] B2.8 A heartbeat (or a piece of log) renews the lease while the job runs. A job whose lease
+      runs out fails with a reason saying the build host stopped answering.
+- [x] B2.9 Tests: a fake agent in the test suite claims a job, sends a log and an artifact, and the
+      file is in the store; a lost agent fails its job; a wrong token opens nothing. The real
+      agent builds a job end to end against a server on a real port.
+- [x] B2.10 The agent refuses a plain `http://` server unless it is this machine, because the
+      token, the build secrets and the signing keys would cross the network unencrypted.
+      `--insecure-http` allows it for testing on a trusted network, with a warning. After each
+      build the agent deletes the signing keys from its workspace.
 
 ## B3 — Readiness and control
 
@@ -62,6 +72,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] B3.3 A timeout per job, so a build that hangs fails instead of holding the target forever.
 - [ ] B3.4 The agent's workspace keeps `node_modules` and the CocoaPods between builds, and only
       replaces the project's own files.
+- [ ] B3.5 `file_tail` in `crates/sc-server/src/build_agent.rs` reads the whole build log into
+      memory to keep its last 32 KiB. It should seek to the end and read only that part, since an
+      APK build log can be several megabytes.
 
 ## B4 — Documentation
 
@@ -74,5 +87,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 - [ ] Android on a build host too, for a server without the Android SDK.
 - [ ] Choosing between several build hosts for one target (least busy, or the one the
       application names).
+- [ ] A build host keeps its own signing secrets (the distribution certificate, the keystore and
+      its password), configured on the Mac. The server then sends no secrets with a job, and a
+      stolen build host token no longer reveals them.
 - [ ] Encrypting the build secrets at rest. The App Store Connect key and the keystore password are
       plain JSON in the database today, masked only on the wire.

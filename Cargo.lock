@@ -9102,6 +9102,7 @@ dependencies = [
  "sc-db-sqlite",
  "sc-dns",
  "sc-error",
+ "sc-expr",
  "sc-files",
  "sc-i18n",
  "sc-llm",

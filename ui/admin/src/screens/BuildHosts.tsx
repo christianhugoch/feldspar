@@ -205,13 +205,13 @@ export function BuildHostsTab() {
                   </thead>
                   <tbody>
                     {hosts.map((host) => {
-                      const badge = hostBadge(host);
+                      const badge = hostBadge(t, host);
                       const turnedAway = refusal(host);
                       return (
                         <tr key={host.id}>
                           <td>
                             {host.name}{" "}
-                            <span className={`badge ${badge.tone} ms-1`}>{t(badge.label)}</span>
+                            <span className={`badge ${badge.tone} ms-1`}>{badge.label}</span>
                             {agentSummary(host) && (
                               <div className="text-secondary small">{agentSummary(host)}</div>
                             )}

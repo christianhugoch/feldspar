@@ -31,13 +31,16 @@ function host(over: Partial<BuildHost> = {}): BuildHost {
   };
 }
 
+/** The translator as the source locale has it. */
+const same = (text: string) => text;
+
 describe("a build host's state", () => {
   it("says whether its agent was ever heard from, is now, or was turned away", () => {
-    expect(hostBadge(host()).label).toBe("Never connected");
-    expect(hostBadge(host({ last_seen_at: "2026-10-22T10:00:00Z" })).label).toBe("Offline");
-    expect(hostBadge(host({ last_seen_at: "x", online: true })).label).toBe("Online");
+    expect(hostBadge(same, host()).label).toBe("Never connected");
+    expect(hostBadge(same, host({ last_seen_at: "2026-10-22T10:00:00Z" })).label).toBe("Offline");
+    expect(hostBadge(same, host({ last_seen_at: "x", online: true })).label).toBe("Online");
     const old = host({ last_seen_at: "x", report: { refused: "install feldspar 0.2.0" } });
-    expect(hostBadge(old).label).toBe("Needs update");
+    expect(hostBadge(same, old).label).toBe("Needs update");
     expect(refusal(old)).toBe("install feldspar 0.2.0");
   });
 

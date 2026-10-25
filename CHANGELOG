@@ -2,6 +2,55 @@
 
 Changes in reverse chronological order.
 
+## Build hosts: no secrets over plain http, no signing keys left behind
+
+A job carries the app's build secrets, and an Android job its signing key. The agent now protects
+them better.
+
+- `feldspar build-agent` refuses a plain `http://` server unless it is this machine (`localhost`,
+  `127.0.0.1`, `[::1]`). `--insecure-http` allows it for testing on a trusted network and prints a
+  warning.
+- After each build, successful or not, the agent deletes the signing keys (`*.jks`, `*.keystore`,
+  `*.p12`) from its workspace. The rest of the project stays for the next build.
+
+## Settings and build targets say when a variable comes from the server's environment
+
+Clearing the Android SDK or JDK setting in the React Native module did not stop the build, because
+the shell that started the server also set `ANDROID_HOME` and `JAVA_HOME`. That was confusing.
+Now a target's readiness lists each required variable that no setting fills but the server's
+environment does, with its value.
+
+- Under Settings → Modules, an empty setting that falls back to a variable says so with the
+  variable's value on the server: "Blank, so `ANDROID_HOME` comes from the server's environment:
+  /opt/sdk". A module declares the fallback with `env_fallback: "ANDROID_HOME"` on the field. The
+  React Native module does so for the Android SDK and JDK directories. A secret's value is masked.
+- The target button's tooltip shows these lines, for example "`ANDROID_HOME` is `/opt/sdk`, from
+  the environment feldspar was started with, not from a setting."
+- The build log starts with the same lines, also on a build host.
+- The applications list carries them as `readiness.from_environment`.
+
+## Build hosts: a build host builds the targets this server cannot
+
+When the server cannot build a target (iOS on Linux) but an online build host builds it and
+reported it ready, the build button now queues a job for that host (`TODO-build-hosts.md` B2).
+The artifact lands in the store at the usual path, as if the server had built it.
+
+- New system table `_fd_build_jobs`, created at boot. Jobs survive a restart. A second press of
+  the button joins the queued or running job, and the applications list says which host builds
+  the target.
+- The server regenerates the client and runtime before queueing: the build host never generates
+  code. The agent fetches the project as a zip, without `node_modules`, `.git`, the native
+  projects and the build's outputs, and without signing keys unless the job is for Android.
+- `feldspar build-agent` now claims jobs by long-polling `POST /build-agent/claim`, unpacks each
+  into a workspace it keeps per application (`--workspace`), and builds with the same code a
+  local build runs. The log goes to `build-logs/` in the store while the build runs; the
+  artifact is streamed back, or the reason it failed.
+- Heartbeats and log pieces renew the job's lease. A job whose host stops answering for 90
+  seconds fails, and says so.
+- The admin UI follows a queued job as it follows a running one, and names the build host.
+- Tests: a fake agent drives the routes (claim, project, log, artifact, failure, a lost lease, a
+  wrong token), and the real agent builds a job against a server on a real port.
+
 ## Build hosts: a Mac can be registered to build native apps for the server
 
 The server usually runs on Linux and iOS builds need macOS. A Mac can now be registered as a

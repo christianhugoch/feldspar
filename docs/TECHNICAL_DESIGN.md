@@ -1925,6 +1925,16 @@ erDiagram
     timestamp last_seen_at "its last heartbeat"
     json report "what its agent last said"
   }
+  BUILDJOBS["_fd_build_jobs"] {
+    uuid id PK
+    uuid application_id "by value"
+    text target "ios"
+    text state "queued, running, succeeded, failed"
+    uuid build_host_id "the host that claimed it, by value"
+    timestamp lease_until "renewed by its host's heartbeats"
+    text log_path "relative to the store"
+    text artifact "relative to the store, once built"
+  }
 
   ROLES ||--o{ USERS : "role -- enforced FK"
   USERS ||--o{ SESSIONS : "user_id -- by value"
@@ -1970,6 +1980,8 @@ erDiagram
   USERS ||--o{ SYNCCLIENTS : "user_id -- by value"
   APPS ||--o{ SYNCCLIENTS : "application -- by value"
   SYNCCLIENTS ||--o{ SYNCKEYS : "client_id -- by value, a row created offline"
+  APPS ||--o{ BUILDJOBS : "application_id -- by value"
+  BUILDHOSTS |o--o{ BUILDJOBS : "build_host_id -- by value, once claimed"
 ```
 
 Exactly **one** relationship above is an enforced `REFERENCES`: `users.role → _fd_roles.role`
@@ -5823,7 +5835,7 @@ on any OS, and stores a dated profile in the file store. The worker cannot see t
 it chooses the certificate from App Store Connect alone, and the keychain check is left to the
 build.
 
-**Build hosts: a target built on another machine (planned, `TODO-build-hosts.md`).** iOS needs
+**Build hosts: a target built on another machine (`TODO-build-hosts.md`).** iOS needs
 macOS, and the server usually runs on Linux. A Mac can be registered as a **build host** for
 some targets. It runs the same binary as `feldspar build-agent --server <url> --token-file <path>`
 and asks the server for work, rather than the server sending work to it. That way the Mac needs
@@ -5840,17 +5852,27 @@ machine got wrong: its table ids could differ from the server's.
 A job goes like this:
 
 1. The build button finds that the target's `requires` do not hold here, but an online build
-   host builds it. The job is queued in `_fd_build_jobs`, so it survives a restart.
-2. The server packs the project as a `tar.gz`, leaving out `node_modules` and what the build
-   makes (`android`, `ios`, `*-output`, `build-logs`), and Android signing keys from an iOS job.
-3. The agent claims the job by long-polling `/build-agent/*`. It gets the archive and the
-   rendered target: command, arguments, environment and artifact path.
-4. It builds in a workspace it keeps per application (so `node_modules` and the Pods stay), with
-   the local build's own code. The log goes back in chunks and is written to `build-logs/`. The
-   artifact is uploaded into the store at the usual path, so it is downloaded from Files as
-   before.
-5. A heartbeat renews the job's lease and carries a cancel back. A job whose lease runs out
-   fails, and every job has a timeout.
+   host builds it and last reported it ready. The server regenerates the client and runtime,
+   and the job is queued in `_fd_build_jobs`, so it survives a restart. A second press joins
+   the queued or running job.
+2. The agent claims the job by long-polling `POST /build-agent/claim`. The oldest queued job
+   for one of its targets becomes `running` on that host, with a lease. The answer is the
+   rendered target: command, arguments, environment (secrets included) and artifact path.
+3. The agent fetches the project (`GET /build-agent/jobs/{id}/project`), packed then as a zip
+   with paths relative to the store. It leaves out every `node_modules` and `.git`, what the
+   build makes at the top of the project (`android`, `ios`, `*-output`, `build-logs`), and
+   signing keys (`*.jks`, `*.keystore`, `*.p12`) from all but an Android job. A zip rather than
+   a `tar.gz`, because the backup already brings the zip code and it keeps file modes.
+4. It unpacks into a workspace it keeps per application (so `node_modules` and the Pods
+   stay) and builds with the local build's own code (`run_target`). The log goes back every
+   few seconds (`POST …/log`) and is written to `build-logs/` in the store, so the admin
+   follows it in the file manager. The artifact is streamed back (`POST …/artifact`) into the
+   store at the usual path, so it is downloaded from Files as before. A build that fails sends
+   its reason (`POST …/failed`), which also ends the log.
+5. Every heartbeat and every piece of log renews the job's lease (90 seconds, as long as a
+   host counts as online). A job whose lease runs out fails, saying the build host stopped
+   answering. Nothing watches the clock: leases are checked whenever jobs are read. Cancelling
+   and a timeout per job are B3.
 
 A build host is a row in `_fd_build_hosts`: its name, its targets, the hash of its token, when
 it was last seen and what it last reported (OS, version, readiness per target). Its token opens
