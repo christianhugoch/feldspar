@@ -62,8 +62,13 @@ On the test provider any price id works. It costs 10.00 for 30 days unless the a
 prices:
 
 ```json
-{ "prices": { "price_basic": { "amount": 500 }, "price_pro": { "amount": 1500 } } }
+{ "grants_in_test_mode": true,
+  "prices": { "price_basic": { "amount": 500 }, "price_pro": { "amount": 1500 } } }
 ```
+
+`grants_in_test_mode` lets this test account grant roles and credits, which a test account does
+not do otherwise: it takes no real money, so one left enabled on a live site would hand out plans
+for nothing. Leave it off on any test account a production site keeps.
 
 Use a test account of its own: add a `pay_accounts` row named **`saas`**, adapter `fake`, mode
 `test`, any random text as its webhook signing secret, and these settings.
@@ -221,6 +226,9 @@ own: a welcome email, a note to the team when somebody leaves.
 the subscribe trigger. Nothing is charged at checkout, the subscription is `trialing`, and the
 grant lasts to the trial's end plus grace. When the trial ends the card is charged and the
 subscription carries on. If the user cancels during the trial, it ends with the trial.
+A trial is had once per user on an account: a user who has subscribed before (to any plan), or
+who already has a trial checkout open, is sent to a checkout without one and pays from the first
+day.
 
 ## Step 7 — The account page
 

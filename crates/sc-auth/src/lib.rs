@@ -52,7 +52,7 @@ mod tokens;
 mod user;
 mod users;
 
-pub use create::{CreatedUser, NewUser, create_user, create_user_with};
+pub use create::{CreatedUser, NewUser, create_user, create_user_with, sign_up_user};
 pub use credits::{
     COL_ACCOUNT_DEBT, COL_ACCOUNT_THRESHOLD, COL_ACCOUNT_UPDATED_AT, COL_CREDIT_AMOUNT,
     COL_CREDIT_CREATED_AT, COL_CREDIT_EXPIRES_AT, COL_CREDIT_ID, COL_CREDIT_KEY, COL_CREDIT_KIND,
@@ -61,10 +61,10 @@ pub use credits::{
     COL_ENTRY_OUTPUT_TOKENS, COL_ENTRY_RUN, CREDIT_ACCOUNTS_TABLE, CREDIT_BUCKETS_TABLE,
     CREDIT_DECIMALS, CREDIT_ENTRIES_TABLE, CREDIT_SOURCE_ADMIN, CREDIT_SOURCE_AGENT,
     CREDITS_OWNERSHIP, CreditBalance, CreditBucket, CreditDebit, CreditDebited, CreditEntry,
-    CreditGrant, CreditRollover, ENTRY_DEBIT, ENTRY_GRANT, ENTRY_LOW_BALANCE, ENTRY_ROLLOVER,
-    NewCreditGrant, bootstrap_credits,
-    credit_balance, credits, debit_credits, grant_credits, list_credit_buckets,
-    list_credit_entries, set_low_balance_threshold,
+    CreditGrant, CreditRevoked, CreditRollover, ENTRY_DEBIT, ENTRY_GRANT, ENTRY_LOW_BALANCE,
+    ENTRY_REVOKE, ENTRY_ROLLOVER, NewCreditGrant, bootstrap_credits, credit_balance, credits,
+    debit_credits, grant_credits, list_credit_buckets, list_credit_entries, revoke_credits,
+    set_low_balance_threshold,
 };
 pub use first_user::{any_user_exists, create_first_user};
 pub use grants::{
@@ -81,7 +81,10 @@ pub use guest::{
 };
 pub use login::{authenticate, authenticate_admin};
 pub use lookup::{first_user_with_role, load_base_user, load_user, load_user_by_email};
-pub use manage::{UserUpdate, delete_user, set_user_disabled, set_user_password, update_user};
+pub use manage::{
+    UserUpdate, claim_unproven_account, delete_user, set_user_disabled, set_user_password,
+    update_user,
+};
 pub use password::{
     RANDOM_PASSWORD_LENGTH, hash_password, is_valid_hash, random_password, verify_password,
 };
@@ -117,7 +120,7 @@ pub use tokens::{
 };
 pub use user::User;
 pub use users::{
-    COL_DISABLED, COL_EMAIL, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN,
-    ROLE_PUBLIC, SYSTEM_USER_COLUMNS, USERS_TABLE, bootstrap, is_api_hidden_column,
+    COL_DISABLED, COL_EMAIL, COL_EMAIL_VERIFIED, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE,
+    ROLE_ADMIN, ROLE_PUBLIC, SYSTEM_USER_COLUMNS, USERS_TABLE, bootstrap, is_api_hidden_column,
     is_system_user_column, role_in_range,
 };

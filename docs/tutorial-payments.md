@@ -45,8 +45,12 @@ Then add an account. Open **Data → pay_accounts** and add a row:
 | Adapter | `fake` |
 | Mode | `test` |
 | Webhook signing secret | any random text, such as `k7e2…` |
+| Settings | `{ "grants_in_test_mode": true }` |
 
-The name is part of the account's webhook URL, so it is letters, digits, `-` and `_`. The keys are
+The name is part of the account's webhook URL, so it is letters, digits, `-` and `_`. A test
+account takes no real money, so it grants no roles or LLM credits unless its settings say
+`grants_in_test_mode` — the tutorial's later steps grant some. **Disable or delete the test
+account before the site goes live**: a payment on it, or a plan change in its portal, is free. The keys are
 **secret fields**: stored encrypted, and never shown back to anybody, the admin included.
 
 To see the account work before there is a shop, make a trigger with event **None** and the action
@@ -295,6 +299,16 @@ and in whatever order. **This is where your triggers go.**
 
 `ref_key` holds the key as the row has it — a number here, text or a UUID for a table keyed that
 way — so `id === row.ref_key` finds the row whatever its key's type.
+
+**What was paid for is what the order holds.** The order stays `open` until it is paid, so the
+buyer can still change its lines after the checkout was made — and a provider's checkout page
+stays payable for up to a day. So when the payment succeeds, the module works the lines out again
+by the checkout's own settings and compares them, and the payment's amount, with what was charged.
+Only a match is `payment.succeeded`. A basket changed in between is logged as
+**`payment.mismatch`** instead, with the payment's `issue` saying why: none of the triggers here
+runs, and the order stays open for you to settle by hand (refund it, or ask the buyer to pay the
+difference). Either event carries `lines`, the lines as charged — `item` is the product here — if
+you would rather deliver from what was paid for than from the rows.
 
 **Take the stock down** — `take_stock`, the same event and *only if*:
 

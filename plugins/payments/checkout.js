@@ -147,6 +147,24 @@ function appUrl(app, setting, key, what) {
   return `${(app && app.url) || ""}${path.replace(/\{key\}/g, encodeURIComponent(String(key)))}`;
 }
 
+/** The settings `chargedLines` reads: kept with a checkout, so that the lines can be worked out
+ * again from the rows when it is paid (`processing.js` `checkCharged`). */
+const LINE_SOURCE_FIELDS = ["lines", "child_table", "child_key", "quantity", "unit_amount", "line_description", "item", "amount", "description"];
+
+/** The settings of `configuration` that decide a checkout's lines. */
+function lineSource(configuration) {
+  const source = {};
+  for (const k of LINE_SOURCE_FIELDS) if (!blank(configuration[k])) source[k] = configuration[k];
+  return source;
+}
+
+/** Whether two lists of lines charge the same things: every line's description, quantity, unit
+ * amount and item, in order. */
+function sameLines(a, b) {
+  const shape = (lines) => JSON.stringify((lines || []).map((l) => [String(l.description), l.quantity, l.unit_amount, l.item === undefined ? null : l.item]));
+  return shape(a) === shape(b);
+}
+
 /** The lines as charged, from the source row's formulas or its child rows'. */
 async function chargedLines(db, configuration, table, key) {
   if ((configuration.lines || "one") === "children") {
@@ -219,7 +237,8 @@ async function prepareCheckout({ configuration = {}, payload, row, user, session
   if (mode === "subscription") {
     lines = [await subscriptionLine(db, configuration, table, key, account, adapter, moduleConfiguration)];
   } else {
-    lines = await chargedLines(db, configuration, table, key);
+    // By the key as the row has it, which is also how the payment is checked again.
+    lines = await chargedLines(db, configuration, table, refKey);
     total = 0;
     for (const l of lines) {
       total += l.quantity * l.unit_amount;
@@ -227,6 +246,9 @@ async function prepareCheckout({ configuration = {}, payload, row, user, session
     }
     if (total === 0) throw new Error(`there is nothing to pay for ${table} ${JSON.stringify(refKey)}: its lines come to 0`);
   }
+  // What is being sold, frozen with how it was worked out: the rows may change before the
+  // buyer pays, and the payment is checked against them again then.
+  const charged = mode === "payment" ? { lines, source: lineSource(configuration) } : null;
 
   // The row's other formulas, read in one go.
   const select = {};
@@ -247,6 +269,10 @@ async function prepareCheckout({ configuration = {}, payload, row, user, session
   // The provider customer this user already is on the account, so that a second checkout (a
   // top-up, another plan) is the same customer, with the same saved card (§5).
   const known = signedIn ? await db.pay_objects.where({ account: account.id, kind: "customer", user_id: user.id }).first() : null;
+  // One trial per user on an account: a user who has subscribed before, or has a trial checkout
+  // still open or completed, subscribes without one — paying from the first day — or a trial
+  // could be taken, cancelled and taken again for a new role and a new credit allowance.
+  if (mode === "subscription" && lines[0].trial_days > 0 && (await hadTrial(db, account, user.id))) lines[0].trial_days = 0;
 
   let tax = configuration.tax || "none";
   if (!TAX.includes(tax)) throw new Error(`tax is ${TAX.join(", ")}, not "${tax}"`);
@@ -293,6 +319,7 @@ async function prepareCheckout({ configuration = {}, payload, row, user, session
     table,
     key: refKey,
     lines,
+    charged,
     total,
     currency,
     customer: { email, user_id: signedIn ? user.id : null, ref: known ? known.provider_ref : null },
@@ -309,6 +336,14 @@ async function prepareCheckout({ configuration = {}, payload, row, user, session
     // Provider metadata is text, so the key is kept as JSON: `12` and `"12"` stay apart.
     metadata: { sc_ref_table: table, sc_ref_key: JSON.stringify(refKey), ...(signedIn ? { sc_user_id: String(user.id) } : {}) },
   };
+}
+
+/** Whether `userId` has had a subscription on `account` — of any plan, in any state — or has a
+ * checkout for a trial that is open or was completed (one that expired unpaid gave nothing). */
+async function hadTrial(db, account, userId) {
+  if (await db.pay_objects.where({ account: account.id, kind: "subscription", user_id: userId }).first()) return true;
+  const checkouts = await db.pay_objects.where({ account: account.id, kind: "checkout", user_id: userId }).rows();
+  return checkouts.some((c) => c.status !== "expired" && c.status !== "failed" && (c.lines || []).some((l) => l && l.trial_days > 0));
 }
 
 /** A subscription checkout's one line: the provider's price, from the configuration's formula
@@ -361,6 +396,7 @@ async function recordCheckout(db, prepared, created) {
     amount: prepared.total,
     currency: prepared.currency,
     lines: prepared.lines,
+    charged: prepared.charged || null,
     effects: prepared.effects || null,
     provider_data: object.provider_data || null,
     updated_at: now,
@@ -404,4 +440,4 @@ async function startCheckout(db, prepared) {
   return { id: mirrored.id, checkout: created.id, url: created.url, amount: prepared.total, currency: prepared.currency };
 }
 
-module.exports = { CHECKOUT_FIELDS, TAX, prepareCheckout, recordCheckout, payCheckout, startCheckout, appUrl, primaryKey };
+module.exports = { CHECKOUT_FIELDS, TAX, prepareCheckout, recordCheckout, payCheckout, startCheckout, appUrl, primaryKey, chargedLines, sameLines };

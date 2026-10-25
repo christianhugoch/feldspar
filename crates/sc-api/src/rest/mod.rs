@@ -269,6 +269,12 @@ const GUEST_SESSION_RATE: sc_ratelimit::Rate = sc_ratelimit::Rate {
     window: std::time::Duration::from_secs(60),
 };
 
+/// How many accounts one address may make an hour.
+const SIGNUP_RATE: sc_ratelimit::Rate = sc_ratelimit::Rate {
+    max: 5,
+    window: std::time::Duration::from_secs(60 * 60),
+};
+
 /// The endpoints that make up an application's **sign-in**: how a caller who
 /// is nobody yet becomes somebody, or gets back to being able to. A caller an
 /// application does not let in at all reaches these and nothing else (TODO
@@ -1157,7 +1163,8 @@ impl RestProvider {
     /// other way of making one has: not blank. An address that already has an
     /// account is a `409` — unlike a failed login, the answer cannot be kept
     /// vague, because the caller has to be told to sign in instead.
-    async fn signup(&self, body: &Json, cat: &Catalog) -> Result<ApiResponse> {
+    async fn signup(&self, req: &ApiRequest, cat: &Catalog) -> Result<ApiResponse> {
+        let body = &req.body;
         let Some(role) = self.signup_role else {
             // The route is only projected alongside a role, so this is the set
             // having been extended by something else.
@@ -1168,13 +1175,22 @@ impl RestProvider {
         };
         let (email, password) = credentials(body)?;
         let email = email.trim().to_owned();
+        // An account is a password hash to compute and, where an agent is
+        // exposed to signed-in users, a way to its provider budget: a person
+        // signs up once, a script a thousand times (security review #22).
+        if let Some(ip) = req.client_ip
+            && let Err(limited) = sc_ratelimit::global().hit(&format!("signup:{ip}"), SIGNUP_RATE)
+        {
+            return Ok(ApiResponse::too_many_requests(limited));
+        }
         if sc_auth::load_user_by_email(cat, &email).await?.is_some() {
             return Ok(ApiResponse::error(
                 409,
                 "there is already an account with this email address",
             ));
         }
-        let user = sc_auth::create_user(cat, &email, &password, role).await?;
+        // Recorded as unproven: the caller chose the address (security review #41).
+        let user = sc_auth::sign_up_user(cat, &email, &password, role).await?;
         let summary = user_summary_json(&user);
         let mut out = ApiResponse::start_session(user, summary);
         out.status = 201;
@@ -1258,12 +1274,21 @@ impl RestProvider {
                     executor: &executor,
                 };
                 let outcome = match &route.op {
-                    RestOp::Create => write_as::create(cat, &table, body, &writer)
-                        .await?
-                        .map(|row| ApiResponse::with_status(201, client_row(&table, row))),
-                    RestOp::Update => write_as::update(cat, &table, id()?, body, &writer)
-                        .await?
-                        .map(|row| ApiResponse::ok(client_row(&table, row))),
+                    RestOp::Create => match write_as::create(cat, &table, body, &writer).await? {
+                        Ok(row) => Ok(ApiResponse::with_status(
+                            201,
+                            self.written_row(cat, &table, row, user).await,
+                        )),
+                        Err(denied) => Err(denied),
+                    },
+                    RestOp::Update => {
+                        match write_as::update(cat, &table, id()?, body, &writer).await? {
+                            Ok(row) => Ok(ApiResponse::ok(
+                                self.written_row(cat, &table, row, user).await,
+                            )),
+                            Err(denied) => Err(denied),
+                        }
+                    }
                     _ => write_as::delete(cat, &table, id()?, &writer)
                         .await?
                         .map(|()| deleted()),
@@ -1387,6 +1412,31 @@ impl RestProvider {
         write_as::owned_row_as(cat, table, formula, op, user, self.evaluator.as_ref(), id).await
     }
 
+    /// A row a create or update wrote, as the caller gets it back: in full
+    /// (secrets as their sentinel) when the caller may **read** it, and
+    /// otherwise its key alone (security review #28). A table whose write floor
+    /// is below its read floor — a public submission form read by staff — must
+    /// not let a writer read any row by resending it unchanged. A readability
+    /// check that fails is a refusal.
+    async fn written_row(
+        &self,
+        cat: &Catalog,
+        table: &Table,
+        row: Json,
+        user: Option<&User>,
+    ) -> Json {
+        let role = ownership::caller_role(user);
+        let readable = ownership::RowImage::new(table, &row)
+            .readable(cat, role, user, self.evaluator.as_ref())
+            .await
+            .unwrap_or(false);
+        if readable {
+            client_row(table, row)
+        } else {
+            key_only(table, &row)
+        }
+    }
+
     /// Run a row operation on an **RLS-enabled** table (§6): the database's
     /// policies do all the gating, so there is no formula translation, no
     /// evaluator, and no fetch-then-check here. Every statement runs through a
@@ -1416,17 +1466,15 @@ impl RestProvider {
             // itself through a caller-context transaction because the *table*
             // says to, so the policies decide exactly as they do everywhere else.
             RestOp::List => self.list(cat, table, req, user).await?,
-            RestOp::Create => ApiResponse::with_status(
-                201,
-                client_row(
-                    table,
-                    rows::create_row_ctx(cat, table, body, Some(&ctx)).await?,
-                ),
-            ),
-            RestOp::Update => ApiResponse::ok(client_row(
-                table,
-                rows::update_row_guarded(cat, table, id()?, body, None, Some(&ctx)).await?,
-            )),
+            RestOp::Create => {
+                let row = rows::create_row_ctx(cat, table, body, Some(&ctx)).await?;
+                ApiResponse::with_status(201, self.written_row(cat, table, row, user).await)
+            }
+            RestOp::Update => {
+                let row =
+                    rows::update_row_guarded(cat, table, id()?, body, None, Some(&ctx)).await?;
+                ApiResponse::ok(self.written_row(cat, table, row, user).await)
+            }
             RestOp::Delete => {
                 rows::delete_row_guarded(cat, table, id()?, None, Some(&ctx)).await?;
                 deleted()
@@ -1453,6 +1501,18 @@ impl RestProvider {
             }
         })
     }
+}
+
+/// The primary key of a written row, all a caller who may write but not read
+/// it is told (`{}` for a table without a single key).
+fn key_only(table: &Table, row: &Json) -> Json {
+    let mut out = serde_json::Map::new();
+    if let Ok(pk) = rows::single_pk(table)
+        && let Some(value) = row.get(&pk)
+    {
+        out.insert(pk, value.clone());
+    }
+    Json::Object(out)
 }
 
 /// A written row as the caller gets it back: its secrets as their sentinel
@@ -2062,7 +2122,7 @@ impl RestProvider {
 
         match &endpoint.handler {
             HandlerRef::Named(_) if endpoint.name == LOGIN => self.login(&req, cat).await,
-            HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req.body, cat).await,
+            HandlerRef::Named(_) if endpoint.name == SIGNUP => self.signup(&req, cat).await,
             HandlerRef::Named(_) if endpoint.name == GUEST_SESSION => {
                 self.start_guest_session(&req, cat, user).await
             }

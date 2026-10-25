@@ -2,6 +2,284 @@
 
 Changes in reverse chronological order.
 
+## Security fixes: v1 action roles, hidden-column filters, module file owners, invitation columns, signup pre-hijack, chat socket
+
+Fixes for items 37–42 of `docs/SECURITY_REVIEW_2026-10.md` (third review). Item 36 is not
+addressed here.
+
+- **A v1 action button's `minRole` holds when it is run, and a view runs triggers as the viewer**
+  (#37). `run_action_column` (ui/saltcorn-ui `src/plugin-helper.ts`, which every v1 action route
+  reaches: a page's `/page/:name/action/:rndid` and every pattern's `run_action`) refuses a
+  column or segment whose `minRole` is below the viewer's role, as render already hid it. A view
+  call's trigger surface (`AppTriggers` in `sc-viewpattern`) runs every trigger at the **viewer's**
+  authority, whatever the worker asked for, so the trigger's own `min_role` is checked (absent
+  is admin-only); `V1Trigger.run`/`runWithoutRow` and the state-action runners say
+  `authority: "user"` too. A view that runs an admin-only trigger for a member now refuses it:
+  give the trigger the `min_role` it is meant for.
+- **The password hash is no field to a code-host plan** (#38). `Lowering` builds its fields
+  without the hidden columns, and a select, ordering, aggregate or Ⱶ-path naming one is "no
+  field", so a v1 view's URL state (`?password_hash=…`, `_gte_password_hash=`) can no longer be
+  used as an oracle. The code-host schema snapshot leaves hidden columns out, and the catalog's
+  formula shape leaves `users.password_hash` out, so no formula (filter, ownership, calculated
+  field) can name it either.
+- **A module's stored files are owned by the module** (#39). A module's file `write`, `append`
+  or `rename` records `module:<name>` as the file's owner (`sc_module::files::module_owner`), so
+  `check_write` — which `may_attach_file` asks — refuses every non-admin who points a row's File
+  field at it. A forged `mail_attachments` row can no longer name another user's stored
+  attachment. Not done: creating module stores with `min_role: 1` (it would stop owners
+  downloading their own attachments through the File field), and the `_read &&` guard on the
+  IMAP child tables' ownership rules (the review's related Medium).
+- **An invitation sets `admin_only_write` columns only when an admin sends it** (#40).
+  `user_fields` refuses such a column below admin with 403 before any account exists
+  (`user_rows::is_admin_only_write`, now shared with the row layer's check).
+- **A self-service signup's address is unproven, and an identity provider's sign-in claims such
+  an account** (#41). New system column `users.email_verified` (nullable; only `false` says
+  anything). REST `signup` and Saltcorn-UI `/auth/signup` create accounts through
+  `sc_auth::sign_up_user`, which records `false`; redeeming a reset or invite link sets it
+  `true`. When an OAuth sign-in lands on an unproven account, `claim_unproven_account` clears its
+  password, its reset links and its sessions (also through the session store, so cached copies
+  and listening sockets go), marks the address proven, and only then signs the provider's user
+  in. Accounts made by an admin, an invitation or a provider are unaffected. Below admin,
+  `email_verified` is not writable through the users table (`ADMIN_ONLY_SYSTEM_COLUMNS`).
+  Migration: `TABLES_RENAME.sql` adds the column.
+- **The admin chat socket does not outlive its session** (#42). The socket registers a
+  `SessionListener` for its token and user and re-reads the session before every `start` and
+  turn (running the turn as the user the session names now) and every 30 s
+  (`chat::SESSION_RECHECK`). A sign-out, forced sign-out, disabled or deleted account, password
+  reset or demotion closes it with a reason, a running turn included (the run is stopped, as on a
+  disconnect). A store that cannot answer refuses the turn but leaves the socket open. Not done:
+  the LSP, stream-observe and fit-progress sockets, which the review notes use the same pattern
+  but offer no shell.
+- **Tests:** `saltcorn_ui_render::a_pages_action_buttons_run_and_its_properties_shape_the_document`
+  (`minRole` and trigger `min_role` refused to a member, a member-level trigger runs);
+  `code_host_reads::the_password_hash_is_no_field_to_filter_order_or_join_on`;
+  `module_files::a_module_keeps_files_in_its_declared_area_and_nowhere_else` (owner recorded,
+  `check_write` refuses a user); `app_invite::an_invitation_sets_no_admin_only_column_below_admin`;
+  `db_password_tokens::a_signup_is_unproven_until_a_link_is_redeemed_and_is_claimed_whole`;
+  `oauth_sign_in::an_application_and_the_admin_ui_sign_in_with_an_identity_provider` (a squatter's
+  signup is claimed: session and password gone); `agent_chat::ending_the_session_closes_the_chat_socket`.
+- **`view_app` tests follow #16's preview rule.** Below admin, a run is not shown the build
+  output on disk, so the user run now expects the "an administrator can build" refusal, and the
+  live-build test looks as the admin.
+
+## Security fixes: write responses, sync keys, module bridge, `.git` links, trigger chains, payments
+
+Fixes for items 28–35 of `docs/SECURITY_REVIEW_2026-10.md`.
+
+- **A write answers with a row only to a caller who may read it** (#28). REST create and update
+  (`rest/mod.rs` `written_row`) judge the written row by the read rule (`ownership::RowImage`) and
+  answer with its key alone when the caller may not read it — a table whose write floor is below
+  its read floor (a submission form read by staff) no longer lets a writer read any row by
+  resending it. GraphQL `delete_…_by_pk` judges the removed row the same way and refuses (the
+  delete stands) like insert/update's `read_back` does.
+- **An offline-sync pull lists as `removed` only rows the device could have held** (#29). The
+  change log's `old_values` rebuild each unreadable changed row as it was at the device's
+  watermark (`sync/pull.rs` `was_held`; `sc_catalog::changed_entries`); only a key whose row the
+  user could read then is listed. Other users' new, edited and deleted rows no longer leak their
+  keys and change times. A row first inserted after the watermark is never listed. Judged with the
+  user's role now; a verdict that cannot be reached withholds the key.
+- **Module workers seal the host bridge** (#30). `__scDbCall` is defined read-only, every `__sc*`
+  global is made read-only and permanent when the host script finishes (before any module loads),
+  and `AsyncLocalStorage` (where each call's context and token live) is frozen. An ask from inside
+  one module's call on behalf of another module's call is refused (`askFor`, `callOwners`).
+- **The `.git` rule follows links** (#31). `LocalFileStore` refuses a path that is not spelled
+  inside `.git` but lands there on disk — a symlink in the working tree into `.git`, which can
+  arrive with a pull — for reads and writes alike (`lands_outside_git`, after canonicalising).
+  `in_git_dir` also refuses `git~<digits>` segments, NTFS's short name for `.git`, as git's
+  `core.protectNTFS` does; that covers `check_access` and the file listings too.
+- **`trusted_input` does not survive a cascade an untrusted prompt started** (#32). A run of
+  untrusted origin (triggered or exposed) marks the writes and trigger runs its tools make with
+  `sc_catalog::UNTRUSTED_ORIGIN` at the head of their trigger chain (`RunCaller::tool_chain`). The
+  chain already travels with every write, event, action, code body and workflow, so the mark does
+  too; it is not counted towards the cascade depth. `run_agent` grants `RunCaller::system()` only
+  when `trusted_input` is set **and** the event's chain carries no mark.
+- **A test-mode payment account grants nothing unless told to** (#33). `processing.js` grants
+  roles and credits for a live account, or a test account whose settings say
+  `"grants_in_test_mode": true`; otherwise the object's `issue` says why nothing was granted
+  (only for objects that would have granted). The fake adapter is test-only, so it is covered.
+  The tutorials set the option on their test accounts and say to disable a test account before
+  going live. Not done: a server dev flag for the fake adapter, a warning on the module card.
+- **A refund in full or a lost chargeback takes back what a payment granted** (#34). Stripe
+  payments are read with `latest_charge.dispute`, and a lost dispute is the status
+  `charged_back`; a dispute event now syncs its payment too. On `refunded` or `charged_back` the
+  payment's role is revoked and what is left of its credit top-up is taken back through the new
+  `credits.revoke({ key })` (`sc_auth::revoke_credits`: empties the module's own bucket, writes a
+  `revoke` entry, once; spent credits stay spent, no debt is made). A partial refund still takes
+  nothing back. Not done: a lost dispute on a subscription's invoice.
+- **A Polar customer is bound to a user only when Polar says it is theirs** (#35). Checkouts send
+  `external_customer_id` (the user's id) with the email; an object's customer is bound to its user
+  only when the adapter's `customer_external_id` is that user's id (`processing.js`
+  `customerUser`). An adapter that reports no external id (Stripe) binds as before. The portal
+  and saved-card charge read only bindings made that way, so they need no further check.
+- **Tests:** `table_access_enforcement::a_writer_who_may_not_read_gets_only_the_key_back`;
+  `sync_pull::a_later_pull_brings_what_changed_and_what_is_gone` (exact `removed`);
+  `v1_table::a_module_cannot_wrap_the_host_bridge`; `sc-files` `a_link_into_git_does_not_reach_it`;
+  `run_agent::trusted_input_does_not_survive_a_cascade_from_untrusted_input`;
+  `credits::a_revoked_grant_takes_back_what_is_left_once`; payments `processing.test.mjs` (test-mode
+  grants, refunds/chargebacks, customer binding), `stripe.test.mjs` (charged back), `polar.test.mjs`
+  (`external_customer_id`); the payments test fixtures and tutorial tests opt their test accounts
+  in to grants.
+
+## Security fixes: repeat trials, exposed agents, formula isolate, Astro, `/_image`, `fetch`
+
+Fixes for items 19–27 of `docs/SECURITY_REVIEW_2026-10.md`.
+
+- **A trial is had once per user on a payment account** (#19).
+  - Why: a trialing subscription grants the plan's role and its credit allowance, and nothing
+    stopped a user from subscribing with a trial, cancelling, and subscribing again — or opening
+    several trial checkouts at once.
+  - Now `prepareCheckout` (`plugins/payments/checkout.js` `hadTrial`) drops the trial (the buyer
+    pays from the first day) when the user has any subscription on the account, of any plan and
+    in any state, or a trial checkout that is open or completed. Behind that, `processing.js`
+    grants a trialing subscription's credit allowance only for the user's first subscription on
+    the account, so two trial checkouts that passed the check at the same moment grant the
+    credits once (the second's `issue` says why).
+- **An exposed agent's chat never acts as the server, and a visitor is nobody's account**
+  (#20, #21).
+  - Why: an admin chatting with an agent an application exposes was a plain `RunCaller::user`,
+    so the shell, module installs, the project's scripts, builds and the admin copilot were
+    offered to a chat any script on the application's origin can send with the admin's cookie.
+    And an anonymous visitor (no user) read as "nobody is chatting", so `view_app` and `call_api`
+    fell back to the agent's `view_app_user`.
+  - `RunCaller` gains `exposed`, set by `RunCaller::exposed(user)` (what `app_agents.rs` now
+    makes for a signed-in asker) and by `RunCaller::anonymous()`. `untrusted_origin()` (triggered
+    or exposed) is what `is_admin` and the admin copilot now check, so an exposed run is treated
+    as a triggered one is: its caller's authority over rows, none of the server's tools.
+    `is_anonymous()` tells a visitor from a system run: `call_api` sends a visitor's request as
+    the public, and `view_app` refuses one.
+- **Exposed agents and sign-up are rate-limited** (#22, partly).
+  - Starting a turn (`chat`, `prompt`) is limited to 30 per 10 minutes per address and 20 per
+    10 minutes per asker (user or browser cookie), and to 16 running turns per application and 2
+    per asker; over a limit is a `429` with `Retry-After` (`app_agents.rs` `admit_turn`,
+    `TurnSlots`). A visitor's run takes at most 20 model steps (`ANONYMOUS_MAX_STEPS`), whatever
+    the agent's `max_steps`. `POST {mount}/signup` is limited to 5 accounts per address an hour.
+  - Still open: a per-exposure daily spending cap. The limits are in memory, per process.
+- **The formula isolate is sealed** (#23).
+  - Static member names `constructor`, `__proto__`, `prototype` and the four
+    `__define/lookupGetter/Setter__` are refused when a formula is parsed (`ast.rs`
+    `BANNED_MEMBERS`); a computed member's key goes through `__scKey`, which refuses the same
+    names at run time.
+  - After the preludes, every intrinsic reachable from the global object (and the generator,
+    async and iterator prototypes) is frozen, and the global bindings made read-only
+    (`eval.rs` `FREEZE_PRELUDE`), so no evaluation can change what a later one reads.
+  - The isolate has a 64 MB heap; a formula that reaches it is stopped by the near-heap-limit
+    callback, answered with an error, and the isolate is replaced.
+  - A `{{= }}` value — row data re-interpolated as a template — may only hold tokens that name
+    values (`firstName`, `user.name`); anything else is an error, and `{{! }}` in it is escaped
+    like a bare token.
+- **The Astro scaffold's table pages read as the visitor** (#24): `db.<table>.asUser()`, with a
+  comment saying why, so a generated `/orders` shows what the API would give the visitor.
+- **A prerendered page that read data is refused to a caller the application does not admit**
+  (#25). The prerender records which pages read a table (or wrote) in `prerendered.json`'s new
+  `data` list; those and every refreshable page get the same 403 as a rendered page. Pages that
+  read nothing (a sign-in page) and the site's files are still served. A site built before this
+  must be built again for its data pages to be known.
+- **`/_image` is bounded** (#26): at most 2 resizes at once per site (a request waits up to 10 s,
+  then `503`), and one that waited is answered from a variant made meanwhile; the 32
+  variants per image are counted when a resize starts, under the check's lock, and since mount
+  (never given back on eviction); sources are decoded up to 8192 px a side and 128 MB.
+- **`fetch` with a templated host reaches only the public internet** (#27). When a token falls
+  before the URL's path (`{{ webhook_url }}`, `https://{{ host }}/`, a templated port), the
+  request goes through a client whose resolver answers public addresses only, an address
+  literal is checked before sending, and every redirect hop is checked. A host the admin wrote
+  out reaches what the server can reach, as before. Not done: URL-encoding of tokens (the first
+  review's Low item).
+
+Not fixed here: `sc-server`'s `view_app::a_run_that_has_built_nothing_looks_at_the_live_build`
+and `view_app::a_user_run_builds_looks_clicks_fills_and_hears_about_errors` fail since #16's
+change (a non-admin run no longer previews an unbuilt output); they predate this work.
+
+## Security fixes: admin routes on app hosts, edit-to-execute, mail test credentials, order lines
+
+Fixes for items 15–18 of `docs/SECURITY_REVIEW_2026-10.md`.
+
+- **The admin upload, download and backup routes are nothing on an application's host** (#15).
+  - Why: `/upload`, `/download`, `/backup/create` and `/backup/upload` are real routes, matched on
+    every host, and checked only for an admin session. Script on an application's origin (its own
+    code, an HTML injection, an agent-written preview) holds that host's CSRF cookie, and with an
+    admin's session reaching the host (shared sign-in, or the admin signed in to the app) it could
+    download the whole instance as a backup or read and write any store.
+  - Now all four call `admin_host_only` (`sc-server/src/router.rs`, via `admin_of` for the backup
+    pair), as the sockets already did: an application's or a preview's host gets a 404. `call_api`
+    always sends to an application's host, so it meets the same refusal.
+  - Still true: a session is not bound to the host it was issued on.
+- **Below admin, what a build runs and what a build wrote cannot be edited** (#16).
+  - `sc_files::check_write` refuses, below admin and on every write route (agent tools, the REST
+    file provider, File fields, code bodies, the file manager), the files a build reads as
+    instructions (`controls_build`): `package.json`, lockfiles, `.npmrc`/`.yarnrc*`/`.pnpmfile.cjs`,
+    `deno.json`, `<tool>.config.<js|ts|json…>`, `.<tool>rc.<js…>`, and anything under
+    `node_modules` — any case, trailing dots and spaces ignored.
+  - The agent file tools (`open_to_write`) apply the same rule to triggered runs too (role 1, but
+    not an admin), and also refuse anything inside an application's build output directory in that
+    store — where an Astro server entry (`dist/_server/entry.js`) runs with admin authority on every
+    request and is mounted at boot without a build.
+  - `view_app` no longer mounts an application's unbuilt output from disk for a non-admin run; it
+    needs a preview an admin's build mounted.
+  - The IDE's language server is always the server's own (`--language-server PATH`, default
+    `typescript-language-server` on `PATH`), never the store's `node_modules/.bin` copy.
+  - Agent commits run with `-c core.hooksPath=/dev/null` and `--no-verify`, so hooks in the working
+    tree (husky's `.husky/`) do not run.
+  - Still open: a build command that runs a script file in the store (`sh build.sh`) runs whatever
+    a non-admin wrote there; other write routes than the agent tools can still write an output
+    directory when the store's floor allows; the long-term fixes (visitor-authority Astro entries,
+    sandboxed builds, a store write floor) are not done.
+- **`mail_test_account` sends a saved password or token only to the saved servers** (#17).
+  - Why: with `account_id`, the action filled in the saved password (or OAuth token) of any account
+    the caller could *read* — every user at or above a shared account's `min_role` — while taking
+    the hosts from the payload, so one call handed the credentials to a server the caller chose.
+  - Now (`plugins/imap/actions.js` `changedEndpoints`), when the payload changes the address, a
+    host, port, security mode or user, the call is refused unless every secret that login would use
+    is given in the payload: a token logs in to both servers, a password to its own one.
+- **A payment for lines that changed after the checkout is a `payment.mismatch`** (#18).
+  - Why: a checkout prices the lines once; the order stays open (and its lines writable by the
+    buyer) until the payment's triggers run, and a provider's page stays payable for up to a day.
+    A buyer could fill the basket after the checkout and pay the old total, and the triggers
+    delivered what the rows held.
+  - Now `pay_checkout` (and `pay_charge_saved`) keeps on the mirror row, in a new `charged` field,
+    the lines as priced (with their items) and the settings that priced them. When a payment
+    succeeds, `processing.js` `checkCharged` works the lines out again from the rows and compares;
+    the paid amount must also be that checkout's total. A mismatch is logged as `payment.mismatch`
+    in place of `payment.succeeded` (decided once per event), and the payment's `issue` says why.
+    `pay_events` gains `lines`, the lines as charged, on both kinds. The new fields are added to
+    existing installations by the module's table sync. The mismatch is also kept on the
+    payment's `charged`, so a later sync of the payment does not clear its issue. Lines are now
+    priced by the key as the row has it (a key sent in capitals no longer changes the default
+    description).
+  - For that check, a module's webhooks and services may now **read** the application tables an
+    admin named in the configuration of a trigger running one of the module's actions, and the
+    tables the Ⱶ-paths written there reach from them (`sc-module` `TableScope::with_trigger_reads`,
+    documented in `reads.rs`) — what the action itself already reads. A webhook reads the triggers
+    on every call; a service when it starts, so a `pay_checkout` trigger saved later is not
+    readable by the reconcile sweep until the services restart, and a payment that sweep
+    processes in the meantime is logged as a mismatch (it fails closed). Workflow steps that run
+    `pay_checkout` are not looked at.
+  - The payments tutorial explains the new event; its triggers are unchanged, since none of them
+    runs on a mismatch.
+- **Tests:**
+  - `sc-server` `app_serving::admin_file_and_backup_routes_are_nothing_on_an_application_host`.
+  - `sc-server` `ide_language_server::the_bridge_carries_a_handshake_and_translates_both_uri_spaces`
+    now runs the stub as `--language-server` and checks a trap in the store's `node_modules/.bin`
+    never runs.
+  - `sc-files` `build_inputs_are_admin_only_writes`.
+  - `sc-core-traits` `host_privileges::below_admin_no_agent_writes_build_inputs_or_build_output`.
+  - `plugins/imap` `oauth.test.mjs`: "a shared account's saved token or password goes only to its
+    saved servers".
+  - `plugins/payments` `checkout.test.mjs`: "a basket changed after its checkout was made is a
+    payment.mismatch, not a payment.succeeded".
+  - `sc-server` `tutorial_payments::a_basket_changed_after_checkout_is_not_paid_for`: the
+    tutorial's shop on the real host — order still open, stock untouched, no download. `setup`
+    now takes a tag, so the two tests' scratch directories differ.
+
+## Security review, second round (docs only)
+
+`docs/SECURITY_REVIEW_2026-10.md` gains a second general review of the whole system (items 15–35
+plus a Low / hardening list), made after the fixes for items 1–13. Highlights: admin
+upload/download/backup routes accept an admin session on application hosts (#15); non-admin file
+edits become admin-authority code through the Astro server entry, build files and the IDE language
+server (#16); `mail_test_account` sends a shared account's saved credentials to a host the caller
+picks (#17); order lines can change between checkout and payment (#18); repeated trials (#19). No
+code changed.
+
 ## Security fixes: module call tokens, `.git` and symlinks, Windows paths
 
 Fixes for items 11–13 of `docs/SECURITY_REVIEW_2026-10.md`.

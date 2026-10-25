@@ -8,7 +8,10 @@
 //! - a **triggered** run holds role 1 for rows, but is not an admin here: its
 //!   prompt was computed from an event somebody else caused;
 //! - no agent writes inside `.git`, where `core.fsmonitor` is a command the
-//!   server's own `git status` runs.
+//!   server's own `git status` runs;
+//! - below admin, no agent writes what a build runs (`package.json`, configs,
+//!   `node_modules`) or what a build wrote (an application's output directory,
+//!   whose server entry runs with admin authority).
 
 use crate::common;
 
@@ -36,6 +39,12 @@ fn everything() -> Attrs {
 
 fn staff() -> RunCaller {
     RunCaller::user(sc_auth::User::new(uuid::Uuid::new_v4(), 40).expect("a user"))
+}
+
+/// An admin chatting through an agent an application exposes: script on the
+/// application's origin can send that chat (security review #21).
+fn exposed_admin() -> RunCaller {
+    RunCaller::exposed(sc_auth::User::new(uuid::Uuid::new_v4(), 1).expect("a user"))
 }
 
 fn offered_to(env: &Env, trait_: &str, config: &Attrs, caller: &RunCaller) -> Vec<String> {
@@ -68,7 +77,11 @@ async fn the_projects_own_code_runs_only_for_an_admin() -> Result<()> {
         assert!(admin.contains(tool), "{tool} for an admin: {admin:?}");
     }
 
-    for (who, caller) in [("staff", staff()), ("a trigger", RunCaller::triggered())] {
+    for (who, caller) in [
+        ("staff", staff()),
+        ("a trigger", RunCaller::triggered()),
+        ("an admin through an application", exposed_admin()),
+    ] {
         let names = offered_to(&env, "coding", &cfg, &caller);
         for tool in [&script, &check, &shell] {
             assert!(!names.contains(tool), "{tool} offered to {who}: {names:?}");
@@ -130,6 +143,77 @@ async fn no_agent_writes_inside_dot_git() -> Result<()> {
 }
 
 #[tokio::test]
+async fn below_admin_no_agent_writes_build_inputs_or_build_output() -> Result<()> {
+    let env = Env::new().await?;
+    let dir = env.with_file_store("code", None).await?;
+    env.put(&dir, "site/package.json", r#"{"scripts": {}}"#)?;
+    sc_app::save_application(
+        &env.catalog,
+        &sc_app::Application::new(
+            "Site",
+            "site",
+            sc_app::FrameworkRef::new("code")
+                .with("store", "code")
+                .with("source", "site")
+                .with("output", "site/dist")
+                .with("command", "npm run build"),
+        ),
+    )
+    .await?;
+    let cfg = everything();
+    let write = tool_names::write_file(&configured_scope(&cfg)?);
+    let refused = [
+        "site/package.json",
+        "site/astro.config.mjs",
+        "site/node_modules/.bin/typescript-language-server",
+        "site/dist/_server/entry.js",
+        "site/DIST/index.html",
+    ];
+
+    for (who, caller) in [("staff", staff()), ("a trigger", RunCaller::triggered())] {
+        for path in refused {
+            let err = env
+                .call_tool(
+                    "coding",
+                    &cfg,
+                    &write,
+                    json!({"path": path, "content": "export default 1;\n"}),
+                    &caller,
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("administrator"), "{who} {path}: {err}");
+        }
+        // The project's own source is still theirs to edit.
+        env.call_tool(
+            "coding",
+            &cfg,
+            &write,
+            json!({"path": format!("site/src/pages/{}.astro", who.replace(' ', "-")), "content": "<h1>hi</h1>\n"}),
+            &caller,
+        )
+        .await?;
+    }
+    assert_eq!(env.slurp(&dir, "site/package.json")?, r#"{"scripts": {}}"#);
+    assert!(!dir.join("site/dist").exists());
+
+    // An admin's own run may write all of it (all but the existing `package.json`,
+    // which a write would first have to read).
+    for path in &refused[1..] {
+        env.call_tool(
+            "coding",
+            &cfg,
+            &write,
+            json!({"path": path, "content": "{}\n"}),
+            &RunCaller::system(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_triggered_run_has_no_admin_copilot_and_builds_nothing() -> Result<()> {
     let env = Env::new().await?;
     let copilot = config(&[]);
@@ -147,8 +231,23 @@ async fn a_triggered_run_has_no_admin_copilot_and_builds_nothing() -> Result<()>
         .to_string();
     assert!(err.contains("trusted_input"), "{err}");
 
+    // Nor for an admin chatting through an application.
+    assert!(offered_to(&env, "admin_copilot", &copilot, &exposed_admin()).is_empty());
+    let err = env
+        .call_tool(
+            "admin_copilot",
+            &copilot,
+            "list_tables",
+            json!({}),
+            &exposed_admin(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("through an application"), "{err}");
+
     let build = config(&[("application", json!("todo"))]);
-    for caller in [staff(), RunCaller::triggered()] {
+    for caller in [staff(), RunCaller::triggered(), exposed_admin()] {
         assert!(offered_to(&env, "build_application", &build, &caller).is_empty());
         let err = env
             .call_tool(

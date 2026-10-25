@@ -57,8 +57,10 @@ Use a test account of its own: a `pay_accounts` row named **`tea`**, adapter `fa
 text as its webhook signing secret, and these settings:
 
 ```json
-{ "prices": { "price_assistant": { "amount": 500 } } }
+{ "grants_in_test_mode": true, "prices": { "price_assistant": { "amount": 500 } } }
 ```
+
+(`grants_in_test_mode`, as in part 2: without it a test account grants no roles or credits.)
 
 ## Step 2 — Tell the module which fields hold the credits
 
@@ -92,7 +94,7 @@ When the module grants:
 | The subscription | Credits |
 |---|---|
 | starts, paid | the first month's |
-| starts with a trial (card taken up front) | the plan's credits, for the trial |
+| starts with a trial (card taken up front) | the plan's credits, for the trial — the user's first subscription on the account only; a later one has no trial |
 | renews, paid | the new month's, rolling over the last month's |
 | past due (the renewal's card was declined) | none, until the payment is recovered; then that month's |
 | changes plan mid-month | none until the next month, which is the new plan's |

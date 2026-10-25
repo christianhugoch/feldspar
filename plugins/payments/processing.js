@@ -105,6 +105,7 @@ async function upsertObject(db, account, object) {
     if (!parent) continue;
     for (const k of Object.keys(origin)) if (origin[k] === null && parent[k] !== null && parent[k] !== undefined) origin[k] = parent[k];
     if (parent.kind === "checkout" && parent.effects && object.kind === "payment") values.effects = parent.effects;
+    if (parent.kind === "checkout" && parent.charged && object.kind === "payment" && !(existing && existing.charged)) values.charged = parent.charged;
   }
   const meta = fromMetadata(object.metadata);
   for (const [k, v] of Object.entries(meta)) if (k in origin && origin[k] === null) origin[k] = v;
@@ -147,6 +148,18 @@ async function upsertCustomer(db, account, ref, { user_id, email }) {
     if (!raced) throw e;
     return raced;
   }
+}
+
+/** The user an object's provider customer may be bound to: the object's user — unless the
+ * adapter says whose the customer is (`customer_external_id`, Polar's `external_id`) and it is not
+ * that user (security review #35). Polar may attach a checkout to an existing customer found by
+ * its email; binding that customer to whoever paid would give a sign-up with somebody else's
+ * address their portal and their saved card. An adapter that does not say (`undefined`) creates
+ * its customers per user, and the object's user is bound. */
+function customerUser(current, row) {
+  if (row.user_id === null || row.user_id === undefined) return null;
+  if (current.customer_external_id === undefined) return row.user_id;
+  return current.customer_external_id !== null && String(current.customer_external_id) === String(row.user_id) ? row.user_id : null;
 }
 
 /** The reference a module's grant for `object` is made under: one per subscription, or per
@@ -213,6 +226,12 @@ async function allowanceEffects(ctx, account, current, row, binding, plan) {
   if (!period) return null;
   const key = `allowance:${account.id}:${current.ref}:${period.end}`;
   if (row.allowance_key === key) return null;
+  // A trial's allowance only for the user's first subscription on the account: two trial
+  // checkouts opened at once both pass the checkout's one-trial check.
+  if (current.status === "trialing") {
+    const subs = await ctx.db.pay_objects.where({ account: account.id, kind: "subscription", user_id: row.user_id }).orderBy("id", "asc").rows();
+    if (subs.length && subs[0].id !== row.id) return "a trial on a second subscription includes no LLM credits; they are granted from its first paid period";
+  }
   if (!ctx.credits) return "this delivery could not grant LLM credits";
   await ctx.credits.grant({
     user: row.user_id,
@@ -239,12 +258,17 @@ async function paymentEffects(ctx, account, current, row) {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Whether a payment's money went back to the buyer, all of it: refunded in full, or charged
+ * back by a dispute the merchant lost (security review #34). What it granted is taken back. A
+ * partial refund takes nothing back: what it bought is the shop's to settle with the buyer. */
+const takenBack = (current) => current.status === "refunded" || current.status === "charged_back";
+
 /** The *grant a role* effect: granted, for its days, once the payment succeeded, and revoked when
- * all of it is refunded. The days are counted from when it was made, so granting it again
- * changes nothing. */
+ * its money went back ([`takenBack`]). The days are counted from when it was made, so granting it
+ * again changes nothing. */
 async function paymentRole(ctx, account, current, row, effect) {
   const ref = grantRef(account, current);
-  if (current.status === "refunded") {
+  if (takenBack(current)) {
     if (ctx.roles) await ctx.roles.revoke(ref);
     return null;
   }
@@ -259,17 +283,52 @@ async function paymentRole(ctx, account, current, row, effect) {
 
 /** The *grant credits* effect (§6.3, P7.2): a top-up, granted once the payment succeeded, keyed by
  * the payment so that it is granted once however often its events arrive, and expiring its days
- * after the payment was made. A refund does not take the credits back: nothing but an agent
- * run spends them (§3.8). A payment seen for the first time already refunded grants nothing. */
+ * after the payment was made. When its money goes back — a full refund, or a lost chargeback —
+ * what is left of the top-up is taken back (security review #34): a buyer who spent a pack and
+ * charged it back keeps only what they spent, and their balance owes nothing more. A partial
+ * refund leaves the credits. A payment seen for the first time already refunded grants nothing. */
 async function paymentCredits(ctx, account, current, row, effect) {
+  const key = `payment:${account.id}:${current.ref}`;
+  if (takenBack(current)) {
+    if (!ctx.credits || typeof ctx.credits.revoke !== "function") return "this delivery could not take back LLM credits";
+    await ctx.credits.revoke({ key, note: `payment ${current.ref} ${current.status === "refunded" ? "refunded" : "charged back"}` });
+    return null;
+  }
   if (current.status !== "succeeded" && current.status !== "partially_refunded") return null;
   if (row.user_id === null || row.user_id === undefined) return "the payment is no user's of this instance, so its LLM credits were not granted";
   if (!ctx.credits) return "this delivery could not grant LLM credits";
   const made = plans.millis(current.created || current.updated) || Date.now();
   const expires_at = effect.expire_days ? new Date(made + effect.expire_days * DAY_MS).toISOString() : null;
   if (expires_at && Date.parse(expires_at) <= Date.now()) return `its LLM credits expired on ${expires_at}, before the payment was heard of`;
-  await ctx.credits.grant({ user: row.user_id, amount: effect.amount, key: `payment:${account.id}:${current.ref}`, expires_at, kind: "top_up", note: `payment ${current.ref}` });
+  await ctx.credits.grant({ user: row.user_id, amount: effect.amount, key, expires_at, kind: "top_up", note: `payment ${current.ref}` });
   return null;
+}
+
+/** The account setting that lets a **test-mode** account grant roles and credits (security review
+ * #33). Off by default: a test account takes no real money — the fake adapter's portal changes to
+ * any price and renews on a click — so one left enabled in production would hand out plans and
+ * unlimited LLM credits. An admin trying the module out turns it on for that account. */
+const TEST_GRANTS = "grants_in_test_mode";
+
+/** Whether `account` may grant: a live account, or a test account the admin opted in. */
+function grantsFor(account) {
+  if (account.mode === "live") return true;
+  const settings = account.settings && typeof account.settings === "object" ? account.settings : {};
+  return settings[TEST_GRANTS] === true;
+}
+
+/** The issue on an object of a test-mode account that may not grant. */
+const testModeIssue = (account) =>
+  `the payment account "${account.name}" is in test mode, so it grants no roles or LLM credits; ` +
+  `set "${TEST_GRANTS}": true in its settings to try grants out`;
+
+/** Whether `current` is an object that grants something: a subscription under a plan binding,
+ * or a payment with a *grant a role* or *grant credits* effect. */
+function wouldGrant(ctx, current, row) {
+  if (current.kind === "subscription") return !!plans.planBinding(ctx.configuration);
+  if (current.kind !== "payment") return false;
+  const effects = row.effects || {};
+  return !!(effects.role || effects.credits);
 }
 
 /** Everything the module does for an object besides mirroring it: its customer's row, and its
@@ -278,15 +337,18 @@ async function paymentCredits(ctx, account, current, row, effect) {
  * mirror row, and cleared once the object needs none. */
 async function applyEffects(ctx, account, current, row) {
   if (current.customer_ref && current.kind !== "customer") {
-    await upsertCustomer(ctx.db, account, current.customer_ref, { user_id: row.user_id, email: row.email });
+    await upsertCustomer(ctx.db, account, current.customer_ref, { user_id: customerUser(current, row), email: row.email });
   }
   let issue = null;
   try {
-    if (current.kind === "subscription") issue = await subscriptionEffects(ctx, account, current, row);
+    if (!grantsFor(account)) issue = wouldGrant(ctx, current, row) ? testModeIssue(account) : null;
+    else if (current.kind === "subscription") issue = await subscriptionEffects(ctx, account, current, row);
     else if (current.kind === "payment") issue = await paymentEffects(ctx, account, current, row);
   } catch (e) {
     issue = `its grants could not be made: ${e.message}`;
   }
+  const mismatch = row.charged && row.charged.mismatch;
+  if (mismatch) issue = issue ? `${issue}; ${mismatch}` : mismatch;
   if ((row.issue || null) !== issue) {
     await ctx.db.pay_objects.where({ id: row.id }).update({ issue });
     row.issue = issue;
@@ -310,6 +372,11 @@ async function syncObject(ctx, account, adapter, ref) {
 async function mirrorAndApply(ctx, account, adapter, current) {
   const row = await upsertObject(ctx.db, account, current);
   const applied = await applyEffects(ctx, account, current, row);
+  // A dispute changes what its payment is (a lost one is a chargeback, security review #34), but
+  // the provider's dispute events are about the dispute: the payment is read again with it.
+  if (current.kind === "dispute" && current.payment_ref) {
+    await syncObject(ctx, account, adapter, { kind: "payment", id: current.payment_ref });
+  }
   if (current.kind === "checkout" && current.payment_ref) {
     const payment = await adapter.fetch(account, { kind: "payment", id: current.payment_ref });
     if (!payment.checkout_ref) {
@@ -318,6 +385,43 @@ async function mirrorAndApply(ctx, account, adapter, current) {
     }
   }
   return applied;
+}
+
+/**
+ * Whether a payment paid for what its row holds now (security review #18). A checkout's lines
+ * are priced when it is made, and the buyer pays up to a day later; the rows they came from (a
+ * basket's order lines) may have changed in between, and the application's triggers deliver
+ * from the rows. So the lines are worked out again, by the settings the checkout kept, and
+ * compared with what was charged; the payment's amount must also be that checkout's total.
+ *
+ * The checkout is the one the payment came from when the mirror knows it, and otherwise any
+ * checkout of the same row (a Stripe payment can arrive before its checkout names it). Answers
+ * `{ lines }` when it matches, `{ mismatch, lines }` when it does not, and `null` for a payment
+ * the module priced no lines for (a subscription's).
+ */
+async function checkCharged(ctx, account, row) {
+  const { chargedLines, sameLines } = require("./checkout.js");
+  let candidates = row.charged ? [row] : [];
+  if (!candidates.length && row.ref_table) {
+    const checkouts = await ctx.db.pay_objects.where({ account: account.id, kind: "checkout", ref_table: row.ref_table, ref_key: row.ref_key }).rows();
+    candidates = checkouts.filter((c) => c.charged);
+  }
+  if (!candidates.length) return null;
+  let now;
+  try {
+    now = await chargedLines(ctx.db, candidates[0].charged.source || {}, row.ref_table, row.ref_key);
+  } catch (e) {
+    return { mismatch: `its lines could not be worked out again: ${e.message}`, lines: candidates[0].charged.lines };
+  }
+  const total = (lines) => lines.reduce((sum, l) => sum + l.quantity * l.unit_amount, 0);
+  const paid = Number.isSafeInteger(row.amount) ? row.amount : null;
+  const match = candidates.find((c) => sameLines(c.charged.lines, now) && (paid === null || total(c.charged.lines) === paid));
+  if (match) return { lines: match.charged.lines };
+  const charged = candidates.find((c) => paid === null || total(c.charged.lines) === paid) || candidates[0];
+  return {
+    mismatch: `what was paid for is not what ${row.ref_table} ${JSON.stringify(row.ref_key)} holds now: its lines changed after the checkout was made`,
+    lines: charged.charged.lines,
+  };
 }
 
 /** Insert one `pay_events` row unless its `(account, event_id, kind)` is there. Answers whether
@@ -382,17 +486,36 @@ async function processEvents(ctx, account, adapter, events) {
       results.push({ id: event.id, logged, object: object && object.id });
       continue;
     }
-    // A delivery seen before, all of it: nothing to fetch.
+    // A delivery seen before, all of it: nothing to fetch. A payment found not to match its lines
+    // was logged as `payment.mismatch` in place of `payment.succeeded`, and stays so.
     const seen = await db.pay_events.where({ account: account.id, event_id: String(event.id) }).rows();
-    if (kinds.every((k) => seen.some((s) => s.kind === k))) {
+    const logs = (k) => seen.some((s) => s.kind === k || (k === "payment.succeeded" && s.kind === "payment.mismatch"));
+    if (kinds.every(logs)) {
       results.push({ id: event.id, logged: [], object: seen[0] && seen[0].object });
       continue;
     }
     if (!event.ref) throw new Error(`the ${event.type} event ${event.id} names no object`);
     const object = await syncOrThrow(ctx, account, adapter, event);
+    let final = kinds;
+    const extra = {};
+    if (kinds.includes("payment.succeeded")) {
+      // Decided once per event: a delivery finished by a retry finds the decision in the log.
+      const before = seen.find((s) => s.kind === "payment.succeeded" || s.kind === "payment.mismatch");
+      const checked = before ? { lines: before.lines, mismatch: before.kind === "payment.mismatch" } : await checkCharged(ctx, account, object);
+      if (checked && checked.lines) extra.lines = checked.lines;
+      if (checked && checked.mismatch) {
+        final = kinds.map((k) => (k === "payment.succeeded" ? "payment.mismatch" : k));
+        if (!before) {
+          // Kept on the row's `charged`, so that applying its effects again keeps the issue.
+          const charged = { ...(object.charged || { lines: checked.lines }), mismatch: checked.mismatch };
+          await db.pay_objects.where({ id: object.id }).update({ charged, issue: checked.mismatch });
+          if (ctx.log && typeof ctx.log.warn === "function") ctx.log.warn(`payments: payment ${object.provider_ref} on "${account.name}": ${checked.mismatch}`);
+        }
+      }
+    }
     const logged = [];
-    for (const kind of kinds) {
-      if (await logEvent(db, { ...base, ...fromObject(object), kind })) logged.push(kind);
+    for (const kind of final) {
+      if (await logEvent(db, { ...base, ...fromObject(object), ...extra, kind })) logged.push(kind);
     }
     results.push({ id: event.id, logged, object: object.id });
   }
@@ -410,4 +533,4 @@ async function syncOrThrow(ctx, account, adapter, event) {
   return mirrorAndApply(ctx, account, adapter, current);
 }
 
-module.exports = { processEvents, upsertObject, upsertCustomer, applyEffects, syncObject, logEvent, kindsOf, fromMetadata, grantRef };
+module.exports = { TEST_GRANTS, grantsFor, processEvents, upsertObject, upsertCustomer, applyEffects, syncObject, logEvent, kindsOf, fromMetadata, grantRef };
