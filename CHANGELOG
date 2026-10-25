@@ -2,6 +2,156 @@
 
 Changes in reverse chronological order.
 
+## Role grants and LLM credits tables only when a module needs them
+
+- **A new installation lists `users` alone.** `sc_auth::bootstrap` no longer creates
+  `role_grants`, `credit_buckets`, `credit_entries` or `credit_accounts`.
+- **A module declares them**: a new plugin key, `core_tables: ["role_grants", "llm_credits"]`,
+  goes into the manifest (`ModuleManifest::core_tables`). `ModuleSet::load` creates the named
+  tables on every load; an unknown name is an issue on the module's card. The payments module
+  declares both.
+- **The first write creates them** if no module did: an admin's grant of credits or a role by
+  hand, the `grant_role` action, a metered agent's debit, a restore with their rows. Creation
+  is serialised in-process. Reads (effective role, balance, lists, find, revoke) treat a
+  missing table as empty and create nothing, so sessions and agents keep working before the
+  payments module is installed. An agent with no credit metering never touches the ledger.
+  A metered one sees a zero balance and stops, as before when the ledger was empty.
+- **Clear all drops them** (after the admin's tables, without going through the schema editor,
+  which still refuses to drop them by hand). Before, it only emptied them.
+- Design: TECHNICAL_DESIGN §7.4c. No migration: existing installations keep their tables.
+- Tests: sc-auth `credits`/`role_grants` (not bootstrapped; reads work without the tables;
+  the first grant creates them), sc-module `module_credits` (`core_tables` creates the ledger on
+  load, and an unknown name is an issue), sc-server `clear_all_api` (a fresh install lists only
+  `users`; Clear all drops the four tables).
+
+## Admin: every run of an agent
+
+- **A Runs button on each agent** in the agents list opens `#/agents/<name>/runs`
+  (`AgentRuns.tsx`). It lists all users' runs of that agent, newest first, from the existing
+  `listRuns` endpoint, which already returns every user's runs. Each run gets one line:
+  started, last activity, user (by email, or the bare id if the user was deleted, or
+  "anonymous"), description (with sub-agent runs marked "(delegated)"), state, and
+  **Show** / **Delete**. Delete asks for confirmation first.
+- **Show** opens the existing run page (`#/runs/<id>`). The agent run page now has a
+  **Context** card with the stored run context as pretty-printed JSON, and an **All runs**
+  button that goes back to the list.
+- Tests: `agentRuns.test.ts` (user label, JSON formatting), `AgentRuns.test.tsx` (page
+  header and columns).
+
+## Entities diagram: triggers, streams, search, and the full viewport
+
+- **Streams are entities.** `listEntities` lists each stored stream (kind `stream`: its
+  provider, `off` when disabled, its observe floor, a deep definition as the streams list
+  answers it). The entities list shows them with an orange badge, an **Observe** link
+  (when enabled), a **Streams** type button and a **Create stream** button. Streams now
+  stamp `updated_at` on every save like the other definitions, so they appear under
+  "Recently edited" (the nullable `updated_at` column is added to `_fd_streams` at startup by bootstrap, so no manual migration is needed).
+- **A trigger's channel** is in `listEntities` (`channel`: the table of an
+  insert/update/delete trigger, the stream of a stream trigger), so the diagram can join it.
+- **The diagram draws triggers and streams.** A trigger is a box joined (dashed) from the
+  table its event is on; a stream is a box joined (dashed) to each trigger that fires when
+  an element arrives on it. A trigger on no table or stream stands alone. Each box links to
+  its entity's page.
+- **Search in the diagram** draws the matching entities and everything one edge away from
+  them (keys either way, a table's triggers, a stream's triggers), and outlines the
+  matches with a 2px blue border. Deep search works here too.
+- **Only the diagram's type buttons** (Tables, Triggers, Streams) show in diagram mode.
+- **The diagram fills the viewport**: in diagram mode the card takes all the height left,
+  the **Create …** buttons sit at the bottom of the window, and the canvas fills the
+  space between the filter and them, however big or small the diagram is. Before this the
+  canvas took its height from the first fitted view, which left no room to zoom out into.
+  The filter section above the canvas is held at its own height (Bootstrap's `.card-body`
+  is `flex: 1 1 auto` and otherwise took half the free height, leaving an empty band of
+  several hundred pixels between the type buttons and the canvas).
+
+Tests: `entityDiagram.test.ts` (trigger and stream edges, search draws matches plus
+neighbours and marks only matches, layout order), `entities.test.ts` (a stream's links),
+`screens/Entities.test.tsx` (the Streams button and Create stream), and
+`crates/sc-server/tests/entities_api.rs::streams_are_listed_and_triggers_name_their_channel`.
+
+## Entities list: an entity relationship diagram
+
+- A **Diagram** switch in the top right of the **All entities** page (off by default)
+  replaces the list with an entity relationship diagram, drawn with React Flow
+  (`@xyflow/react`, already a dependency) after its database schema node: one box per
+  table, listing its fields with their types (primary keys marked **PK**, keys shown as
+  `→ target`), and an edge from each key field's row to the row of the field it
+  references (the target's primary key when the key names no field). Laid out left to
+  right by dagre, so a table sits left of the tables its keys point at.
+- Clicking a box opens that table's page. The diagram draws the tables the search and type
+  filter keep; a key to a table not drawn has no edge. Only tables for now.
+- Fields come from one `listFields` call per table, made the first time a table is drawn.
+- The model (edges, handles, layout) is `entityDiagram.ts`; the renderer is
+  `screens/EntityDiagram.tsx`.
+
+Tests: `entityDiagram.test.ts` (boxes, key edges row to row, keys to undrawn tables left
+out, the heading fallback, left-to-right layout) and `screens/Entities.test.tsx` (the
+switch is in the page header and off, with the list shown).
+
+## Entities list: no sidebar link, and the create buttons stay in view
+
+- The sidebar's **All entities** link is gone. The logo and the Saltcorn/Feldspar wordmark
+  at the top of the sidebar already link to the entities list, which is also where the
+  admin UI opens.
+- The entities list now has the viewport, as Saltcorn 1's did: the page stops at the
+  window's height, the table scrolls inside the card (with its column headings kept at the
+  top), and the search above it and the **Create …** buttons in the card's footer are
+  always visible. With few entities the card is only as tall as its rows. The page footer
+  is hidden on this screen. Done in CSS with the same `:has()` approach as the chat page
+  (`.entities-page` in `admin.css`).
+
+Test: `screens/Entities.test.tsx` (the table is inside its own scroll container, and the
+create buttons come after it, outside it).
+
+## The admin sidebar's application picker is a dropdown
+
+The picker at the top of the sidebar's Applications section looked like one of Tabler's
+submenus, which read as more navigation rather than a choice of application. It is now a
+dropdown (`ui/admin/src/AppPicker.tsx`, not a native `<select>`):
+
+- **Closed**, a bordered box with a small "Application" caption, the current application's
+  name under it (truncated if long) and a caret.
+- **Open**, every application with a tick beside the current one, then a divider and
+  **All applications** / **New application**. The menu is positioned over the links below it
+  rather than inline, so opening it does not push them down. It closes on a click outside,
+  on Escape, on choosing, or on navigating.
+- Folded to a rail, it is still the icon with Tabler's flyout menu beside it.
+
+Test: `AppPicker.test.tsx` (caption and name, caret, open/closed, the tick on the current
+application only, the two links after the names, the empty and unchosen labels).
+
+## The admin UI's home page: all entities, the recently edited first
+
+Saltcorn 1's "All entities" list, as the admin UI's home page (`#/entities`, and where the
+admin UI opens; first in the sidebar as **All entities**).
+
+- **One list of every entity** an admin configures: tables, file stores, triggers ("actions"),
+  agents and applications. Views and pages belong to one application's framework, so they are
+  not in it. Each row has its kind, its name linking to its configuration screen, a **Run**
+  link where running one means something (a table's data, a store's files, a trigger's test
+  run in place — the same toast the triggers list shows —, a chat with an agent, the running
+  application), a few details (a trigger's event and action, an agent's provider and model,
+  a store's backend, a table's field count) and who may use it (`read/write` for a table).
+  "Create …" buttons for each kind are at the foot.
+- **Recently edited**: the five most recently saved entities come first, with how long ago.
+- **Search** matches names, descriptions and kinds; **Deep search** fetches the listing again
+  with each definition (the JSON its own list endpoint answers, so secrets stay masked) and
+  matches inside it. The **type** buttons narrow the list to the kinds switched on; none
+  switched on shows every kind.
+- **`updated_at` on every definition.** `_fd_triggers`, `_fd_agents`, `_fd_file_stores` and
+  `_fd_applications` have a nullable `updated_at` that their save functions stamp, so every
+  path that saves one (admin API, MCP, CLI) records it; a workflow's new version stamps its
+  trigger. A table's `_fd_tables` row is an optional overlay, so its edit time is kept in a new
+  `_fd_table_edits` (name → time), stamped by every schema-editor batch and every table or field
+  overlay save, and forgotten when the table is dropped (`sc_catalog::edited`).
+- New admin endpoint `listEntities` (`GET /api/entities?deep=`), in `sc-server/src/entities.rs`.
+- Migration: `TABLES_RENAME.sql` adds the columns and the table (bootstrap adds them too).
+- **Tests:** `entities_api::every_entity_is_listed_with_when_it_was_last_saved` (sc-server: each
+  kind listed, saves stamped in order, an edit moves a trigger to the top, a schema change
+  stamps a table that has no overlay row, only `deep` carries definitions);
+  `ui/admin/src/entities.test.ts` (search, deep search, type filter, recently edited, ordering,
+  links).
+
 ## Security fixes: v1 action roles, hidden-column filters, module file owners, invitation columns, signup pre-hijack, chat socket
 
 Fixes for items 37–42 of `docs/SECURITY_REVIEW_2026-10.md` (third review). Item 36 is not

@@ -116,14 +116,168 @@ div.navbar-brand>a:hover {
   text-decoration: none;
 }
 
-/* The application picker's toggle in the sidebar carries an application's name,
- * which can be longer than the sidebar is wide: it truncates rather than wraps,
- * so the links under it stay where the eye expects them. */
-.app-picker-title {
+/* The application picker (`AppPicker.tsx`): a dropdown, not a submenu.
+ *
+ * Unfolded, the toggle is a bordered box — a small "Application" caption over
+ * the current application's name, which truncates rather than wraps, and a
+ * caret — and the open menu is positioned over the links below it instead of
+ * in the flow, so opening it moves nothing. Tabler makes every dropdown menu
+ * in an unfolded sidebar `position: static` and inline; the `:not(.navbar-
+ * folded)` rules here undo that for this one menu only. Folded to a rail, none
+ * of this applies and the menu is Tabler's own flyout. */
+.app-picker {
+  position: relative;
+}
+
+.app-picker-toggle {
+  width: 100%;
+  text-align: start;
+}
+
+.navbar-vertical:not(.navbar-folded) .navbar-nav .app-picker>.app-picker-toggle {
+  margin: 0.25rem 0.75rem;
+  width: calc(100% - 1.5rem);
+  padding-top: 0.375rem;
+  padding-bottom: 0.375rem;
+  border: 1px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.navbar-vertical:not(.navbar-folded) .navbar-nav .app-picker>.app-picker-toggle:hover,
+.navbar-vertical:not(.navbar-folded) .navbar-nav .app-picker.open>.app-picker-toggle {
+  border-color: var(--tblr-border-color-translucent, var(--tblr-border-color));
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.app-picker-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  line-height: 1.25;
+}
+
+.app-picker-caption {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.app-picker-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: var(--tblr-font-weight-medium);
+}
+
+.app-picker-caret {
+  margin-inline-start: 0.5rem;
+  display: inline-flex;
+  transition: transform 0.15s;
+}
+
+.app-picker.open .app-picker-caret {
+  transform: rotate(180deg);
+}
+
+.navbar-vertical:not(.navbar-folded) .navbar-collapse .app-picker>.dropdown-menu.app-picker-menu {
+  position: absolute;
+  top: 100%;
+  inset-inline: 0.75rem;
+  z-index: 1060;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--tblr-dropdown-padding-y) var(--tblr-dropdown-padding-x);
+  color: var(--tblr-dropdown-color);
+  background-color: var(--tblr-dropdown-bg);
+  border: var(--tblr-dropdown-border-width) solid var(--tblr-dropdown-border-color);
+  border-radius: var(--tblr-dropdown-border-radius);
+  box-shadow: var(--tblr-dropdown-box-shadow);
+}
+
+.navbar-vertical:not(.navbar-folded) .navbar-collapse .app-picker>.app-picker-menu .dropdown-item {
+  padding-inline-start: 0.5rem;
+}
+
+.app-picker-menu .dropdown-item {
+  align-items: center;
+}
+
+/* A fixed slot for the tick, so the chosen name lines up with the others. */
+.app-picker-tick {
+  display: inline-flex;
+  flex: 0 0 1.25rem;
+  width: 1.25rem;
+  margin-inline-end: 0.25rem;
+}
+
+.app-picker-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The entities list's section headings ("Recently edited", "All entities"):
+   a band across the table in the surface's secondary colour, which Tabler
+   redefines for the dark theme (Bootstrap's `table-light` would stay light). */
+.entities-section > td {
+  background: var(--tblr-bg-surface-secondary);
+  letter-spacing: 0.04em;
+}
+
+/* The entities list has the viewport, the way a chat page does (below): the
+   page stops growing at the window's height, the table scrolls inside the
+   card, and the search and the "Create …" buttons at the card's foot stay in
+   view. The card is only as tall as its rows until they would overflow. */
+.page:has(.entities-page) {
+  height: 100%;
+  overflow: hidden;
+}
+
+.page-wrapper:has(> .entities-page) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.page-wrapper:has(> .entities-page)>.footer {
+  display: none;
+}
+
+.entities-page,
+.entities-page>.page-body,
+.entities-page>.page-body>.container-xl {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.entities-page,
+.entities-page>.page-body {
+  flex: 1;
+}
+
+.entities-card {
+  min-height: 0;
+}
+
+.entities-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The column headings stay over the rows they name while those scroll. */
+.entities-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--tblr-bg-surface);
 }
 
 /* A build log in the outcome toast: long enough to read the error, not so long
@@ -1738,4 +1892,118 @@ div.navbar-brand>a:hover {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+}
+
+/* In diagram mode the card is the whole height left in the viewport, whatever
+   the diagram's size: the "Create …" buttons sit at the foot of the window and
+   the diagram fills everything between the filter and them. React Flow sizes
+   itself to its container, so the container's height must not come from its
+   content (a basis of 0, not auto) — or the first fit sets the height, and
+   zooming out has no room to use. */
+.entities-page-diagram>.page-body>.container-xl,
+.entities-page-diagram .entities-card {
+  flex: 1;
+}
+
+/* Bootstrap gives every `.card-body` `flex: 1 1 auto`, so the search and type
+   buttons above the diagram would grow too and take half the free height,
+   leaving a gap above the canvas. Only the diagram grows. */
+.entities-page-diagram .entities-card>.card-body {
+  flex: 0 0 auto;
+}
+
+.entity-diagram {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+}
+
+/* A table in the diagram, after React Flow's database schema node: the name
+   as a heading, then a row per field with its type on the right. */
+.erd-node {
+  background: var(--tblr-bg-surface);
+  border: 1px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius);
+  box-shadow: var(--tblr-box-shadow-card);
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+
+.erd-node-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 0.75rem;
+  background: var(--tblr-bg-surface-secondary);
+  border-bottom: 1px solid var(--tblr-border-color);
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.erd-node-head > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.erd-node-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0 0.75rem;
+}
+
+.erd-node-row + .erd-node-row {
+  border-top: 1px solid var(--tblr-border-color-translucent);
+}
+
+.erd-node-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.erd-type {
+  color: var(--tblr-secondary);
+  flex-shrink: 0;
+  max-width: 50%;
+}
+
+.erd-pk {
+  color: var(--tblr-yellow);
+  font-size: 0.625rem;
+}
+
+/* A box the search matched. */
+.erd-node-match {
+  border: 2px solid var(--tblr-blue);
+}
+
+.erd-node-head > .icon {
+  flex-shrink: 0;
+  margin-inline-end: 0.375rem;
+  color: var(--tblr-secondary);
+}
+
+.erd-node-trigger .erd-node-head > .icon {
+  color: var(--tblr-yellow);
+}
+
+.erd-node-stream .erd-node-head > .icon {
+  color: var(--tblr-orange);
+}
+
+/* A trigger's edge (from its table or its stream) is dashed, so it reads as
+   "fires" rather than "references". */
+.erd-edge-trigger path.react-flow__edge-path {
+  stroke-dasharray: 5 4;
+}
+
+/* The handles only anchor the edges; nothing is connected by dragging them. */
+.erd-node .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
 }
