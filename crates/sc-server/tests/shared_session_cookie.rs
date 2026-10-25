@@ -11,6 +11,10 @@
 //! - turning it on or off is a **save** that ends every session, the saving
 //!   admin's included, and clears that admin's cookie in both scopes, since a
 //!   cookie already in a browser keeps the scope it was given.
+//!
+//! And, beside it in Settings → Authentication, that the session lifetime a
+//! sign-in gets is the **stored** one, even when this process did not do the
+//! saving (another node, `feldspar config set`, a restore).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
@@ -45,6 +49,8 @@ struct Browser {
     host: String,
     cookies: Vec<(String, Option<String>, String)>,
     set_cookie: Vec<String>,
+    /// Sent with every request, as a native client sends its kind.
+    headers: Vec<(String, String)>,
 }
 
 impl Browser {
@@ -54,6 +60,7 @@ impl Browser {
             host: host.to_owned(),
             cookies: Vec::new(),
             set_cookie: Vec::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -62,6 +69,9 @@ impl Browser {
             .method(method)
             .uri(path)
             .header(header::HOST, &self.host);
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
         if !self.cookies.is_empty() {
             let cookies = self
                 .cookies
@@ -310,5 +320,36 @@ async fn sharing_the_session_cookie_scopes_it_to_the_base_domain_and_signs_every
     assert!(!other.signed_in().await);
     admin.login().await;
     assert_eq!(admin.session_domain(), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sign_in_gets_the_stored_session_lifetime_even_when_saved_elsewhere()
+-> sc_error::Result<()> {
+    let (router, apps, _admin, _db) = setup().await?;
+    assert_eq!(apps.session_ttl(), chrono::Duration::hours(24));
+    // Written straight to `_fd_config`, as another node's save, `feldspar
+    // config set` or a restore would: nothing tells this process.
+    let catalog = apps.catalog().unwrap().clone();
+    sc_config::set_config(&catalog, sc_config::SESSION_TTL_HOURS, json!(8760)).await?;
+
+    // A native client's cookie says how long its session lasts.
+    let mut phone = Browser::new(router.clone(), BASE_DOMAIN);
+    phone.headers.push((
+        sc_api::auth::CLIENT_KIND_HEADER.to_owned(),
+        sc_api::auth::NATIVE_CLIENT.to_owned(),
+    ));
+    phone.login().await;
+    let line = phone
+        .session_cookies()
+        .into_iter()
+        .find(|l| !l.starts_with(&format!("{SESSION_COOKIE}=;")))
+        .unwrap();
+    assert!(
+        line.contains(&format!("Max-Age={}", 8760 * 3600)),
+        "a year, not the 24h this process started with: {line}"
+    );
+    assert!(phone.signed_in().await);
+    assert_eq!(apps.session_ttl(), chrono::Duration::hours(8760));
     Ok(())
 }

@@ -2,6 +2,25 @@
 
 Changes in reverse chronological order.
 
+## Session lifetime: a sign-in reads the stored setting
+
+Report: Settings → Authentication → Session lifetime set to 8760 hours, yet users still had to
+sign in again every 24 hours. The lifetime a sign-in got was this process's copy
+(`AppMounts::session_ttl`), set at boot and by a save **on this process**. A save on another
+node behind the same load balancer, `feldspar config set session_ttl_hours …` or a restore of
+the settings wrote `_fd_config` but left every other process minting 24-hour sessions until it
+restarted.
+
+- `AppMounts::current_session_ttl` reads `session_ttl_hours` from `_fd_config` and refreshes the
+  process's copy. `apply_session` (a password, a rendered form, an identity provider) and the
+  admin handoff call it for every sign-in, and a native client's cookie `Max-Age` uses the same
+  value. If there is no catalog, or the read fails, the process's copy is used and a warning
+  logged.
+- Unchanged: a session keeps the expiry it got at sign-in, so a session started before the
+  change still lapses on its old schedule. And a browser's session cookie still has no
+  `Max-Age`, so closing the browser ends the session whatever the lifetime is.
+- Test: `shared_session_cookie::a_sign_in_gets_the_stored_session_lifetime_even_when_saved_elsewhere`.
+
 ## Role grants and LLM credits tables only when a module needs them
 
 - **A new installation lists `users` alone.** `sc_auth::bootstrap` no longer creates

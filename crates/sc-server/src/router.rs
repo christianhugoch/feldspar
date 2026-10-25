@@ -1525,11 +1525,8 @@ async fn admin_handoff(
     else {
         return Redirect::to("/").into_response();
     };
-    match state
-        .sessions
-        .login_for(user, state.apps.session_ttl())
-        .await
-    {
+    let ttl = state.apps.current_session_ttl().await;
+    match state.sessions.login_for(user, ttl).await {
         Ok(token) => {
             let domain = session_cookie_domain(&state, Some(&host));
             let cookie = session_cookie(&state, token, domain.as_deref());
@@ -3061,16 +3058,18 @@ pub(crate) async fn apply_session(
     {
         return Err(Box::new(refusal));
     }
+    // Read from the store for a sign-in rather than believed from this process,
+    // so a lifetime saved on another node applies here too.
+    let ttl = match &session {
+        SessionAction::Start(_) => state.apps.current_session_ttl().await,
+        _ => state.apps.session_ttl(),
+    };
     Ok(match session {
         SessionAction::Keep => SessionCookies {
             jar,
             stale: AppendHeaders(None),
         },
-        SessionAction::Start(user) => match state
-            .sessions
-            .login_for(user.clone(), state.apps.session_ttl())
-            .await
-        {
+        SessionAction::Start(user) => match state.sessions.login_for(user.clone(), ttl).await {
             Ok(token) => {
                 // The session the request arrived with is replaced, not joined:
                 // the cookie is about to name the new one, so leaving the old one
@@ -3093,8 +3092,7 @@ pub(crate) async fn apply_session(
                 fire_login(state, &user, guest.as_deref()).await;
                 let mut cookie = session_cookie(state, token, domain.as_deref());
                 if client.native {
-                    let ttl = state.apps.session_ttl().num_seconds();
-                    cookie.set_max_age(time::Duration::seconds(ttl));
+                    cookie.set_max_age(time::Duration::seconds(ttl.num_seconds()));
                 }
                 cookies(jar.add(cookie))
             }

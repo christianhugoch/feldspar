@@ -401,6 +401,25 @@ impl AppMounts {
         chrono::Duration::hours(self.session_ttl_hours.0.load(Ordering::Relaxed))
     }
 
+    /// How long a session started now lasts, read from `_fd_config` rather than
+    /// believed from this process's copy: the save that changed it may have
+    /// been another node's, `feldspar config set` or a restore, none of which
+    /// reach this process's [`session_ttl`](AppMounts::session_ttl). A sign-in
+    /// is rare enough to afford the read. The copy is refreshed with what was
+    /// read, and is the answer when there is no catalog or the read fails.
+    pub async fn current_session_ttl(&self) -> chrono::Duration {
+        if let Some(catalog) = &self.catalog {
+            match sc_config::session_ttl_hours(catalog).await {
+                Ok(hours) => self.set_session_ttl_hours(hours),
+                Err(e) => sc_log::log_warn!(
+                    "the stored session lifetime is ignored, keeping {}h: {e}",
+                    self.session_ttl().num_hours()
+                ),
+            }
+        }
+        self.session_ttl()
+    }
+
     /// Give sessions started from the next response on `hours`. A session
     /// already started keeps the expiry it was given.
     pub fn set_session_ttl_hours(&self, hours: i64) {

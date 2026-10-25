@@ -1054,10 +1054,12 @@ pub struct User {
 - **OAuth2 server option**: Saltcorn can act as an identity provider (`sc-auth` exposes the
   authorization-code/PKCE endpoints when enabled).
 - **Session lifetime** (`session_ttl_hours`, Settings → Authentication, default 24, 1 to 8760).
-  Live: `AppMounts::session_ttl` is read where the router starts a session
-  (`SessionStore::login_for`), so the next sign-in after a save gets it — a password's, an
-  identity provider's, an admin handoff's — and a native client's cookie `Max-Age` matches it.
-  A session already started keeps the expiry it was given.
+  Live: every sign-in reads it from `_fd_config` (`AppMounts::current_session_ttl`) where
+  the router starts a session (`SessionStore::login_for`). So the next sign-in after a save
+  gets it on every node, including after a save made by another node, `feldspar config set` or
+  a restore. That covers a password's, an identity provider's and an admin handoff's, and a
+  native client's cookie `Max-Age` matches it. A session already started keeps the expiry it
+  was given.
 - **External identity providers (OAuth 2.0 clients)**, Settings → Authentication. A list of
   records under the internal key `oauth_providers`, each declared field by field
   (`sc_config::oauth_provider_spec`) so the tab's form is generic, its `client_secret`
