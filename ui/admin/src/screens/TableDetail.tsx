@@ -318,7 +318,6 @@ export function TableDetail({ table }: { table: string }) {
 function TableData({
   table,
   rowCount,
-  configured,
   provided,
   metadata,
   writes,
@@ -400,11 +399,11 @@ function TableData({
       const { inserted, updated, errors } = await api.importTableCsv(table, { csv });
       setNotice(
         `${inserted} row${inserted === 1 ? "" : "s"} added from ${file.name}` +
-          // A file that names primary keys replaces rows as well as adding
-          // them, and "0 rows added" for a file that rewrote the whole table
-          // would read as nothing having happened.
-          (updated > 0 ? `, ${updated} replaced` : "") +
-          (errors.length > 0 ? `, ${errors.length} refused.` : "."),
+        // A file that names primary keys replaces rows as well as adding
+        // them, and "0 rows added" for a file that rewrote the whole table
+        // would read as nothing having happened.
+        (updated > 0 ? `, ${updated} replaced` : "") +
+        (errors.length > 0 ? `, ${errors.length} refused.` : "."),
       );
       setRejected(errors);
       onChange();
@@ -479,26 +478,6 @@ function TableData({
     }
   };
 
-  const forget = async () => {
-    if (
-      !window.confirm(
-        t(
-          'Forget the settings for "{name}"?\n\nIt returns to admin-only. The table and its rows are not touched.',
-          { name: table },
-        ),
-      )
-    ) {
-      return;
-    }
-    setError(null);
-    try {
-      await api.deleteTableSettings(table);
-      onChange();
-    } catch (err) {
-      setError(errorMessage(err, "Could not forget the settings."));
-    }
-  };
-
   return (
     <Card className="mb-4">
       <Card.Header><T text="Table data" /></Card.Header>
@@ -562,11 +541,6 @@ function TableData({
                   to a table, it *is* the table, so forgetting it would be
                   deleting it — which is the item below, with the confirmation
                   that says so. */}
-              {/* Nor for a metadata table, whose row is what puts it on the
-                  list: forgetting it is the "remove" below. */}
-              {configured && !provided && !metadata && (
-                <Dropdown.Item onClick={() => void forget()}><T text="Forget settings" /></Dropdown.Item>
-              )}
               {/* Not on a metadata table: its rows are Saltcorn's own — the
                   users table among them — and emptying one in a click would
                   lock the admin out. Row by row, in the data grid, it still can. */}
@@ -751,7 +725,7 @@ function Constraints({
     <Card className="mb-4">
       <Card.Header><T text="Constraints and indexes" /></Card.Header>
       <Card.Body>
-        {error && <Alert variant="danger">{error}</Alert>}        
+        {error && <Alert variant="danger">{error}</Alert>}
         {listed.length > 0 && (
           <Table size="sm" hover responsive className="table-vcenter">
             <thead>
@@ -1367,7 +1341,7 @@ function Settings({
             />
             <Form.Text muted>
               <T
-                text="A JavaScript expression over the row’s fields, {user}, the operation flags ({read}, {write}, …) and Ⱶ-joinfields. Rows it grants are reachable below the roles above. Blank means roles only."
+                text="A JavaScript expression over the row’s fields, {user}, the operation flags ({read}, {write}, …), Ⱶ-joinfields and Ↄ-aggregations. Rows it grants are reachable below the roles above. Blank means roles only."
                 values={{
                   user: <code>user</code>,
                   read: <code>_read</code>,
@@ -1451,11 +1425,6 @@ function Settings({
           <Button type="submit" size="sm" disabled={busy}>
             <T text="Save settings" />
           </Button>
-          {settings?.configured && (
-            <Form.Text muted className="d-block mt-2">
-              &ldquo;<T text="Forget settings”, on the table-data menu above, returns the table to admin-only. It never touches the table or its rows." />
-            </Form.Text>
-          )}
         </Form>
       </Card.Body>
     </Card>

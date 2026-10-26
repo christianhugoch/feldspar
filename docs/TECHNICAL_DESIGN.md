@@ -1760,6 +1760,12 @@ erDiagram
     uuid user_id "deliberately NOT a foreign key"
     timestamp expires_at
   }
+  GUESTSESSIONS["_fd_guest_sessions"] {
+    text token_hash PK "SHA-256 of the guest cookie token"
+    text public_id "gs_...: what a table stores and session.id reads"
+    uuid application_id "the application it belongs to"
+    timestamp expires_at "logged, unlike _fd_sessions"
+  }
   APITOKENS["_fd_api_tokens"] {
     text token_hash PK "SHA-256 of the bearer token"
     uuid id UK "the public handle a list reports and a revoke names"
@@ -1786,6 +1792,10 @@ erDiagram
     int min_role_read
     int min_role_write
     json attributes
+  }
+  TABLEEDITS["_fd_table_edits"] {
+    text name PK "the physical table; no overlay row needed"
+    timestamp updated_at "when it was last edited"
   }
   FIELDS["_fd_fields"] {
     uuid id UK
@@ -2190,6 +2200,7 @@ erDiagram
   USERS ||--o{ PASSWORDTOKENS : "user_id -- by value"
   USERS |o--o{ RUNS : "user_id -- by value, nullable"
   TABLES ||--o{ FIELDS : "table_name -- same subject, joined by name"
+  TABLES ||--o| TABLEEDITS : "name -- by name, bookkeeping"
   FIELDS }o--o| TABLES : "attributes.target_table -- Key fields"
   LLM ||--o{ AGENTS : "provider -- by name"
   LLM ||--o{ LLMMODELS : "provider_id"
@@ -2217,6 +2228,7 @@ erDiagram
   APPS ||--o{ TRANSLATIONS : "application -- by value, deleted with the app"
   APPS |o--o{ CODELIBS : "application_id -- by value, deleted with the app"
   APPS ||--o{ UPLOADS : "application -- by value, the slot's"
+  APPS ||--o{ GUESTSESSIONS : "application_id -- by value"
   VIEWS }o--o{ LIBRARY : "library_id -- inside configuration JSON"
   PAGES }o--o{ LIBRARY : "library_id -- inside layout JSON"
   VIEWS }o--o| TABLES : "table_name -- by name"

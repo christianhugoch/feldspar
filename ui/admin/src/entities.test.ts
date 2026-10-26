@@ -150,6 +150,23 @@ describe("links", () => {
   });
 });
 
+describe("labels in the screen's language", () => {
+  // A stand-in translator: what reaches it is the English key, so a label that
+  // came back bracketed went through `t` — the only way a catalogue can reach it.
+  const t = (text: string) => `[${text}]`;
+
+  it("translates a kind's name, singular and plural", () => {
+    expect(kindLabels().file_store.one).toBe("File store");
+    expect(kindLabels(t).file_store.one).toBe("[File store]");
+    expect(kindLabels(t).agent.many).toBe("[Agents]");
+  });
+
+  it("translates the Run link's label", () => {
+    const greet = entity({ kind: "trigger", name: "greet" });
+    expect(runAction(greet, undefined, t)).toEqual({ type: "test-run", label: "[Test run]" });
+  });
+});
+
 describe("timeAgo", () => {
   const now = Date.UTC(2026, 9, 25, 12);
   it("says how long ago, in the largest whole unit", () => {

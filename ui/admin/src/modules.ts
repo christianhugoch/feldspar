@@ -302,7 +302,8 @@ export function suppliedSummary(module: Module): string {
 }
 
 /** One of a module's services, as its card shows it: running, restarting after
- * a failure (how many times, and why), or stopped (TODO-imap M5.2). */
+ * a failure (how many times, and why), or stopped (TODO-imap M5.2). The label
+ * is in the screen's language when it passes its `t`. */
 export function serviceState(
   service: Module["services"][number],
   t: Translator["t"] = format,
