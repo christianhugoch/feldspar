@@ -205,6 +205,8 @@ graph TD
   coretraits --> agent["sc-agent"]
   coretraits --> app["sc-app"]
   coretraits --> repomap["sc-repomap"]
+  coretraits --> mcp["sc-mcp"]
+  mcp --> email
   coreact --> api["sc-api"]
   server --> module["sc-module"]
   viewpattern["sc-viewpattern"] --> app
@@ -293,8 +295,9 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-catalog` | `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-error` `sc-expr` `sc-files` `sc-query` `sc-types` |
 | `sc-config` | `sc-catalog` `sc-db` `sc-error` `sc-i18n` `sc-log` `sc-query` `sc-types` |
 | `sc-email` | `sc-catalog` `sc-config` `sc-error` |
-| `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
+| `sc-auth` | `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-types` |
 | `sc-llm` | `sc-catalog` `sc-config` `sc-db` `sc-error` `sc-log` `sc-query` `sc-types` |
+| `sc-mcp` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-query` `sc-types` |
 | `sc-action` | `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-dataset` | `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
 | `sc-model` | `sc-catalog` `sc-dataset` `sc-db` `sc-error` `sc-expr` `sc-query` `sc-types` |
@@ -308,11 +311,11 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-live` | `sc-api` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-query` `sc-stream` `sc-types` |
 | `sc-core-actions` | `sc-action` `sc-api` `sc-auth` `sc-catalog` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-model` `sc-query` `sc-types` |
 | `sc-viewpattern` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-query` `sc-types` |
-| `sc-module` | `sc-action` `sc-app` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
+| `sc-module` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
-| `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-model` `sc-module` `sc-python` `sc-query` `sc-ratelimit` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
-| `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
+| `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-mcp` `sc-query` `sc-repomap` `sc-types` |
+| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-mcp` `sc-model` `sc-module` `sc-python` `sc-query` `sc-ratelimit` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-mcp` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
 
@@ -810,6 +813,17 @@ already moves JSON, and the Postgres driver converts at the wire. It is basic ra
 because the kind is part of the column's SQL type, not an attribute of a field over one; the
 field types are named `geometry`, `geometry_point`, `geometry_polygon`, … (never `point` or
 `polygon`, which are Postgres's own non-geographic types and keep meaning those).
+
+**A vector is a basic type too** (TODO-agent-skills AS2): `BasicType::Vector(n)`, an embedding
+of `n` 32-bit floats, whose value is a **JSON array of numbers** in a `Value::Json` for the same
+reason. Postgres stores pgvector's `vector(n)` (the driver speaks its binary form); SQLite stores
+a little-endian `f32` blob in a column declared `vector(n)`, which a write reaches through
+`CAST(? AS vector(n))` — rendered on SQLite as the driver's `_fd_vector(?, n)`. The picker offers
+one `vector` whose size is the `dimensions` attribute. A read orders by `Expr::VectorDistance`
+(pgvector's `<=>`, or `_fd_cosine_distance` on SQLite), answered by an HNSW `vector_index`
+constraint on Postgres and by a scan bounded at 50,000 rows otherwise. A field may be computed by
+an `embed_from` formula through `sc-llm`'s `embed` (an OpenAI-compatible `/embeddings` call);
+`sc_api::vector` holds the read and write halves and the `embed_rows` back-fill.
 
 ### 6.2 Fields — the `BaseField` / `DataField` / `FormField` split
 
@@ -1808,6 +1822,17 @@ erDiagram
     int min_role
     json attributes "sparse: the strong/cheap model roles, the budgets, the loop-control limits"
   }
+  AGENTMEMORY["_fd_agent_memory"] {
+    int id PK "an integer: SQLite's full-text index is keyed by it"
+    text agent "-> _fd_agents.name; the only agent that reads it"
+    uuid user_id "nullable, NOT a foreign key; null for a run with no user"
+    uuid run_id "nullable: null for one the consolidation wrote"
+    timestamp written_at
+    text kind "memory | preferences"
+    bool personal "only its own user may read it back"
+    text topic "full-text indexed with contents"
+    text contents
+  }
   MODELS["_fd_models"] {
     uuid id PK
     text name UK
@@ -2109,6 +2134,36 @@ erDiagram
     text name PK "SQLite only: a transaction-local setting, e.g. sc.changeset"
     text value "deleted before its transaction commits"
   }
+  GUESTSESSIONS["_fd_guest_sessions"] {
+    text token_hash PK "SHA-256 of the guest cookie token"
+    text public_id "what a table stores and session.id reads; not the cookie"
+    uuid application_id "by value: a guest of one application only"
+    timestamp expires_at
+  }
+  MCPSERVERS["_fd_mcp_servers"] {
+    uuid id PK
+    text name UK "an agent's tools from it are name__tool"
+    text description
+    text url
+    text transport "streamable_http | sse"
+    json headers "values are redacted secrets"
+    json config "allow_private_network, timeout_secs"
+    json attributes
+  }
+  RUNPARTS["_fd_run_parts"] {
+    uuid id PK
+    uuid run_id "-> _fd_runs.id, by value, deleted with it"
+    text kind "rows | image | audio"
+    text mime_type
+    text summary
+    json data "a rows part's rows, or an image's or clip's name"
+    bytes content "an image's or clip's bytes; null for rows"
+    timestamp created_at
+  }
+  TABLEEDITS["_fd_table_edits"] {
+    text name PK "the table, by name"
+    timestamp updated_at "its last edit; bookkeeping, not definition"
+  }
   BUILDHOSTS["_fd_build_hosts"] {
     uuid id PK
     text name UK
@@ -2141,6 +2196,13 @@ erDiagram
   LLMMODELS |o--o{ AGENTS : "model -- by name, or the default"
   LLMMODELS }o--o{ AGENTS : "attributes.strong/cheap -- a role's model, by name"
   AGENTS ||--o{ RUNS : "subject -- by name, when kind = agent"
+  AGENTS ||--o{ AGENTMEMORY : "agent -- by name"
+  USERS |o--o{ AGENTMEMORY : "user_id -- by value, nullable"
+  RUNS |o--o{ AGENTMEMORY : "run_id -- by value, nullable"
+  RUNS ||--o{ RUNPARTS : "run_id -- by value, deleted with the run"
+  MCPSERVERS }o--o{ AGENTS : "traits -- mcp_server tool config, by name"
+  APPS ||--o{ GUESTSESSIONS : "application_id -- by value"
+  TABLES ||--o| TABLEEDITS : "name -- by name, even with no overlay row"
   TRIGGERS ||--o{ WFVERSIONS : "workflow -- by value, append-only"
   WFVERSIONS ||--o{ RUNS : "version -- a run is pinned to the one it started on"
   RUNS ||--o{ TRACES : "run -- by value, when tracing is on"
@@ -3012,8 +3074,11 @@ pub struct Trigger {
     pub id: TriggerId,                 // UUID: it is stored metadata (§9)
     pub name: String,                  // unique; the key an app, an API path and Run use
     pub description: String,
-    pub when: EventKind,               // insert/update/delete · none · login · startup ·
-                                       // error · often/hourly/daily/weekly · stream
+    pub when: EventKind,               // insert/update/insert_or_update/delete · none ·
+                                       // login · startup · error ·
+                                       // often/hourly/daily/weekly · stream
+                                       // (insert_or_update is trigger-only: it fires
+                                       // for an insert or an update event)
     pub channel: Option<String>,       // the table, for a table event; the stream, for a
                                        // stream event; nothing else has one
     pub only_if: Option<String>,       // a predicate over the affected row (table events),
@@ -3966,7 +4031,19 @@ milestone, Phase 3, `sc_agent::control`):
   a *user* message at index 0 rather than part of the system prompt, because a trait's header is
   data (a repo map, an `AGENTS.md`, a git log) and the system prompt is the cached prefix.
   `CachePlan`'s breakpoints are set from exactly this layout, and `prompt_cache_key` is the run
-  id. `on_turn` is documented as cache-breaking and `coding` does not use it.
+  id. `on_turn` has two outlets: `Turn::append_system`, for text that is the same on every step
+  of a session (preloaded rows, a picked prompt), and `Turn::append_context`, for text that
+  changes per message (`search_table`/`similar_rows` in `every_message` mode). The second is sent
+  as a last user message after the history and is not kept on the run, so the system prompt,
+  tools and history stay a byte-identical prefix from one step to the next — which matters most
+  on hosts that cache prefixes on their own, with no breakpoints to place. `coding` uses neither.
+- **A model row may set `reasoning_effort` (`none` … `max`) and `extra_params`**, a JSON object
+  merged into every request body last; an agent's own `reasoning_effort` wins over the row's.
+  They are applied where the row becomes a callable model (`sc_llm::WithRequestDefaults`), so the
+  loop, the test button and single prompts all send them. Chat Completions sends
+  `reasoning_effort`, Responses `reasoning.effort`, Anthropic `output_config.effort` (whose
+  levels start at `low`). `extra_params` may not set the request's own fields (`model`,
+  `messages`, `tools`, …).
 - **The stored transcript is never edited.** Clearing and compacting are **overlays** beside the
   messages: a stub per cleared tool result, keyed by index, and `(up_to_index, summary)` records.
   The request is built from transcript plus overlays; the chat and the admin read the transcript
@@ -4073,6 +4150,16 @@ with the run's caller.
 `min_role` still gates it, so exposing an agent to a role does not thereby expose everything the
 agent could call. This is the trait that connects an agent to the whole of §10 — a workflow,
 once §10.3 lands, becomes callable the same way, because a workflow is a trigger.
+
+**Code.** `run_js_code` keeps one JavaScript body in the agent as one tool. `library_tools`
+exposes functions a code library already exports: the configuration names the library and lists
+`{ name, description, parameters, function }`, each tool calls `lib(library)[function](args)`
+through `TriggerDispatcher::run_code` as the run's caller (an application's chat resolves the
+application's libraries first). A function may return `{ "$proposal": { prompt, apply, payload,
+label } }` instead of acting: the trait puts it to the person as an `approve` request, the turn
+ends, and on approval `AgentTrait::on_answer_in` — `on_answer` with a tool call's context — calls
+the `apply` export with the stored payload as the approving person before the model is told the
+outcome. The payload comes from the run's stored request, never from the client.
 
 **What was built, where it deviates** (Phase 3, `run_trigger`):
 
@@ -4836,12 +4923,14 @@ action returns a value (§10.1), and a caller who wants the deltas is a chat cli
   not currently validate is a repairable state, and the trigger that names it should not also be
   invalid: one broken thing, one error, in the place it can be fixed. Firing then reports the
   agent's own validation message.
-- **A triggered run is given no trigger dispatcher.** An agent whose traits include
-  `run_trigger` answers that one tool with `require_triggers`' configuration error, which the
-  model reads as a tool result. Handing the dispatcher back down into an action it is itself
-  running would close a trigger → agent → trigger cycle with nothing counting the depth, since a
-  tool call is not a firing and carries no chain. Chat is where an agent runs triggers, until a
-  run carries a firing chain of its own.
+- **A triggered run is given the trigger dispatcher, and carries the firing chain.** The run's
+  caller holds the chain of the firing that started it (`RunCaller::chain`), and every trigger
+  its tools run, or write they cause, carries that chain on (`RunCaller::tool_chain`). A trigger
+  → agent → trigger loop is therefore one cascade and stops at `MAX_DEPTH` like any other; the
+  innermost model reads the limit as its tool's result. The dispatcher hands itself down through
+  a weak handle to its own `Arc` (`TriggerDispatcher::into_shared`,
+  `ActionContext::shared_triggers`), so `run_trigger`, `run_js_code` and `library_tools` work
+  in a triggered run as in a chat.
 - **The run is created with a description naming the trigger.** `Runner::start` cannot give one,
   and a history sidebar of triggered runs would otherwise be a list of timestamps.
 - **The agent's `min_role` does not gate a triggered run.** It is the floor on who may *chat*
@@ -4849,6 +4938,12 @@ action returns a value (§10.1), and a caller who wants the deltas is a chat cli
   (decision 5 read the other way round). What guards it is the trigger's own `min_role`, which is
   also what guards it when an application exposes it as `POST {mount}/actions/{name}` — pinned by
   test rather than asserted, and needing no change to §13.2.
+- **Or the run is the event's user's** (`run_as: event_user`). The agent's tools run as whoever
+  caused the event — the signed-in caller of `POST {mount}/actions/{name}`, the user whose write
+  fired the trigger — at their role, or at the public role when nobody was signed in, and the run
+  records them. The agent's `min_role` then applies as in a chat. Such a run is still of
+  untrusted origin (the prompt is computed from the event), so it never has the server's own
+  tools, and `trusted_input` cannot be combined with it.
 
 ### 11.6 Copilot & AppConstructor
 

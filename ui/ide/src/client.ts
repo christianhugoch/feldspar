@@ -48,9 +48,9 @@ export type CreateConstraintRequest = { type: string; fields?: Array<string> | n
 export type CreateConstraintResponse = { name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean };
 export type DeleteConstraintResponse = { dropped: string };
 export type ListFieldTypesResponse = Array<{ name: string; label: string; category: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
-export type ListRowsQuery = { order?: string; limit?: number; offset?: number; filter?: Record<string, string> };
+export type ListRowsQuery = { order?: string; limit?: number; offset?: number; search?: string; filter?: Record<string, string> };
 export type ListRowsResponse = Array<unknown>;
-export type CountRowsQuery = { filter?: Record<string, string> };
+export type CountRowsQuery = { search?: string; filter?: Record<string, string> };
 export type CountRowsResponse = { count: number };
 export type CreateRowRequest = unknown;
 export type CreateRowResponse = unknown;
@@ -100,16 +100,30 @@ export type UpdateLlmProviderResponse = { id: string; name: string; description:
 export type DeleteLlmProviderResponse = { deleted: boolean };
 export type SetDefaultLlmProviderResponse = { id: string; name: string; description: string; backend: string; config: unknown; from_config_file: boolean; is_default: boolean };
 export type ListLlmProviderBackendsResponse = Array<{ name: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
-export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
-export type CreateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
-export type CreateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
-export type UpdateLlmModelRequest = { name: string; description: string; is_default: boolean; config: unknown };
-export type UpdateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
+export type ListLlmModelsResponse = Array<{ id: string; provider_id: string; name: string; description: string; kind?: string | null; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown }>;
+export type CreateLlmModelRequest = { name: string; description: string; kind?: string | null; is_default: boolean; config: unknown };
+export type CreateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; kind?: string | null; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
+export type UpdateLlmModelRequest = { name: string; description: string; kind?: string | null; is_default: boolean; config: unknown };
+export type UpdateLlmModelResponse = { id: string; provider_id: string; name: string; description: string; kind?: string | null; is_default: boolean; config: unknown; capabilities: unknown; prices: unknown };
 export type DeleteLlmModelResponse = { deleted: boolean };
+export type ListLlmModelSettingsQuery = { kind?: string };
 export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>;
 export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
-export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
+export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null; kind?: string | null };
 export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
+export type ListMcpServersResponse = Array<{ id: string; name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number }>;
+export type CreateMcpServerRequest = { name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number };
+export type CreateMcpServerResponse = { id: string; name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number };
+export type UpdateMcpServerRequest = { name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number };
+export type UpdateMcpServerResponse = { id: string; name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number };
+export type DeleteMcpServerResponse = { deleted: boolean };
+export type TestMcpServerRequest = { id?: string | null; name: string; description: string; url: string; transport?: string | null; headers: Array<{ name: string; value: string }>; allow_private_network: boolean; timeout_secs: number };
+export type TestMcpServerResponse = { ok: boolean; message: string; server?: { name: string; version: string; protocol_version: string; instructions?: string | null; tools_list_changed: boolean } | null; tools: Array<{ name: string; title?: string | null; description: string; input_schema: unknown; read_only: boolean }> };
+export type ListMcpServerToolsQuery = { refresh?: boolean };
+export type ListMcpServerToolsResponse = { ok: boolean; message: string; server?: { name: string; version: string; protocol_version: string; instructions?: string | null; tools_list_changed: boolean } | null; tools: Array<{ name: string; title?: string | null; description: string; input_schema: unknown; read_only: boolean }> };
+export type ListAgentMemoriesQuery = { agent?: string; user?: string; kind?: string; search?: string; limit?: number };
+export type ListAgentMemoriesResponse = Array<{ id: number; agent: string; user_id?: string | null; run_id?: string | null; written_at: string; kind: string; personal: boolean; topic: string; contents: string }>;
+export type DeleteAgentMemoryResponse = { deleted: boolean };
 export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; tables: Array<string>; services: Array<string>; webhooks: Array<{ name: string; path: string }>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
 export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
@@ -132,6 +146,7 @@ export type DeleteAgentResponse = { deleted: boolean };
 export type ListAgentTraitsResponse = Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type ListRunsResponse = Array<{ id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null }>;
 export type GetRunResponse = { id: string; kind: string; subject: string; description: string; state: string; error?: string | null; user?: string | null; created_at: string; updated_at: string; subject_version?: number | null; current_step?: string | null; wake_at?: string | null; conclusion?: unknown | null; parent_run?: string | null; context: unknown; attributes: unknown; trace: Array<{ id: string; seq: number; step: string; started_at: string; finished_at: string; attempt: number; outcome: string; error?: string | null; context: unknown }>; pending_form?: { fields: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; assign_to: string; min_role?: number | null } | null; plan?: { features: Array<{ id: string; title: string; description: string; kind: string; acceptance: Array<string>; files: Array<string>; pages: Array<string>; status: string; attempts: number; runs: Array<string> }>; progress: Array<{ feature: string; run: string; status: string; summary: string; check: string; diffstat: string }> } | null };
+export type GetRunPartResponse = { id: string; kind: string; mime_type: string; summary: string; data: unknown; content_base64?: string | null };
 export type GetRunDiffResponse = { run: string; runs: Array<string>; scopes: Array<{ store: string; root: string; files: Array<{ path: string; status: string; added?: number | null; removed?: number | null }>; moves: Array<{ from: string; to: string }>; stat: string; unified: string }> };
 export type DeleteRunResponse = { deleted: boolean };
 export type BrowseFilesRequest = { dir: string };
@@ -503,9 +518,17 @@ export interface ApiClient {
   createLlmModel(id: string, body: CreateLlmModelRequest): Promise<CreateLlmModelResponse>;
   updateLlmModel(id: string, body: UpdateLlmModelRequest): Promise<UpdateLlmModelResponse>;
   deleteLlmModel(id: string): Promise<DeleteLlmModelResponse>;
-  listLlmModelSettings(backend: string): Promise<ListLlmModelSettingsResponse>;
+  listLlmModelSettings(backend: string, query?: ListLlmModelSettingsQuery): Promise<ListLlmModelSettingsResponse>;
   fetchLlmModels(id: string): Promise<FetchLlmModelsResponse>;
   testLlmModel(body: TestLlmModelRequest): Promise<TestLlmModelResponse>;
+  listMcpServers(): Promise<ListMcpServersResponse>;
+  createMcpServer(body: CreateMcpServerRequest): Promise<CreateMcpServerResponse>;
+  updateMcpServer(id: string, body: UpdateMcpServerRequest): Promise<UpdateMcpServerResponse>;
+  deleteMcpServer(id: string): Promise<DeleteMcpServerResponse>;
+  testMcpServer(body: TestMcpServerRequest): Promise<TestMcpServerResponse>;
+  listMcpServerTools(id: string, query?: ListMcpServerToolsQuery): Promise<ListMcpServerToolsResponse>;
+  listAgentMemories(query?: ListAgentMemoriesQuery): Promise<ListAgentMemoriesResponse>;
+  deleteAgentMemory(id: number): Promise<DeleteAgentMemoryResponse>;
   listModules(): Promise<ListModulesResponse>;
   installModule(body: InstallModuleRequest): Promise<InstallModuleResponse>;
   updateModule(id: string, body: UpdateModuleRequest): Promise<UpdateModuleResponse>;
@@ -522,6 +545,7 @@ export interface ApiClient {
   listAgentTraits(): Promise<ListAgentTraitsResponse>;
   listRuns(agent: string): Promise<ListRunsResponse>;
   getRun(id: string): Promise<GetRunResponse>;
+  getRunPart(id: string, part: string): Promise<GetRunPartResponse>;
   getRunDiff(id: string): Promise<GetRunDiffResponse>;
   deleteRun(id: string): Promise<DeleteRunResponse>;
   browseFiles(store: string, body: BrowseFilesRequest): Promise<BrowseFilesResponse>;
@@ -989,6 +1013,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (query?.order !== undefined && query?.order !== null) search.append("order", String(query?.order));
       if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
       if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
+      if (query?.search !== undefined && query?.search !== null) search.append("search", String(query?.search));
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
       const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows${qs ? `?${qs}` : ""}`, {
@@ -1000,6 +1025,7 @@ export function createClient(options: ClientOptions = {}): ApiClient {
     },
     async countRows(table, query) {
       const search = new URLSearchParams();
+      if (query?.search !== undefined && query?.search !== null) search.append("search", String(query?.search));
       for (const [key, value] of Object.entries(query?.filter ?? {})) search.append(key, String(value));
       const qs = search.toString();
       const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/count${qs ? `?${qs}` : ""}`, {
@@ -1328,8 +1354,11 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("deleteLlmModel", res);
       return (await res.json()) as DeleteLlmModelResponse;
     },
-    async listLlmModelSettings(backend) {
-      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${encodeURIComponent(backend)}/model-settings`, {
+    async listLlmModelSettings(backend, query) {
+      const search = new URLSearchParams();
+      if (query?.kind !== undefined && query?.kind !== null) search.append("kind", String(query?.kind));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/llm-provider-backends/${encodeURIComponent(backend)}/model-settings${qs ? `?${qs}` : ""}`, {
         method: "GET",
         headers: requestHeaders("GET", false),
       });
@@ -1352,6 +1381,83 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("testLlmModel", res);
       return (await res.json()) as TestLlmModelResponse;
+    },
+    async listMcpServers() {
+      const res = await doFetch(`${baseUrl}/api/mcp-servers`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listMcpServers", res);
+      return (await res.json()) as ListMcpServersResponse;
+    },
+    async createMcpServer(body) {
+      const res = await doFetch(`${baseUrl}/api/mcp-servers`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("createMcpServer", res);
+      return (await res.json()) as CreateMcpServerResponse;
+    },
+    async updateMcpServer(id, body) {
+      const res = await doFetch(`${baseUrl}/api/mcp-servers/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: requestHeaders("PUT", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("updateMcpServer", res);
+      return (await res.json()) as UpdateMcpServerResponse;
+    },
+    async deleteMcpServer(id) {
+      const res = await doFetch(`${baseUrl}/api/mcp-servers/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteMcpServer", res);
+      return (await res.json()) as DeleteMcpServerResponse;
+    },
+    async testMcpServer(body) {
+      const res = await doFetch(`${baseUrl}/api/mcp-server-test`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("testMcpServer", res);
+      return (await res.json()) as TestMcpServerResponse;
+    },
+    async listMcpServerTools(id, query) {
+      const search = new URLSearchParams();
+      if (query?.refresh !== undefined && query?.refresh !== null) search.append("refresh", String(query?.refresh));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/mcp-servers/${encodeURIComponent(id)}/tools${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listMcpServerTools", res);
+      return (await res.json()) as ListMcpServerToolsResponse;
+    },
+    async listAgentMemories(query) {
+      const search = new URLSearchParams();
+      if (query?.agent !== undefined && query?.agent !== null) search.append("agent", String(query?.agent));
+      if (query?.user !== undefined && query?.user !== null) search.append("user", String(query?.user));
+      if (query?.kind !== undefined && query?.kind !== null) search.append("kind", String(query?.kind));
+      if (query?.search !== undefined && query?.search !== null) search.append("search", String(query?.search));
+      if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/agent-memories${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listAgentMemories", res);
+      return (await res.json()) as ListAgentMemoriesResponse;
+    },
+    async deleteAgentMemory(id) {
+      const res = await doFetch(`${baseUrl}/api/agent-memories/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: requestHeaders("DELETE", false),
+      });
+      if (!res.ok) throw await clientError("deleteAgentMemory", res);
+      return (await res.json()) as DeleteAgentMemoryResponse;
     },
     async listModules() {
       const res = await doFetch(`${baseUrl}/api/modules`, {
@@ -1486,6 +1592,14 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("getRun", res);
       return (await res.json()) as GetRunResponse;
+    },
+    async getRunPart(id, part) {
+      const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/parts/${encodeURIComponent(part)}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getRunPart", res);
+      return (await res.json()) as GetRunPartResponse;
     },
     async getRunDiff(id) {
       const res = await doFetch(`${baseUrl}/api/runs/${encodeURIComponent(id)}/diff`, {
