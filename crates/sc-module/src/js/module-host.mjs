@@ -51,7 +51,10 @@
 //
 // The `callId` is the one the request arrived with, because that is what says
 // **whose** authority the ask runs under: the caller of that call is where the
-// host is borrowed, and the worker routes the ask to it. An ask is answered on
+// host is borrowed, and the worker routes the ask to it. It is an unguessable
+// string (a random UUID) rather than a counter, because every module on this
+// worker can call `__scAsk` and `__scDbCall`: a call's authority is borrowed
+// only by code that was handed its id. An ask is answered on
 // the server's own task, so a module parked on a query is not holding this
 // worker's JavaScript slice — awaiting a promise yields, which is the whole of
 // why the bounds are unchanged.
@@ -164,6 +167,10 @@ console.error = speak("error");
 const asks = new Map();
 let nextAsk = 1;
 
+/** The module each call in flight is of, by the call's token: what `askFor`
+ * binds an ask to. */
+const callOwners = new Map();
+
 /** One ask, answered. `ok` says which of the two the third argument is: the
  * answer's JSON text, or the message it failed with.
  *
@@ -226,6 +233,14 @@ function ask(surface, plan) {
  * callback a library fires from somewhere no async context reaches (a socket's
  * `data` event, a timer a dependency set) still asks as the service. */
 function askFor(callId, surface, plan) {
+  // A call's token is its authority, so a module running inside one call may
+  // not ask on behalf of another module's (security review #30): one that
+  // learned a token anyway still cannot use it from its own code.
+  const store = running.getStore();
+  const owner = callOwners.get(callId);
+  if (store && store.call !== callId && owner !== undefined && owner !== store.module) {
+    return Promise.reject(new Error("a module may only ask on behalf of its own calls"));
+  }
   return new Promise((resolve, reject) => {
     let text;
     try {
@@ -249,7 +264,12 @@ function askFor(callId, surface, plan) {
 /** What the shared `db` builder (`sc_expr::DB_PRELUDE`) sends through: here the
  * token is the call a plan belongs to — a service's own — and the plan is an
  * ask on the `db` surface of that call. */
-globalThis.__scDbCall = (token, plan) => askFor(token, "db", plan);
+Object.defineProperty(globalThis, "__scDbCall", {
+  value: (token, plan) => askFor(token, "db", plan),
+  writable: false,
+  configurable: false,
+  enumerable: false,
+});
 
 // ---------------------------------------------------------------------------
 // The schema snapshot
@@ -764,8 +784,18 @@ const supportedKeys = new Set([
   "frameworks",
   // The tables a module declares (TODO-imap M4): data, created by the server.
   "tables",
+  // The core tables a module needs (`role_grants`, `llm_credits`), which a new
+  // installation does not have until a module names them.
+  "core_tables",
   // The services a module runs in the background (TODO-imap M5).
   "services",
+  // The webhooks a module receives (TODO-payments P1.1).
+  "webhooks",
+  // The application tables a module reads because its settings name them
+  // (TODO-payments P4.1).
+  "reads",
+  // The content-security sources a module suggests (TODO-payments P1.4).
+  "csp",
   // Saltcorn UI (TODO "Saltcorn UI" §6): view patterns, and the scripts and
   // stylesheets a document rendering them wants.
   "viewtemplates",
@@ -1196,6 +1226,11 @@ async function evalServices(plugin, configuration) {
  * which is how the server learns to restart it. */
 const services = new Map();
 const serviceKey = (module, service) => `${module}\u0000${service}`;
+/** `service_start` calls still waiting for their module's load, by key. A
+ * start waits a microtask on `loading` even when the load is long done, so a
+ * `service_stop` sent right behind it would otherwise run first, find nothing
+ * to stop, and leave the service to start with nobody left to stop it. */
+const startingServices = new Map();
 
 /** Stop one service: abort its signal, call the `stop` its `start` answered,
  * forget its subscriptions, and answer its call — with `error` when it is being
@@ -1258,6 +1293,11 @@ function serviceContext(record, configuration) {
     /** The module's own file areas (TODO-imap M6): `write`, `read`, `remove`,
      * `stat`, in the stores and folders its declared file fields name. */
     files: moduleFiles((plan) => askFor(callId, "module_files", plan)),
+    /** Role grants (TODO-payments P3.3): `grant`, `revoke`, `get`, up to the
+     * role ceiling an admin allowed this module. */
+    roles: moduleRoles((plan) => askFor(callId, "roles", plan)),
+    /** LLM credits (TODO-payments P6.4): `grant`, `revoke`, `balance`, `setThreshold`. */
+    credits: moduleCredits((plan) => askFor(callId, "credits", plan)),
     /** Run another trigger, as `trigger.run(name, payload)` does in a body. */
     runTrigger: (trigger, payload) =>
       askFor(callId, "trigger", {
@@ -1345,7 +1385,12 @@ async function startService({ module: name, service: serviceName }) {
 
 /** `service_stop`. */
 async function stopServiceOp({ module: name, service: serviceName }) {
-  const record = services.get(serviceKey(name, serviceName));
+  const key = serviceKey(name, serviceName);
+  // A start that crossed this stop registers its service first: it was
+  // waiting on the same promise, and its continuation was queued earlier.
+  const starting = startingServices.get(key);
+  if (starting) await starting;
+  const record = services.get(key);
   if (!record) return { stopped: false };
   await stopService(record, null);
   return { stopped: true };
@@ -1373,6 +1418,216 @@ function serviceEvent({ module: name, service: serviceName, event }) {
     });
   }
   return { delivered };
+}
+
+/** This system's `webhooks` key (TODO-payments P1.1): requests from another
+ * service — a payment provider's events — that the server routes to the module
+ * at `POST /_feldspar/hooks/<module>/<name>[/<rest>]`.
+ *
+ * ```js
+ * webhooks: {
+ *   events: {
+ *     description: "Payment events from the provider",
+ *     handle: async (req, ctx) => ({ status: 200, body: { ok: true } }),
+ *   },
+ * }
+ * ```
+ *
+ * An object, or a function of the module's configuration returning one. A bare
+ * function is its own `handle`. The manifest carries the names and the
+ * descriptions; the functions stay here, and each request is one
+ * `webhook_call`. */
+async function evalWebhooks(plugin, configuration) {
+  const exported = plugin.webhooks;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its webhooks could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+  const webhooks = [];
+  const set = {};
+  if (Array.isArray(raw)) {
+    issues.push("its `webhooks` is a list; it should be an object of webhooks by name");
+    return { webhooks, set, issues };
+  }
+  for (const [name, value] of Object.entries(raw)) {
+    const impl = typeof value === "function" ? { handle: value } : value;
+    if (!impl || typeof impl.handle !== "function") {
+      issues.push(`the webhook "${name}" has no handle function`);
+      continue;
+    }
+    // The name is a path segment of the URL a provider is given, so it is
+    // spelled the way a path segment can be without escaping.
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      issues.push(
+        `the webhook "${name}" cannot be served: a webhook's name is part of its URL, ` +
+          "so it is letters, digits, `-` and `_`",
+      );
+      continue;
+    }
+    // `POST` unless it says otherwise: a provider posts. A webhook that also
+    // answers a browser — a test provider's checkout page — names `GET` too.
+    const methods = Array.isArray(impl.methods)
+      ? impl.methods.map((m) => String(m).toUpperCase())
+      : ["POST"];
+    const unknown = methods.filter((m) => m !== "GET" && m !== "POST");
+    if (unknown.length || !methods.length) {
+      issues.push(`the webhook "${name}" answers GET and POST only, not ${unknown.join(", ") || "nothing"}`);
+      continue;
+    }
+    set[name] = impl;
+    webhooks.push({
+      name,
+      description: typeof impl.description === "string" ? impl.description : "",
+      methods: [...new Set(methods)],
+    });
+  }
+  return { webhooks, set, issues };
+}
+
+/** This system's `csp` key (TODO-payments P1.4): content-security sources the
+ * module suggests an application allow — a provider's embedded form, say.
+ * Data: an object of `{ description, sources }` by name, or a function of the
+ * module's configuration returning one. The server checks each and offers the
+ * valid ones on an application's page; nothing is allowed until an admin
+ * switches one on there. */
+async function evalCsp(plugin, configuration) {
+  const exported = plugin.csp;
+  let raw = {};
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || {};
+    } catch (e) {
+      issues.push(`its content-security suggestions could not be built: ${e.message}`);
+      raw = {};
+    }
+  } else if (exported && typeof exported === "object") {
+    raw = exported;
+  }
+  const csp = [];
+  if (Array.isArray(raw)) {
+    issues.push("its `csp` is a list; it should be an object of suggestions by name");
+    return { csp, issues };
+  }
+  for (const [name, value] of Object.entries(raw)) {
+    try {
+      csp.push(
+        JSON.parse(
+          JSON.stringify({
+            name,
+            description: (value && value.description) || "",
+            sources: (value && value.sources) || null,
+          }),
+        ),
+      );
+    } catch (e) {
+      issues.push(`the content-security suggestion "${name}" is not plain data: ${e.message}`);
+    }
+  }
+  return { csp, issues };
+}
+
+/** `webhook_call`: one request to one of a module's webhooks.
+ *
+ * `req` is what arrived — `rawBody` as a `Buffer` of the bytes as sent (a
+ * signature is computed over them), `headers` lower-cased, `rest` (the path
+ * after the webhook's name), `method` and `query` — plus `text()` and `json()`
+ * over the body. `ctx` is a service's: `db` over the module's own tables,
+ * `files`, `roles`, `credits`, `runTrigger` and `log`, every ask on this call. The answer is
+ * `{ status, body, headers }`: a string or bytes body is sent as it is, and
+ * anything else as JSON. */
+async function runWebhook({ module: name, webhook: hookName, request }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const impl = entry.webhooks && entry.webhooks[hookName];
+  if (!impl) throw new Error(`the module ${name} has no webhook ${hookName}`);
+  const store = running.getStore();
+  const callId = store && store.call;
+  const incoming = request || {};
+  const rawBody = Buffer.from(incoming.body || "", "base64");
+  const req = {
+    method: incoming.method || "POST",
+    headers: incoming.headers || {},
+    query: incoming.query || {},
+    rest: incoming.rest || "",
+    rawBody,
+    text: () => rawBody.toString("utf8"),
+    json: () => JSON.parse(rawBody.toString("utf8")),
+  };
+  const line = (level) => (...args) => {
+    try {
+      log(level, name, format(...args));
+    } catch (_) {
+      // As `speak`: a log line must not become the webhook's failure.
+    }
+  };
+  const ctx = {
+    module: name,
+    webhook: hookName,
+    configuration: entry.configuration || {},
+    db: globalThis.__scMakeDb(callId),
+    files: moduleFiles((plan) => askFor(callId, "module_files", plan)),
+    roles: moduleRoles((plan) => askFor(callId, "roles", plan)),
+    credits: moduleCredits((plan) => askFor(callId, "credits", plan)),
+    runTrigger: (trigger, payload) =>
+      askFor(callId, "trigger", {
+        trigger,
+        payload: payload === undefined ? {} : payload,
+      }),
+    log: Object.assign(line("info"), {
+      info: line("info"),
+      warn: line("warning"),
+      error: line("error"),
+      debug: line("verbose"),
+    }),
+  };
+  const answer = (await impl.handle(req, ctx)) || {};
+  return webhookAnswer(answer, name, hookName);
+}
+
+/** What a webhook's handler answered, as the server sends it: a status, the
+ * headers as strings, and the body base64-encoded with the content type it
+ * implies when the handler named none. */
+function webhookAnswer(answer, module, hook) {
+  if (typeof answer !== "object" || Array.isArray(answer)) {
+    throw new Error(
+      `the webhook ${hook} of ${module} answered ${typeof answer}; it answers ` +
+        "{ status, body, headers }",
+    );
+  }
+  const status = answer.status === undefined ? 200 : Number(answer.status);
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error(`the webhook ${hook} of ${module} answered status ${answer.status}`);
+  }
+  const headers = {};
+  for (const [key, value] of Object.entries(answer.headers || {})) {
+    if (value !== undefined && value !== null) headers[key.toLowerCase()] = String(value);
+  }
+  let bytes;
+  let contentType = null;
+  const body = answer.body;
+  if (body === undefined || body === null) {
+    bytes = Buffer.alloc(0);
+  } else if (typeof body === "string") {
+    bytes = Buffer.from(body, "utf8");
+    contentType = "text/plain; charset=utf-8";
+  } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+    bytes = Buffer.from(body);
+    contentType = "application/octet-stream";
+  } else {
+    bytes = Buffer.from(JSON.stringify(body), "utf8");
+    contentType = "application/json";
+  }
+  if (contentType && !headers["content-type"]) headers["content-type"] = contentType;
+  return { status, headers, body: bytes.toString("base64") };
 }
 
 /** This system's `tables` key (TODO-imap M4): the tables a module keeps its
@@ -1420,6 +1675,61 @@ async function evalTables(plugin, configuration) {
     }
   }
   return { tables, issues };
+}
+
+/** This system's `reads` key (TODO-payments P4.1): the application tables a
+ * module's services and webhooks read beside its own — a plans table its
+ * settings name, say.
+ *
+ * ```js
+ * reads: (configuration) => (configuration.plans_table ? [configuration.plans_table] : []),
+ * ```
+ *
+ * A list of names, or a function of the module's configuration returning one.
+ * The server admits a name only when the module's stored configuration holds
+ * it (`sc_module::reads`), so what is answered here is a request. */
+async function evalReads(plugin, configuration) {
+  const exported = plugin.reads;
+  const issues = [];
+  let raw = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || [];
+    } catch (e) {
+      issues.push(`the tables it reads could not be worked out: ${e.message}`);
+      raw = [];
+    }
+  } else if (exported) {
+    raw = exported;
+  }
+  if (!Array.isArray(raw)) {
+    issues.push("its `reads` is not a list of table names");
+    return { reads: [], issues };
+  }
+  const reads = [];
+  for (const value of raw) {
+    if (typeof value === "string" && value.trim()) reads.push(value.trim());
+    else issues.push(`its \`reads\` names ${JSON.stringify(value)}, which is not a table name`);
+  }
+  return { reads, issues };
+}
+
+/** This system's `core_tables` key: the core tables a module needs, by name
+ * (`["role_grants", "llm_credits"]`). Which names mean something is the
+ * server's to say; here only the shape is checked. */
+function evalCoreTables(plugin) {
+  const raw = plugin.core_tables;
+  if (raw === undefined || raw === null) return { coreTables: [], issues: [] };
+  if (!Array.isArray(raw)) {
+    return { coreTables: [], issues: ["its `core_tables` is not a list of names"] };
+  }
+  const coreTables = [];
+  const issues = [];
+  for (const value of raw) {
+    if (typeof value === "string" && value.trim()) coreTables.push(value.trim());
+    else issues.push(`its \`core_tables\` names ${JSON.stringify(value)}, which is not a name`);
+  }
+  return { coreTables, issues };
 }
 
 /** The loaded stream provider, or a sentence naming what is missing. */
@@ -2171,6 +2481,22 @@ async function loadModule({ module: name, dir, configuration }) {
   issues.push(...serviceIssues);
 
   const {
+    webhooks: webhookList,
+    set: webhookSet,
+    issues: webhookIssues,
+  } = await evalWebhooks(plugin, configuration);
+  issues.push(...webhookIssues);
+
+  const { csp, issues: cspIssues } = await evalCsp(plugin, configuration);
+  issues.push(...cspIssues);
+
+  const { reads, issues: readIssues } = await evalReads(plugin, configuration);
+  issues.push(...readIssues);
+
+  const { coreTables, issues: coreTableIssues } = evalCoreTables(plugin);
+  issues.push(...coreTableIssues);
+
+  const {
     frameworks,
     set: frameworkSet,
     issues: frameworkIssues,
@@ -2202,6 +2528,7 @@ async function loadModule({ module: name, dir, configuration }) {
     frameworks: frameworkSet,
     viewtemplates: viewPatternSet,
     services: serviceSet,
+    webhooks: webhookSet,
     configuration: configuration || {},
   });
   // The registry may hold this module's previous patterns: rebuild it on the
@@ -2219,7 +2546,11 @@ async function loadModule({ module: name, dir, configuration }) {
     stream_providers: streamProviders,
     map_tools: mapTools,
     tables,
+    core_tables: coreTables,
     services: serviceList,
+    webhooks: webhookList,
+    reads,
+    csp,
     frameworks,
     view_patterns: viewPatterns,
     headers,
@@ -2383,6 +2714,89 @@ function moduleFiles(send) {
   };
 }
 
+/** `ctx.roles` of a service or a webhook and `roles` of an action
+ * (TODO-payments P3.3, design C4): role grants this module makes, one row of
+ * `role_grants` per `ref` — the module's own name for the thing that grants
+ * (a subscription), which a renewal names again to extend it and a
+ * cancellation names to revoke it. The server refuses a role above the
+ * ceiling an admin allowed the module, and the admin role always.
+ *
+ *   await roles.grant({ user: userId, role: 70, ref: "stripe:sub_1",
+ *                       expires_at: periodEnd, note: "Pro plan" });
+ *   await roles.revoke("stripe:sub_1");
+ *   const grant = await roles.get("stripe:sub_1");   // or null
+ */
+function moduleRoles(send) {
+  const when = (value) => (value instanceof Date ? value.toISOString() : value);
+  return {
+    /** Grant `role` to `user` (an id or a row) until `expires_at` (a `Date`,
+     * an ISO string or milliseconds; none is until revoked), or extend the
+     * grant `ref` already names. Answers the grant. */
+    grant({ user, role, ref, starts_at, expires_at, note } = {}) {
+      return send({
+        op: "grant",
+        user: user && typeof user === "object" ? user.id : user,
+        role,
+        ref,
+        starts_at: when(starts_at),
+        expires_at: when(expires_at),
+        note,
+      });
+    },
+    /** Revoke the grant `ref` names; answers `{ revoked }`. */
+    revoke(ref) {
+      return send({ op: "revoke", ref });
+    },
+    /** The grant `ref` names, or `null`. */
+    get(ref) {
+      return send({ op: "get", ref });
+    },
+  };
+}
+
+/** `ctx.credits` of a service or a webhook and `credits` of an action
+ * (TODO-payments P6.4, design C4): LLM credits this module grants a user, one
+ * bucket per `key` — the module's own name for the thing that pays for them
+ * (an invoice), so granting the same key again does nothing. There is no
+ * debit: only an agent run's model calls spend credits.
+ *
+ *   await credits.grant({ user: userId, amount: 100, key: "invoice:in_1",
+ *                         expires_at: periodEnd, kind: "allowance",
+ *                         rollover: { from: "invoice:in_0", cap: 50 } });
+ *   const { balance, debt } = await credits.balance(userId);
+ *   await credits.setThreshold(userId, 10);   // null: no low-balance notices
+ */
+function moduleCredits(send) {
+  const when = (value) => (value instanceof Date ? value.toISOString() : value);
+  const who = (user) => (user && typeof user === "object" ? user.id : user);
+  return {
+    /** Grant `amount` credits to `user` (an id or a row) until `expires_at`
+     * (a `Date`, an ISO string or milliseconds; none is never). Debt is repaid
+     * first. `rollover: { from, cap }` takes over what is left of the earlier
+     * grant keyed `from`, up to `cap` (all of it without one), and empties
+     * it. Answers `{ bucket, amount, remaining, repaid, balance, replayed,
+     * carried }`. */
+    grant({ user, amount, key, expires_at, kind, note, rollover } = {}) {
+      return send({ op: "grant", user: who(user), amount, key, expires_at: when(expires_at), kind, note, rollover: rollover ?? null });
+    },
+    /** Take back what is left of this module's grant keyed `key` — a top-up
+     * whose payment was refunded or charged back. What was spent stays spent.
+     * Answers `{ found, revoked, balance, replayed }`. */
+    revoke({ key, note } = {}) {
+      return send({ op: "revoke", key, note: note ?? null });
+    },
+    /** `{ balance, available, debt, next_expiry, low_balance_threshold }`. */
+    balance(user) {
+      return send({ op: "balance", user: who(user) });
+    },
+    /** Set the balance below which an agent run's debit writes a
+     * `low_balance` entry, or clear it with `null`. Answers the balance. */
+    setThreshold(user, threshold) {
+      return send({ op: "threshold", user: who(user), threshold: threshold ?? null });
+    },
+  };
+}
+
 /** `callerFiles` of an action (TODO-imap M9.3): the application's file stores,
  * **read** as the action's caller — the code body's `fs(…).asUser()`, over the
  * call's own `files` surface. A module that sends a user's file somewhere (the
@@ -2415,6 +2829,18 @@ async function runAction({ module: name, action: actionName, args }) {
     const callId = store.call;
     argument.files = moduleFiles((plan) => askFor(callId, "module_files", plan));
     argument.callerFiles = callerFiles((plan) => askFor(callId, "files", plan));
+    argument.roles = moduleRoles((plan) => askFor(callId, "roles", plan));
+    argument.credits = moduleCredits((plan) => askFor(callId, "credits", plan));
+    // The tables, as a code body's `db` and a service's `ctx.db` are spelled
+    // (TODO-payments P2.1): the trigger's authority unless a chain says
+    // `asUser()`, over this call's own surfaces. v1's `Table` reaches the same
+    // rows; this is the chain a module shares with its services and webhooks.
+    argument.db = globalThis.__scMakeDb(callId);
+    /** Ask for the caller's consent at an OAuth 2.0 provider (TODO-imap
+     * M10.3, `sc_module::consent`): answers `{ url }`, where the application
+     * sends the browser; the granted tokens are written into the row
+     * `request.store` names. */
+    argument.oauth = { begin: (request) => askFor(callId, "oauth", request) };
   }
   const result = await impl.run(argument);
   return result === undefined ? null : result;
@@ -3390,13 +3816,18 @@ const V1Trigger = class Trigger {
   }
 
   /** Run it on `row`, through **the** dispatcher and under the viewer's
-   * authority — the one a `trigger("name").run()` in a code body goes through. */
+   * authority — the one a `trigger("name").run()` in a code body goes through,
+   * with the trigger's own `min_role` checked against the viewer. */
   async run(row) {
-    return ask("trigger", { trigger: this.name, payload: row === undefined || row === null ? {} : row });
+    return ask("trigger", {
+      trigger: this.name,
+      payload: row === undefined || row === null ? {} : row,
+      authority: "user",
+    });
   }
 
   async runWithoutRow(runargs = {}) {
-    return ask("trigger", { trigger: this.name, payload: (runargs && runargs.row) || {} });
+    return ask("trigger", { trigger: this.name, payload: (runargs && runargs.row) || {}, authority: "user" });
   }
 };
 installV1Refusals(V1Trigger, "Trigger.");
@@ -3913,7 +4344,7 @@ function triggerActionRunners(set) {
               `configured with it`,
           );
         }
-        return ask("trigger", { trigger: String(args.trigger_id), payload: args.row || {} });
+        return ask("trigger", { trigger: String(args.trigger_id), payload: args.row || {}, authority: "user" });
       },
     });
   }
@@ -4448,14 +4879,25 @@ async function handle(request) {
       return await callTargetOperation(request);
     }
     case "service_start": {
-      const pending = loading.get(request.module);
-      if (pending) await pending;
+      const key = serviceKey(request.module, request.service);
+      const pending = loading.get(request.module) || Promise.resolve();
+      startingServices.set(key, pending);
+      try {
+        await pending;
+      } finally {
+        if (startingServices.get(key) === pending) startingServices.delete(key);
+      }
       return await startService(request);
     }
     case "service_stop":
       return await stopServiceOp(request);
     case "service_event":
       return serviceEvent(request);
+    case "webhook_call": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await runWebhook(request);
+    }
     // Saltcorn UI's view runtime (TODO "Saltcorn UI" §3). No module to wait
     // on: the runtime is not a module in `loaded`, and imports itself.
     case "view_patterns":
@@ -4502,6 +4944,7 @@ async function handle(request) {
  * `null` an action that returns nothing has always answered; the second is a
  * failure that names the value rather than a reply nobody can read. */
 function answer(id, value) {
+  callOwners.delete(id);
   let text;
   try {
     text = JSON.stringify(value === undefined ? null : value);
@@ -4551,6 +4994,7 @@ globalThis.__scModuleHost = (id, request) => {
       context.messages = viewRequestOf.messages;
     }
   }
+  callOwners.set(id, context.module);
   running.run(context, () => {
     let pending;
     try {
@@ -4577,12 +5021,16 @@ globalThis.__scModuleHost = (id, request) => {
       }
       pending = handle(request);
     } catch (e) {
+      callOwners.delete(id);
       fail(id, (e && e.message) || String(e), (e && e.stack) || null);
       return;
     }
     pending.then(
       (value) => answer(id, value),
-      (e) => fail(id, (e && e.message) || String(e), (e && e.stack) || null),
+      (e) => {
+        callOwners.delete(id);
+        fail(id, (e && e.message) || String(e), (e && e.stack) || null);
+      },
     );
   });
 };
@@ -4593,3 +5041,23 @@ globalThis.__scModuleHost = (id, request) => {
 process.on("unhandledRejection", (e) => {
   console.error(`unhandled rejection from a module: ${(e && e.stack) || e}`);
 });
+
+// The host's bridge is sealed before any module loads (security review #30).
+// Every module on this worker shares this global, and the bridge carries every
+// call's token: a module that could wrap `__scDbCall` — or the
+// `AsyncLocalStorage` each call's context lives in — would see the tokens of
+// other calls in flight, an admin's among them, and could act as their
+// callers. So every `__sc*` global is made read-only and permanent, and the
+// storage class frozen, while this script is the only code that has run.
+for (const name of Object.getOwnPropertyNames(globalThis)) {
+  if (!name.startsWith("__sc")) continue;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+  if (!descriptor.configurable) continue;
+  Object.defineProperty(
+    globalThis,
+    name,
+    "value" in descriptor ? { writable: false, configurable: false } : { configurable: false },
+  );
+}
+Object.freeze(AsyncLocalStorage.prototype);
+Object.freeze(AsyncLocalStorage);

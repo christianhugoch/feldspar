@@ -28,8 +28,10 @@ use sc_action::{
 };
 use sc_api::auth::{credentials, user_row_json, user_summary_json};
 use sc_api::csv as csv_rows;
+use sc_api::history::HistoryReader;
 use sc_api::rows::{self, require_object};
 use sc_api::schema_edit;
+use sc_api::undo::Reverser;
 use sc_api::{ApiRequest, GRAPHQL_PROVIDER, Method as ApiMethod};
 use sc_app::{
     ApiConfig, AppId, Application, CspPolicy, FrameworkRef, StaticDir, StreamRef, TriggerRef,
@@ -601,6 +603,9 @@ pub fn admin_handlers_with(
                             "ownership_formula": meta.ownership_formula().unwrap_or(""),
                             "rls_enabled": meta.rls_enabled(),
                             "sync_enabled": sc_catalog::sync_enabled(&meta.attributes),
+                            "history_enabled": sc_catalog::history_enabled(&meta.attributes),
+                            "history_min_role": sc_catalog::history::history_min_role(&meta.attributes),
+                            "history_keep_days": sc_catalog::retention::history_keep_days(&meta.attributes),
                         })
                     })
                     .collect();
@@ -754,7 +759,15 @@ pub fn admin_handlers_with(
                 let description = optional_str(obj, "description").trim().to_owned();
                 // Whole-object, like `updateTable`: the admin UI edits a field it
                 // has loaded, so an omitted value means cleared.
+                // Omitted, like the key below, leaves the name as it is.
+                let rename = obj
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned);
                 let settings = schema_edit::FieldSettings {
+                    name: rename.clone(),
                     label: Some(optional_str(obj, "label")),
                     description: Some(description.clone()),
                     type_name: Some(optional_str(obj, "type")),
@@ -787,6 +800,7 @@ pub fn admin_handlers_with(
                     &schema_edit::ApplyOptions::default(),
                 )
                 .await?;
+                let field_name = rename.unwrap_or(field_name);
                 let table = catalog.require(&table_name)?;
                 let updated = table.field(&field_name).ok_or_else(|| {
                     Error::msg(format!("field `{field_name}` missing after update"))
@@ -1058,6 +1072,164 @@ pub fn admin_handlers_with(
                     sc_api::metadata_tables::after_row_write(&catalog, &table).await?;
                 }
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
+            }
+        }
+    });
+
+    // --- row history (§14.12 "Reading") -------------------------------------
+    //
+    // Admin-only routes, read through `sc_api::history` all the same, so the
+    // table must keep history and secrets are the sentinel here as everywhere.
+
+    reg.register("getRowHistory", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reader = HistoryReader::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let out = reader
+                    .row_history(ctx.path_param("table")?, ctx.path_param("id")?)
+                    .await?;
+                Ok(HandlerResponse::ok(out))
+            }
+        }
+    });
+
+    reg.register("listDeletedRows", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reader = HistoryReader::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let limit = optional_query_u64(&ctx, "limit")?;
+                let offset = optional_query_u64(&ctx, "offset")?.unwrap_or(0);
+                let out = reader
+                    .deleted_rows(ctx.path_param("table")?, limit, offset)
+                    .await?;
+                Ok(HandlerResponse::ok(out))
+            }
+        }
+    });
+
+    reg.register("getRowAsOf", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reader = HistoryReader::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let as_of = ctx.query_get("as_of").ok_or_else(|| {
+                    Error::invalid("`as_of` is required: a time or an entry's number")
+                })?;
+                let out = reader
+                    .row_as_of(ctx.path_param("table")?, ctx.path_param("id")?, as_of)
+                    .await?;
+                Ok(HandlerResponse::ok(out))
+            }
+        }
+    });
+
+    reg.register("listChangesets", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let reader = HistoryReader::new(&catalog, ctx.user.as_ref(), None);
+                let filter = sc_api::history::changeset_filter(&ctx.query)?;
+                Ok(HandlerResponse::ok(reader.list_changesets(filter).await?))
+            }
+        }
+    });
+
+    reg.register("getChangeset", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let reader = HistoryReader::new(&catalog, ctx.user.as_ref(), None);
+                Ok(HandlerResponse::ok(
+                    reader.changeset(ctx.path_param("id")?).await?,
+                ))
+            }
+        }
+    });
+
+    // --- restore and undo (§14.12 "Restore and undo") ----------------------
+    //
+    // Writes as the caller through `sc_api::undo`, each in one transaction and
+    // a changeset of its own.
+
+    reg.register("restoreRow", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reverser = Reverser::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let restored = reverser
+                    .restore_row(ctx.path_param("table")?, ctx.path_param("id")?)
+                    .await?;
+                Ok(HandlerResponse::ok(restored.to_json()))
+            }
+        }
+    });
+
+    reg.register("revertRow", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reverser = Reverser::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let version = int_field(require_object(&ctx.body)?, "version")?;
+                let restored = reverser
+                    .revert_row(ctx.path_param("table")?, ctx.path_param("id")?, version)
+                    .await?;
+                Ok(HandlerResponse::ok(restored.to_json()))
+            }
+        }
+    });
+
+    reg.register("undoChangeset", {
+        let catalog = catalog.clone();
+        let apps = apps.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            let apps = apps.clone();
+            async move {
+                let evaluator = apps.evaluator();
+                let reverser = Reverser::new(&catalog, ctx.user.as_ref(), evaluator.as_ref());
+                let id = ctx.path_param("id")?;
+                let id: uuid::Uuid = id
+                    .parse()
+                    .map_err(|_| Error::not_found(format!("there is no changeset `{id}`")))?;
+                // Both fields are optional, so an empty body is an undo of all.
+                let empty = Map::new();
+                let obj = match &ctx.body {
+                    Json::Null => &empty,
+                    body => require_object(body)?,
+                };
+                let table = match obj.get("table") {
+                    None | Some(Json::Null) => None,
+                    Some(Json::String(t)) if t.is_empty() => None,
+                    Some(Json::String(t)) => Some(t.as_str()),
+                    Some(_) => return Err(Error::invalid("`table` must be a table's name")),
+                };
+                let force = optional_bool(obj, "force")?;
+                let outcome = reverser.undo_changeset(id, table, force).await?;
+                Ok(HandlerResponse::ok(outcome.to_json()))
             }
         }
     });
@@ -1986,7 +2158,11 @@ pub fn admin_handlers_with(
                     .get(&module.name)
                     .ok_or_else(|| Error::msg("the saved module is not in the loaded set"))?;
                 let statuses = services.service_statuses(&module.name);
-                Ok(HandlerResponse::ok(module_json(loaded, &statuses, &ctx.locale)))
+                Ok(HandlerResponse::ok(module_json(
+                    loaded,
+                    &statuses,
+                    &ctx.locale,
+                )))
             }
         }
     });
@@ -2110,12 +2286,17 @@ pub fn admin_handlers_with(
             async move {
                 let services = agents_of(&apps)?;
                 let id = parse_agent_id(ctx.path_param("id")?)?;
-                if sc_agent::load_agent(&catalog, id).await?.is_none() {
+                let Some(stored) = sc_agent::load_agent(&catalog, id).await? else {
                     return Err(Error::not_found(format!("no agent with id {id}")));
-                }
+                };
                 // The id is the path's, not the body's — the row's identity is
                 // not something a payload gets to reassign.
                 let agent = agent_from_body(id, &ctx.body)?;
+                // An application exposes it by name (§11.7), so a rename would
+                // leave that application exposing nothing.
+                if agent.name != stored.name {
+                    refuse_if_exposed(&catalog, &stored.name, "renamed").await?;
+                }
                 sc_agent::save_agent(&catalog, services.registry(), &agent).await?;
                 Ok(HandlerResponse::ok(agent_json(&agent, None)))
             }
@@ -2189,6 +2370,9 @@ pub fn admin_handlers_with(
             let catalog = catalog.clone();
             async move {
                 let id = parse_agent_id(ctx.path_param("id")?)?;
+                if let Some(stored) = sc_agent::load_agent(&catalog, id).await? {
+                    refuse_if_exposed(&catalog, &stored.name, "deleted").await?;
+                }
                 if !sc_agent::delete_agent(&catalog, id).await? {
                     return Err(Error::not_found(format!("no agent with id {id}")));
                 }
@@ -5141,6 +5325,9 @@ pub fn admin_handlers_with(
                 // stores made for it go too: the admin corrects the form and
                 // presses Create again, and a leftover store would make that
                 // second attempt create `todo1` beside an orphaned `todo`.
+                // An exposed agent must exist, and one exposed signed out must
+                // be public: refused here, in front of the admin (§11.7).
+                sc_app::check_exposed_agents(&catalog, &created).await?;
                 let new_stores = create_requested_file_stores(&catalog, &mut created).await?;
                 let app = match save_application(&catalog, &created).await {
                     Ok(app) => app,
@@ -5216,6 +5403,7 @@ pub fn admin_handlers_with(
                 check_app_subdomain(&apps, &updated.subdomain)?;
                 merge_framework_secrets(&stored, &mut updated);
                 framable_by_the_admin(&mut updated, &ctx.body, &apps);
+                sc_app::check_exposed_agents(&catalog, &updated).await?;
                 let app = save_application(&catalog, &updated).await?;
                 // A save is an API-definition change: a table added to the
                 // subset, an endpoint's role, a custom query. The generated
@@ -6144,7 +6332,11 @@ pub fn admin_handlers_with(
                 let app = load_application(&catalog, id)
                     .await?
                     .ok_or_else(|| Error::not_found(format!("no application with id {id}")))?;
-                build_now(&catalog, &apps, app, String::new()).await
+                // `?quick=true` is the IDE's build on save (TODO-astro W2.5).
+                let quick = ctx
+                    .query_get("quick")
+                    .is_some_and(|q| q == "true" || q == "1");
+                build_now(&catalog, &apps, app, String::new(), quick).await
             }
         }
     });
@@ -6183,7 +6375,7 @@ pub fn admin_handlers_with(
                 } else {
                     format!("There was no {marker} to delete; installing.\n")
                 };
-                build_now(&catalog, &apps, app, log).await
+                build_now(&catalog, &apps, app, log, false).await
             }
         }
     });
@@ -6684,6 +6876,171 @@ pub fn admin_handlers_with(
         }
     });
 
+    // Role grants (TODO-payments P3.2). The page shows the base role beside
+    // the effective one, every grant the user has had, and lets an admin add a
+    // time-limited one by hand or revoke one — a subscription's included, which
+    // the provider's next renewal would put back.
+    reg.register("listUserRoleGrants", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let user = sc_auth::load_base_user(&catalog, id)
+                    .await?
+                    .ok_or_else(|| Error::not_found(format!("no user with id {id}")))?;
+                let effective = sc_auth::effective_role(&catalog, id, user.role).await?;
+                let grants = sc_auth::list_role_grants(&catalog, id).await?;
+                Ok(HandlerResponse::ok(json!({
+                    "base_role": i64::from(user.role),
+                    "effective_role": i64::from(effective.role),
+                    "grants": grants.iter().map(sc_api::auth::role_grant_json).collect::<Vec<_>>(),
+                })))
+            }
+        }
+    });
+
+    reg.register("grantUserRole", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                if sc_auth::load_base_user(&catalog, id).await?.is_none() {
+                    return Err(Error::not_found(format!("no user with id {id}")));
+                }
+                let role = int_field(obj, "role")?;
+                let role = u8::try_from(role)
+                    .map_err(|_| Error::invalid(format!("role {role} is not in 1..=99")))?;
+                let expires_at = match obj.get("expires_in_days") {
+                    None | Some(Json::Null) => None,
+                    Some(_) => {
+                        let days = int_field(obj, "expires_in_days")?;
+                        if days < 1 {
+                            return Err(Error::invalid(
+                                "`expires_in_days` must be a positive number of days; \
+                                 leave it out for a grant that lasts until it is revoked",
+                            ));
+                        }
+                        Some(chrono::Utc::now() + chrono::Duration::days(days))
+                    }
+                };
+                let note = optional_str(obj, "note");
+                let grant = sc_auth::grant_role(
+                    &catalog,
+                    sc_auth::NewRoleGrant {
+                        user_id: id,
+                        role,
+                        source: sc_auth::GRANT_SOURCE_ADMIN.to_owned(),
+                        source_ref: uuid::Uuid::new_v4().to_string(),
+                        starts_at: None,
+                        expires_at,
+                        note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                    },
+                )
+                .await?;
+                Ok(HandlerResponse::ok(sc_api::auth::role_grant_json(&grant)))
+            }
+        }
+    });
+
+    reg.register("revokeUserRoleGrant", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let grant_id = parse_user_id(ctx.path_param("grant")?)?;
+                let not_found = || Error::not_found(format!("user {id} has no grant {grant_id}"));
+                let grant = sc_auth::load_role_grant(&catalog, grant_id)
+                    .await?
+                    .filter(|g| g.user_id == id)
+                    .ok_or_else(not_found)?;
+                if grant.revoked_at.is_none() {
+                    sc_auth::revoke_role_grant_by_id(&catalog, grant.id).await?;
+                }
+                let grant = sc_auth::load_role_grant(&catalog, grant_id)
+                    .await?
+                    .ok_or_else(not_found)?;
+                Ok(HandlerResponse::ok(sc_api::auth::role_grant_json(&grant)))
+            }
+        }
+    });
+
+    // LLM credits (TODO-payments P6.2). Every answer is the whole view — the
+    // balance, the buckets and the latest entries — so the page redraws from
+    // what the server now holds rather than guessing at what changed.
+    reg.register("getUserCredits", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
+    reg.register("grantUserCredits", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let amount = credit_amount(obj.get("amount"), "amount")?
+                    .ok_or_else(|| Error::invalid("`amount` is required: the credits to grant"))?;
+                let expires_at = match obj.get("expires_in_days") {
+                    None | Some(Json::Null) => None,
+                    Some(_) => {
+                        let days = int_field(obj, "expires_in_days")?;
+                        if days < 1 {
+                            return Err(Error::invalid(
+                                "`expires_in_days` must be a positive number of days; \
+                                 leave it out for credits that never expire",
+                            ));
+                        }
+                        Some(chrono::Utc::now() + chrono::Duration::days(days))
+                    }
+                };
+                let note = optional_str(obj, "note");
+                let caller = admin_caller(ctx.user.as_ref());
+                sc_auth::grant_credits(
+                    &catalog,
+                    sc_auth::NewCreditGrant {
+                        user_id: id,
+                        amount,
+                        source: sc_auth::CREDIT_SOURCE_ADMIN.to_owned(),
+                        key: uuid::Uuid::new_v4().to_string(),
+                        kind: sc_auth::CREDIT_SOURCE_ADMIN.to_owned(),
+                        expires_at,
+                        note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                        rollover: None,
+                    },
+                    Some(&caller),
+                )
+                .await?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
+    reg.register("setUserCreditThreshold", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let id = parse_user_id(ctx.path_param("id")?)?;
+                let obj = require_object(&ctx.body)?;
+                let threshold = credit_amount(obj.get("threshold"), "threshold")?;
+                let caller = admin_caller(ctx.user.as_ref());
+                sc_auth::set_low_balance_threshold(&catalog, id, threshold, Some(&caller)).await?;
+                Ok(HandlerResponse::ok(user_credits(&catalog, id).await?))
+            }
+        }
+    });
+
     reg.register("deleteUser", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -6978,6 +7335,8 @@ pub fn admin_handlers_with(
     // --- the Analytics UI (analytics TODO A1.13) -----------------------------
     crate::analytics::register(&mut reg, catalog.clone());
     crate::public_datasets::register(&mut reg, catalog.clone(), fetch);
+    // --- the home page's entities list ----------------------------------------
+    crate::entities::register(&mut reg, catalog.clone(), apps.clone());
 
     reg
 }
@@ -7251,6 +7610,25 @@ pub(crate) fn table_settings_from_body(
         ownership_formula: Some(str_field(obj, "ownership_formula")?.to_owned()),
         rls_enabled: Some(bool_field(obj, "rls_enabled")?),
         sync_enabled: Some(bool_field(obj, "sync_enabled")?),
+        // Absent reads as off, like every other omitted value of this body.
+        // Optional on the wire only so a body written before the switch existed
+        // (an older backup's `table.json`) still restores.
+        history_enabled: Some(optional_bool(obj, "history_enabled")?),
+        // Absent is the admin's, the default (§14.12).
+        history_min_role: Some(match obj.get("history_min_role") {
+            None | Some(Json::Null) => ROLE_ADMIN,
+            Some(_) => role_field(obj, "history_min_role")?,
+        }),
+        // Absent keeps history forever, the default.
+        history_keep_days: Some(match obj.get("history_keep_days") {
+            None | Some(Json::Null) => 0,
+            Some(days) => days
+                .as_u64()
+                .and_then(|d| u32::try_from(d).ok())
+                .ok_or_else(|| {
+                    Error::invalid("`history_keep_days` must be a whole number of days")
+                })?,
+        }),
     })
 }
 
@@ -7294,6 +7672,27 @@ fn merge_framework_secrets(stored: &Application, submitted: &mut Application) {
 
 /// An [`Application`] as the API returns it (matching `application_schema`): the
 /// id plus every field, with the nested framework/CSP/attributes as plain JSON.
+/// Refuse to delete or rename agent `name` while an application exposes it
+/// (§11.7), naming the applications — the way deleting an LLM provider an
+/// agent names is refused.
+async fn refuse_if_exposed(catalog: &Catalog, name: &str, verb: &str) -> Result<()> {
+    let using = sc_app::applications_exposing_agent(catalog, name).await?;
+    if using.is_empty() {
+        return Ok(());
+    }
+    Err(Error::invalid(format!(
+        "agent `{name}` cannot be {verb}: application{} {} expose{} it; stop exposing it \
+         there first",
+        if using.len() == 1 { "" } else { "s" },
+        using
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if using.len() == 1 { "s" } else { "" },
+    )))
+}
+
 pub(crate) fn application_json(app: &Application) -> Json {
     json!({
         "id": app.id.to_string(),
@@ -7309,6 +7708,7 @@ pub(crate) fn application_json(app: &Application) -> Json {
         "apis": app.apis.iter().map(|a| json!({ "provider": a.provider, "mount": a.mount, "config": Json::Object(a.config.clone()) })).collect::<Vec<_>>(),
         "static_dirs": app.static_dirs.iter().map(|d| json!({ "mount": d.mount, "store": d.store.0, "path": d.path })).collect::<Vec<_>>(),
         "uploads": sc_app::upload_slots_json(&app.uploads),
+        "agents": sc_app::agent_exposures_json(&app.agents),
         "csp": csp_json(&app.csp),
         "attributes": Json::Object(app.attributes.clone()),
         "min_role": app.min_role,
@@ -7874,6 +8274,8 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         .collect::<Result<_>>()?;
     // Absent is "no upload slots", read as the triggers are.
     let uploads = sc_app::upload_slots_from_json(obj.get("uploads"))?;
+    // …and so are the exposed agents (§11.7).
+    let agents = sc_app::agent_exposures_from_json(obj.get("agents"))?;
     let csp = parse_csp(obj.get("csp"), &framework.name)?;
     let attributes = match obj.get("attributes") {
         None | Some(Json::Null) => Attrs::new(),
@@ -7915,6 +8317,7 @@ pub(crate) fn application_from_body(id: AppId, body: &Json) -> Result<Applicatio
         apis,
         static_dirs,
         uploads,
+        agents,
         csp,
         min_role,
         max_role,
@@ -8006,7 +8409,7 @@ fn parse_str_array(obj: &Map<String, Json>, key: &str) -> Result<Vec<String>> {
 /// row, because they are not properties of the definition: the same definition
 /// is connected on one machine and not on another, and that difference is
 /// exactly what the admin needs to see.
-fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
+pub(crate) fn file_store_json(catalog: &Catalog, def: &FileStoreDef) -> Result<Json> {
     let connected = catalog.file_store(&def.name)?;
     Ok(json!({
         "id": Some(def.id.0),
@@ -9221,6 +9624,9 @@ fn module_json(
         // The tables it declares (TODO-imap M4): created when it loaded, and
         // kept when it is uninstalled.
         "tables": loaded.table_names(),
+        // The application tables it reads because its settings name them
+        // (TODO-payments P4.1): a plans table, say. Read only.
+        "reads": loaded.read_names(),
         // The services it runs in the background (TODO-imap M5), each with
         // where it is: running, restarting after a failure (and why), or
         // stopped. A module that declares one whose task has not been started
@@ -9245,6 +9651,27 @@ fn module_json(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
+        // The webhooks it receives (TODO-payments P1.2), each with the path it
+        // is served at on this host — what the admin registers with the
+        // provider. The tab puts its own origin in front: it is served on the
+        // admin host, which is where webhooks are.
+        "webhooks": loaded
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .webhooks
+                    .iter()
+                    .map(|webhook| {
+                        json!({
+                            "name": webhook.name,
+                            "description": webhook.description,
+                            "path": sc_module::hook_path(&module.name, &webhook.name),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         // And the model providers, for the same reason: installing
         // `feldspar-sklearn` gets an admin five estimators on the model form,
         // and the tab is where they find that out.
@@ -9256,6 +9683,13 @@ fn module_json(
         // application's New view offers beside v1's six. One whose name was
         // taken is not here; its issue says so.
         "view_patterns": loaded.view_pattern_names(),
+        // The content-security sources it suggests an application allow
+        // (TODO-payments P1.4), each switched on per application by its `key`.
+        "csp_sources": loaded
+            .csp_suggestions()
+            .iter()
+            .map(sc_module::CspSuggestion::to_json)
+            .collect::<Vec<_>>(),
         "unsupported": sc_module::unsupported_json(loaded),
         "issues": loaded.issues,
         "loaded": loaded.is_loaded(),
@@ -9281,6 +9715,13 @@ fn bundled_json(entry: &sc_module::BundledModule, installed: bool) -> Json {
         // And the services it runs (TODO-imap M5): the card says it runs in
         // the background and writes to its own tables.
         "services": entry.services,
+        // And the webhooks it receives (TODO-payments P1.2), with the path each
+        // will be served at once it is installed.
+        "webhooks": entry
+            .webhooks
+            .iter()
+            .map(|name| json!({ "name": name, "path": sc_module::hook_path(&entry.name, name) }))
+            .collect::<Vec<_>>(),
         "supplies": entry.supplies,
         "installs": entry.installs,
         // What installing it grants, in the same shape a module's own
@@ -10255,12 +10696,14 @@ fn refuse_self(ctx: &crate::handler::HandlerCtx, id: uuid::Uuid, verb: &str) -> 
 
 /// Build an application now and mount it, answering as `buildApplication`
 /// does, with `log` ahead of the build's own — Build's whole body, and the
-/// second half of Deep clean.
+/// second half of Deep clean. `quick` is the dev loop's build, which leaves the
+/// generated client as it is.
 async fn build_now(
     catalog: &Arc<Catalog>,
     apps: &Arc<AppMounts>,
     app: Application,
     mut log: String,
+    quick: bool,
 ) -> Result<HandlerResponse> {
     // Bring the generated code up to date first — the same call as
     // "Update client", so a project directory that was emptied is
@@ -10268,7 +10711,7 @@ async fn build_now(
     // build. (The build rewrites the generated files again on its
     // own; that is cheap, and it is what every other build path
     // relies on.) An app with nothing to build has no client.
-    let update = if sc_app::framework_factory(&app.framework.name).is_none() {
+    let update = if !quick && sc_app::framework_factory(&app.framework.name).is_none() {
         Some(update_app_client(catalog, &app, apps.triggers()).await?)
     } else {
         None
@@ -10276,7 +10719,7 @@ async fn build_now(
     // Build and mount live. A build failure propagates as an
     // Application error (§16) whose message is the bundler's own
     // diagnostics, and leaves any previously mounted version serving.
-    let report = build_and_mount(apps, app).await?;
+    let report = crate::apps::build_and_mount_with(apps, app, quick).await?;
     if let Some(update @ sc_app::ClientUpdate::Scaffolded(_)) = &update {
         // Only a scaffold is news: a regeneration is part of every
         // build, and saying so each time would bury the bundler's
@@ -10758,7 +11201,7 @@ async fn resolve_element_types(streams: &crate::StreamServices, stored: &[sc_str
 /// for status and counters. A stream whose provider was uninstalled has no
 /// element type and carries the reason in `error`, and it is still listed and
 /// still editable — because editing it is the repair.
-fn stream_json(
+pub(crate) fn stream_json(
     streams: &crate::StreamServices,
     apps: &AppMounts,
     stream: &sc_stream::Stream,
@@ -11582,7 +12025,14 @@ pub(crate) fn table_json(
         "rls_enabled": table.rls_enabled,
         "sync_enabled": table.sync_enabled(),
         // The same rule a save is refused by, so the switch is never a trap.
-        "sync_available": sc_catalog::sync_key(catalog, table).is_ok(),
+        "sync_available": sc_catalog::change_log_key(catalog, table, sc_catalog::ChangeLogFeature::Sync)
+            .is_ok(),
+        "history_enabled": table.history_enabled(),
+        "history_min_role": sc_catalog::history::history_min_role(&table.attributes),
+        "history_keep_days": sc_catalog::retention::history_keep_days(&table.attributes),
+        // Row history needs the same one-column key on Saltcorn's own database.
+        "history_available": sc_catalog::change_log_key(catalog, table, sc_catalog::ChangeLogFeature::History)
+            .is_ok(),
         // The backend's capability *and* whose database this is: RLS is DDL
         // against the primary driver, so it is never available on a table a
         // connection contributed, nor on a **provided** table, whose rows are
@@ -11718,6 +12168,37 @@ fn admin_caller(user: Option<&sc_auth::User>) -> sc_catalog::CallerContext {
     sc_api::caller_context_at(ROLE_ADMIN, user)
 }
 
+/// A user's LLM credits as the admin user page shows them: the balance, every
+/// bucket, and the latest entries.
+async fn user_credits(catalog: &Catalog, id: uuid::Uuid) -> Result<Json> {
+    /// The entries the page lists; older ones are a REST read of the table.
+    const RECENT_ENTRIES: u64 = 50;
+    if sc_auth::load_base_user(catalog, id).await?.is_none() {
+        return Err(Error::not_found(format!("no user with id {id}")));
+    }
+    let balance = sc_auth::credit_balance(catalog, id).await?;
+    let buckets = sc_auth::list_credit_buckets(catalog, id).await?;
+    let entries = sc_auth::list_credit_entries(catalog, id, RECENT_ENTRIES).await?;
+    Ok(sc_api::auth::user_credits_json(
+        &balance, &buckets, &entries,
+    ))
+}
+
+/// An amount of credits from a body: a decimal string (what the admin client
+/// sends, exactly) or a number. Absent or null is `None`.
+fn credit_amount(value: Option<&Json>, key: &str) -> Result<Option<rust_decimal::Decimal>> {
+    let parsed = match value {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::String(text)) if text.trim().is_empty() => return Ok(None),
+        Some(Json::String(text)) => text.trim().parse::<rust_decimal::Decimal>().ok(),
+        Some(Json::Number(n)) => n.to_string().parse::<rust_decimal::Decimal>().ok(),
+        Some(_) => None,
+    };
+    parsed
+        .map(Some)
+        .ok_or_else(|| Error::invalid(format!("`{key}` must be an amount of credits, like 12.5")))
+}
+
 /// A required role field of an object body: an integer on the `1..=100` scale.
 ///
 /// Rejects rather than clamps, for the reason the storage layer does: the
@@ -11828,6 +12309,17 @@ fn int_field(obj: &Map<String, Json>, key: &str) -> Result<i64> {
     obj.get(key)
         .and_then(Json::as_i64)
         .ok_or_else(|| Error::invalid(format!("missing or non-integer field `{key}`")))
+}
+
+/// An optional whole-number query parameter; absent or empty is `None`.
+fn optional_query_u64(ctx: &crate::HandlerCtx, name: &str) -> Result<Option<u64>> {
+    match ctx.query_get(name) {
+        None | Some("") => Ok(None),
+        Some(raw) => raw
+            .parse()
+            .map(Some)
+            .map_err(|_| Error::invalid(format!("`{name}` must be a whole number"))),
+    }
 }
 
 /// A required boolean field of an object body.

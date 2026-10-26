@@ -27,13 +27,18 @@ mod admin_host;
 mod calc;
 mod caller;
 mod catalog;
+mod change_log;
+pub mod change_log_sqlite;
+pub mod changeset;
 mod code_libraries;
 mod constraint;
 mod db_connections;
+mod edited;
 mod events;
 mod field;
 mod field_meta;
 mod file_stores;
+pub mod history;
 pub mod inmem;
 mod model_host;
 mod module_tables;
@@ -42,6 +47,7 @@ mod origin;
 mod prefetch;
 mod projection;
 mod provider;
+pub mod retention;
 mod rls;
 pub mod secrets;
 mod spatial;
@@ -52,8 +58,17 @@ mod tx;
 mod wakeups;
 
 pub use admin_host::{AdminCall, AdminHost};
-pub use caller::CallerContext;
+pub use caller::{
+    CallerContext, CallingApp, Origin, UNTRUSTED_ORIGIN, current_origin, is_untrusted_chain,
+    untrusted_chain, with_origin,
+};
 pub use catalog::{Catalog, ProvidedTableIssue, SchemaStep};
+pub use change_log::{
+    CHANGES_TABLE, ChangeLogFeature, as_text_sql, bootstrap_change_log, change_log_enabled,
+    change_log_key, disable_change_log_sql, enable_change_log_sql, history_enabled,
+    json_distinct_array_sql, json_texts_sql, row_json_sql, set_history_enabled,
+};
+pub use changeset::{CHANGESETS_TABLE, Changeset, ChangesetSource};
 pub use code_libraries::{
     CODE_LIBRARIES_TABLE, CodeLibrary, bootstrap_code_libraries, check_code_library_saveable,
     delete_application_code_libraries, delete_code_library, list_code_libraries, load_code_library,
@@ -70,6 +85,10 @@ pub use db_connections::{
     check_db_connection_saveable, connect_all_db_connections, connect_db_connection,
     delete_db_connection, dial, list_db_connections, load_db_connection,
     load_db_connection_by_name, save_db_connection,
+};
+pub use edited::{
+    COL_UPDATED_AT, TABLE_EDITS_TABLE, bootstrap_table_edits, forget_table_edit, touch_tables,
+    updated_at_by, updated_at_field, updated_now,
 };
 pub use events::{LIVE_EVENTS, TRIGGER_EVENTS, TableEvents, TableWrite, WriteOp};
 pub use field::{
@@ -90,8 +109,8 @@ pub use file_stores::{
     load_file_store_by_name, resolve_options, save_file_store, store_file_settings,
     unique_file_store_name,
 };
-pub use module_tables::{ModuleTableClaim, ModuleTables};
 pub use model_host::{ModelHost, ModelSummary, PredictRows, check_model_calls};
+pub use module_tables::{ModuleTableClaim, ModuleTables};
 pub use observer::{ReprojectedApp, SchemaChanged, SchemaObserver};
 pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
@@ -107,9 +126,8 @@ pub use rls::{
 pub use secrets::SecretKey;
 pub use spatial::bootstrap_spatial;
 pub use sync::{
-    SYNC_CLIENTS_TABLE, SYNC_KEYS_TABLE, SyncWatermark, bootstrap_sync, changed_keys,
-    disable_sync_sql, enable_sync_sql, mark_sync_device, set_sync_enabled, sync_enabled, sync_key,
-    sync_watermark,
+    ChangedEntry, SYNC_CLIENTS_TABLE, SYNC_KEYS_TABLE, SyncWatermark, changed_entries,
+    changed_keys, set_sync_enabled, sync_enabled, sync_watermark,
 };
 pub use table::{AccessRules, FieldMergeIssue, Table, TableSource};
 pub use table_meta::{

@@ -12,6 +12,10 @@
  * the line and clicking it opens the tab. That is the whole reason the build's
  * errors are wired to a panel rather than a toast — until the language server
  * lands in phase 4, this *is* how an admin sees a type error.
+ *
+ * Beside it, **Build on save** (TODO-astro W2.5): a toggle in the status bar
+ * that runs the quick build (`buildOnSave.ts`) whenever a file in the
+ * application's source is saved, reporting into the same panel.
  */
 
 import * as vscode from "vscode";
@@ -19,10 +23,16 @@ import * as vscode from "vscode";
 import { api, errorMessage } from "./api";
 import { applicationsBuiltFrom, type BuildableApplication } from "./applications";
 import { parseBuildDiagnostics, type BuildDiagnostic } from "./buildDiagnostics";
-import { StoreFiles, toUriPath } from "./storeFiles";
+import { SaveScheduler, applicationForSave } from "./buildOnSave";
+import { StoreFiles, toStorePathOrNull, toUriPath } from "./storeFiles";
 
 /** The command id, as the manifest contributes it. */
 export const BUILD_COMMAND = "saltcorn.buildApplication";
+/** The Build on save toggle's command id. */
+export const BUILD_ON_SAVE_COMMAND = "saltcorn.toggleBuildOnSave";
+
+/** Where the toggle is remembered, per store, in this browser. */
+const BUILD_ON_SAVE_KEY = (store: string) => `saltcorn.buildOnSave.${store}`;
 
 /**
  * Contribute the command, its status-bar button and the collection its failures
@@ -44,31 +54,114 @@ export function registerBuildCommand(
   button.command = BUILD_COMMAND;
   button.show();
 
-  const command = vscode.commands.registerCommand(BUILD_COMMAND, () =>
-    build(files, output, problems, afterBuild),
-  );
-  return [command, button, output, problems];
+  const command = vscode.commands.registerCommand(BUILD_COMMAND, async () => {
+    const chosen = await chooseApplication(files.store);
+    if (chosen !== null) await build(files, chosen, output, problems, false, afterBuild);
+  });
+  return [command, button, output, problems, ...registerBuildOnSave(files, output, problems, afterBuild)];
 }
 
-/** Run one build, from choosing the application to reporting what happened. */
-async function build(
+/**
+ * The Build on save toggle: a status-bar switch, remembered per store, and the
+ * save listener that runs a quick build of the application a saved file is in.
+ */
+function registerBuildOnSave(
   files: StoreFiles,
   output: vscode.OutputChannel,
   problems: vscode.DiagnosticCollection,
   afterBuild?: () => void,
+): vscode.Disposable[] {
+  let enabled = remembered(files.store);
+  let candidates: BuildableApplication[] | null = null;
+  const toggle = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+  toggle.command = BUILD_ON_SAVE_COMMAND;
+  const draw = (busy = false) => {
+    toggle.text = busy
+      ? "$(sync~spin) Building…"
+      : enabled
+        ? "$(sync) Build on save"
+        : "$(circle-slash) Build on save";
+    toggle.tooltip = enabled
+      ? "Saving a file runs a quick build of its application (no install, no prerendering). Click to turn off."
+      : "Click to run a quick build of the application whenever one of its files is saved.";
+  };
+  draw();
+  toggle.show();
+
+  const scheduler = new SaveScheduler(async (app) => {
+    draw(true);
+    try {
+      await build(files, app, output, problems, true, afterBuild);
+    } finally {
+      draw();
+    }
+  });
+
+  const command = vscode.commands.registerCommand(BUILD_ON_SAVE_COMMAND, () => {
+    enabled = !enabled;
+    // Asked again when next needed: an application may have been added since.
+    candidates = null;
+    remember(files.store, enabled);
+    draw();
+  });
+  const listener = vscode.workspace.onDidSaveTextDocument(async (document) => {
+    if (!enabled) return;
+    const path = toStorePathOrNull(files.store, document.uri.path);
+    if (path === null) return;
+    if (candidates === null) {
+      try {
+        candidates = applicationsBuiltFrom(await api.listApplications(), files.store);
+      } catch {
+        return;
+      }
+    }
+    const app = applicationForSave(candidates, path);
+    if (app !== null) scheduler.saved(app);
+  });
+  return [toggle, command, listener];
+}
+
+function remembered(store: string): boolean {
+  try {
+    return localStorage.getItem(BUILD_ON_SAVE_KEY(store)) === "on";
+  } catch {
+    return false;
+  }
+}
+
+function remember(store: string, on: boolean): void {
+  try {
+    localStorage.setItem(BUILD_ON_SAVE_KEY(store), on ? "on" : "off");
+  } catch {
+    // A browser that keeps nothing: the toggle lasts this session.
+  }
+}
+
+/**
+ * Run one build of `chosen` and report what happened. A `quick` build (on
+ * save) reports success in the output channel only, not with a notification
+ * for every save.
+ */
+async function build(
+  files: StoreFiles,
+  chosen: BuildableApplication,
+  output: vscode.OutputChannel,
+  problems: vscode.DiagnosticCollection,
+  quick: boolean,
+  afterBuild?: () => void,
 ): Promise<void> {
-  const chosen = await chooseApplication(files.store);
-  if (chosen === null) return;
   const name = chosen.application.name;
 
   problems.clear();
   try {
-    const report = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `Building ${name}…` },
-      () => api.buildApplication(chosen.application.id),
-    );
-    log(output, `Built ${name}.`, report.log);
-    void vscode.window.showInformationMessage(`Built ${name}.`);
+    const report = quick
+      ? await api.buildApplication(chosen.application.id, { quick: true })
+      : await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `Building ${name}…` },
+          () => api.buildApplication(chosen.application.id),
+        );
+    log(output, quick ? `Rebuilt ${name} on save.` : `Built ${name}.`, report.log);
+    if (!quick) void vscode.window.showInformationMessage(`Built ${name}.`);
   } catch (err) {
     const text = errorMessage(err, `building ${name} failed`);
     log(output, `Building ${name} failed.`, text);

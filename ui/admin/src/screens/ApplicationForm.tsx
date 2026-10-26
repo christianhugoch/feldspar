@@ -30,6 +30,7 @@ import type {
   ListApplicationsResponse,
   ListFileStoresResponse,
   ListFrameworksResponse,
+  ListModulesResponse,
   ListStreamsResponse,
   ListTablesResponse,
   ListTriggersResponse,
@@ -77,6 +78,13 @@ import {
   uploadRowsToRequest,
   type UploadRow,
 } from "../uploadSlots";
+import {
+  agentOptions,
+  agentRowsFromApp,
+  agentRowsToRequest,
+  blankAgentRow,
+  type AgentRow,
+} from "../agentExposures";
 import { CustomQueries } from "./CustomQueries";
 import { ApplicationTabs } from "./ApplicationViews";
 import { appTabs, settingsOnOwnTab } from "../views";
@@ -92,6 +100,45 @@ type FileStoreItem = ListFileStoresResponse[number];
 /** A `{ mount, store, path }` static-directory row. */
 
 /** Render a CSP object as `directive: src1 src2` lines for the textarea. */
+/** A content-security suggestion of an installed module (TODO-payments P1.4). */
+type CspSuggestion = ListModulesResponse["modules"][number]["csp_sources"][number] & {
+  module: string;
+};
+
+/** Every installed module's content-security suggestions. */
+function cspSuggestionsOf(listing: ListModulesResponse): CspSuggestion[] {
+  return listing.modules.flatMap((m) =>
+    m.csp_sources.map((s) => ({ ...s, module: m.name })),
+  );
+}
+
+/** An application's attributes as an object, whatever was stored. */
+function attributesOf(attributes: unknown): Record<string, unknown> {
+  return attributes && typeof attributes === "object" && !Array.isArray(attributes)
+    ? (attributes as Record<string, unknown>)
+    : {};
+}
+
+/** The suggestions switched on for an application, from its attributes. */
+function cspSourcesOf(attributes: unknown): string[] {
+  const raw = attributesOf(attributes).csp_sources;
+  return Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : [];
+}
+
+/** `keys` with `key` in or out. */
+function toggled(keys: string[], key: string, on: boolean): string[] {
+  const without = keys.filter((k) => k !== key);
+  return on ? [...without, key] : without;
+}
+
+/** A suggestion's sources as one line: `script-src https://js.stripe.com; …`. */
+function sourcesText(sources: unknown): string {
+  if (!sources || typeof sources !== "object") return "";
+  return Object.entries(sources as Record<string, unknown>)
+    .map(([d, list]) => `${d} ${Array.isArray(list) ? list.join(" ") : ""}`)
+    .join("; ");
+}
+
 function cspToText(csp: unknown): string {
   if (!csp || typeof csp !== "object") return "";
   return Object.entries(csp as Record<string, unknown>)
@@ -144,6 +191,9 @@ export function ApplicationForm({
   const [allStreams, setAllStreams] = useState<StreamItem[]>([]);
   const [allTables, setAllTables] = useState<TableItem[]>([]);
   const [allFileStores, setAllFileStores] = useState<FileStoreItem[]>([]);
+  // …and the server's agents, so an exposed agent is picked from the ones
+  // there are (§11.7).
+  const [allAgents, setAllAgents] = useState<string[]>([]);
   // The API providers this server registers, for the same reason: a provider name
   // is the one field of an application whose typo survives the save and turns up
   // later as "unknown API provider" from a mount that failed.
@@ -173,15 +223,25 @@ export function ApplicationForm({
   ]);
   const [staticDirs, setStaticDirs] = useState<StaticRow[]>([]);
   const [uploads, setUploads] = useState<UploadRow[]>([]);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
   // Empty by default: a new app takes its framework's policy (§2.2) unless the
   // admin states one. Editing an app fills this in from what was stored.
   const [csp, setCsp] = useState("");
+  // The content-security sources installed modules suggest (TODO-payments
+  // P1.4), and the ones switched on for this application, by key. Nothing a
+  // module suggests is allowed until it is switched on here.
+  const [cspSuggestions, setCspSuggestions] = useState<CspSuggestion[]>([]);
+  const [cspSources, setCspSources] = useState<string[]>([]);
   // Who may use the application at all (TODO F9). The defaults let everybody
   // in as they are, which is what an application without them did.
   const roles = useRoles();
   const [minRole, setMinRole] = useState(100);
   const [maxRole, setMaxRole] = useState(1);
   const [accessIf, setAccessIf] = useState("");
+  // Guest sessions (TODO-payments P1.5): off unless switched on, and how long
+  // one lasts — its cookie's age — in days.
+  const [guestSessions, setGuestSessions] = useState(false);
+  const [guestDays, setGuestDays] = useState("30");
 
   // Load the frameworks (always) and, when editing, the app to prefill.
   useEffect(() => {
@@ -209,6 +269,17 @@ export function ApplicationForm({
         const stores = await api
           .listFileStores()
           .catch(() => [] as FileStoreItem[]);
+        // A server that cannot list its modules offers no suggestions, and an
+        // application keeps the ones it has switched on.
+        const suggestions = await api
+          .listModules()
+          .then(cspSuggestionsOf, () => [] as CspSuggestion[]);
+        // A server without agents answers with an error: the picker is empty,
+        // and an application that already exposes one keeps it.
+        const agentNames = await api
+          .listAgents()
+          .then((list) => list.map((a) => a.name))
+          .catch(() => [] as string[]);
         let existing: AppItem | undefined;
         if (appId) {
           existing = (await api.listApplications()).find((a) => a.id === appId);
@@ -224,6 +295,8 @@ export function ApplicationForm({
         setAllProviders(provs);
         setAllTables(tbls);
         setAllFileStores(stores);
+        setCspSuggestions(suggestions);
+        setAllAgents(agentNames);
         if (existing) {
           setStored(existing);
           setName(existing.name);
@@ -244,7 +317,14 @@ export function ApplicationForm({
             })),
           );
           setUploads(uploadRowsFromApp(existing.uploads));
+          setAgents(agentRowsFromApp(existing.agents));
           setCsp(cspToText(existing.csp));
+          setCspSources(cspSourcesOf(existing.attributes));
+          const attributes = attributesOf(existing.attributes);
+          setGuestSessions(attributes.guest_sessions === true);
+          if (typeof attributes.guest_session_days === "number") {
+            setGuestDays(String(attributes.guest_session_days));
+          }
           setMinRole(existing.min_role);
           setMaxRole(existing.max_role);
           setAccessIf(existing.access_if);
@@ -334,12 +414,20 @@ export function ApplicationForm({
         apis: apiRowsToRequest(apis, allProviders),
         static_dirs: staticDirsToRequest(staticDirs),
         uploads: uploadRowsToRequest(uploads),
+        agents: agentRowsToRequest(agents),
         // An empty box means "no opinion", and is sent as no field at all so the
         // *framework's* default policy applies (§2.2) — a React app gets the one
         // fitted to what Vite emits. Sending `default-src 'self'` because a
         // textarea was pre-filled would silently overrule that.
         csp: csp.trim() ? textToCsp(csp) : undefined,
-        attributes: {},
+        // What is stored is kept — the form edits one attribute of the bag —
+        // with the content-security suggestions switched on.
+        attributes: {
+          ...attributesOf(stored?.attributes),
+          csp_sources: cspSources,
+          guest_sessions: guestSessions,
+          guest_session_days: Number.parseInt(guestDays, 10) || 30,
+        },
         min_role: minRole,
         max_role: maxRole,
         access_if: accessIf.trim(),
@@ -910,6 +998,65 @@ export function ApplicationForm({
               />
             </Form.Text>
 
+            <RepeatableRows
+              title={t("Agents")}
+              rows={agents}
+              columns={[
+                {
+                  key: "name",
+                  label: t("Agent"),
+                  options: (value) =>
+                    agentOptions(allAgents, value).map((o) => ({
+                      value: o.value,
+                      label: o.known ? o.value : t("{name} (no such agent)", { name: o.value }),
+                    })),
+                  emptyText: t("There are no agents yet. Create one under Agents."),
+                },
+                {
+                  key: "use",
+                  label: t("Use"),
+                  options: () => [
+                    { value: "both", label: t("Chat and prompts") },
+                    { value: "chat", label: t("Chat") },
+                    { value: "prompt", label: t("Prompts") },
+                  ],
+                },
+                {
+                  key: "anonymous",
+                  label: t("Signed out"),
+                  options: () => [
+                    { value: "no", label: t("Not allowed") },
+                    { value: "yes", label: t("Allowed") },
+                  ],
+                },
+                {
+                  key: "tools",
+                  label: t("Tools shown"),
+                  options: () => [
+                    { value: "names", label: t("Names") },
+                    { value: "none", label: t("None") },
+                    { value: "full", label: t("In full") },
+                  ],
+                },
+                {
+                  key: "prompt_template",
+                  label: t("Prompt template"),
+                  placeholder: "Summarise order {{order}}",
+                },
+              ]}
+              onChange={setAgents}
+              blank={blankAgentRow()}
+            />
+            <Form.Text muted className="d-block mb-3">
+              <T
+                text="The application's pages talk to an agent at {route}: conversations, streamed and kept as each person's own history, or single prompts. Who may use it is the agent's own minimum role, and its tools run as that person. Signed-out use also needs the agent's minimum role to be public. A prompt template makes a prompt take the values of its {placeholder} placeholders instead of free text."
+                values={{
+                  route: <code>{"{api mount}"}/_agents/{"{name}"}</code>,
+                  placeholder: <code>{"{{key}}"}</code>,
+                }}
+              />
+            </Form.Text>
+
             <Form.Group className="mb-3" controlId="appCsp">
               <Form.Label>Content-Security-Policy</Form.Label>
               <Form.Control
@@ -922,6 +1069,55 @@ export function ApplicationForm({
                 <T text="One directive per line, e.g. `default-src: 'self'`. Leave empty to use the framework's own default policy." />
               </Form.Text>
             </Form.Group>
+
+            {(cspSuggestions.length > 0 || cspSources.length > 0) && (
+              <Form.Group className="mb-3">
+                <Form.Label>
+                  <T text="Sources suggested by modules" />
+                </Form.Label>
+                {cspSuggestions.map((suggestion) => (
+                  <Form.Check
+                    key={suggestion.key}
+                    type="switch"
+                    id={`csp-${suggestion.key}`}
+                    checked={cspSources.includes(suggestion.key)}
+                    onChange={(e) =>
+                      setCspSources(toggled(cspSources, suggestion.key, e.target.checked))
+                    }
+                    label={
+                      <>
+                        <strong>{suggestion.module}</strong>: {suggestion.description || suggestion.name}{" "}
+                        <span className="text-secondary small">
+                          {sourcesText(suggestion.sources)}
+                        </span>
+                      </>
+                    }
+                  />
+                ))}
+                {cspSources
+                  .filter((key) => !cspSuggestions.some((s) => s.key === key))
+                  .map((key) => (
+                    <Form.Check
+                      key={key}
+                      type="switch"
+                      id={`csp-${key}`}
+                      checked
+                      onChange={() => setCspSources(toggled(cspSources, key, false))}
+                      label={
+                        <>
+                          <code>{key}</code>{" "}
+                          <span className="text-secondary small">
+                            <T text="(its module is not installed, so it adds nothing)" />
+                          </span>
+                        </>
+                      }
+                    />
+                  ))}
+                <Form.Text muted>
+                  <T text="A module that talks to another service — a payment provider's embedded form — may need its scripts, frames or API allowed by this application's policy. Each one is allowed only once switched on here." />
+                </Form.Text>
+              </Form.Group>
+            )}
 
             <h5 className="mt-4">
               <T text="Who may use this application" />
@@ -970,6 +1166,40 @@ export function ApplicationForm({
                 <T
                   text="A formula that must hold for anybody to use this application, with {user} in scope as in an ownership formula ({null} when nobody is signed in), or a condition on the time. It sees the user’s own role, before the maximum above. Blank means no condition."
                   values={{ user: <code>user</code>, null: <code>null</code> }}
+                />
+              </Form.Text>
+            </Form.Group>
+
+            <Form.Group className="mb-3" controlId="appGuestSessions">
+              <Form.Check
+                type="switch"
+                checked={guestSessions}
+                onChange={(e) => setGuestSessions(e.target.checked)}
+                label={t("Guest sessions: visitors who are not signed in may keep rows of their own")}
+              />
+              {guestSessions && (
+                <Row className="mt-2">
+                  <Col md={4}>
+                    <Form.Label>
+                      <T text="A guest session lasts (days)" />
+                    </Form.Label>
+                    <Form.Control
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={guestDays}
+                      onChange={(e) => setGuestDays(e.target.value)}
+                    />
+                  </Col>
+                </Row>
+              )}
+              <Form.Text muted>
+                <T
+                  text="The application calls {start} when a visitor first needs one — a basket's first item — and a table owns their rows with {formula}. Signing in in the same browser ends it, and the login event names it so a trigger can move the rows to the account."
+                  values={{
+                    start: <code>api.startGuestSession()</code>,
+                    formula: <code>session_id === session.id</code>,
+                  }}
                 />
               </Form.Text>
             </Form.Group>

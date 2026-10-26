@@ -44,6 +44,8 @@ import { useFoldedSidebar, useTheme } from "./layout";
 import { LocalePicker } from "./screens/LocalePicker";
 import { AgentChat } from "./screens/AgentChat";
 import { AgentForm } from "./screens/AgentForm";
+import { Entities } from "./screens/Entities";
+import { AgentRuns } from "./screens/AgentRuns";
 import { Agents } from "./screens/Agents";
 import { Applications } from "./screens/Applications";
 import { ApplicationForm } from "./screens/ApplicationForm";
@@ -70,6 +72,7 @@ import { StreamObserve } from "./screens/StreamObserve";
 import { Streams } from "./screens/Streams";
 import { Tables } from "./screens/Tables";
 import { TableData } from "./screens/TableData";
+import { ChangesetDetail, Changesets } from "./screens/Changesets";
 import { TableDetail } from "./screens/TableDetail";
 import { RunDetail } from "./screens/RunDetail";
 import { Triggers } from "./screens/Triggers";
@@ -85,7 +88,7 @@ export type CurrentUser = NonNullable<AuthStatusResponse["current_user"]>;
 
 /** Subscribe to `location.hash`, normalised to a path like `/tables`. */
 function useHashRoute(): string {
-  const read = () => window.location.hash.replace(/^#/, "") || "/tables";
+  const read = () => window.location.hash.replace(/^#/, "") || "/entities";
   const [route, setRoute] = useState(read);
   useEffect(() => {
     const onChange = () => setRoute(read());
@@ -192,7 +195,9 @@ export const NAV: NavItem[] = [
     // The database connections list is part of this section rather than one of
     // its own, the way LLM providers hang off Agents: a connection exists to put
     // tables in the tables list, and the way to it is a button on that screen.
-    matches: ["/tables", "/db-connections"],
+    // And so is the changeset browser: row history is a property of tables,
+    // reached from the tables list and a table's data.
+    matches: ["/tables", "/db-connections", "/changesets"],
   },
   {
     href: "#/file-stores",
@@ -355,7 +360,7 @@ function Shell({
               colours to keep. */}
           <div className="navbar-brand">
             <a
-              href="#/tables"
+              href="#/entities"
               className="d-flex align-items-center gap-2"
               aria-label={t("Saltcorn")}
             >
@@ -400,32 +405,9 @@ function Shell({
               {/* Tabler's section titles: folded to a rail, each becomes a short
                   rule between the groups of icons. */}
               <li className="nav-section-title"><T text="Data Layer" /></li>
-              {NAV.map((item) => {
-                const active = item.matches.some((prefix) =>
-                  route.startsWith(prefix),
-                );
-                return (
-                  <li
-                    key={item.href}
-                    className={active ? "nav-item active" : "nav-item"}
-                  >
-                    <a
-                      className={active ? "nav-link active" : "nav-link"}
-                      href={item.href}
-                      aria-current={active ? "page" : undefined}
-                      // Folded, the icon is all there is to go on, so the name
-                      // becomes the hover label. Unfolded it is already on
-                      // screen and a tooltip would only repeat it.
-                      title={folded ? item.label : undefined}
-                    >
-                      <span className="nav-link-icon d-md-none d-lg-inline-block">
-                        {item.icon}
-                      </span>
-                      <span className="nav-link-title">{item.label}</span>
-                    </a>
-                  </li>
-                );
-              })}
+              {NAV.map((item) => (
+                <NavLink key={item.href} item={item} route={route} folded={folded} />
+              ))}
               <li className="nav-section-title"><T text="Applications" /></li>
               <ApplicationsNav route={route} folded={folded} />
             </ul>
@@ -515,6 +497,37 @@ function Shell({
   );
 }
 
+/** One sidebar link, lit up when the route is one of the item's. */
+function NavLink({
+  item,
+  route,
+  folded,
+}: {
+  item: NavItem;
+  route: string;
+  folded: boolean;
+}) {
+  const active = item.matches.some((prefix) => route.startsWith(prefix));
+  return (
+    <li className={active ? "nav-item active" : "nav-item"}>
+      <a
+        className={active ? "nav-link active" : "nav-link"}
+        href={item.href}
+        aria-current={active ? "page" : undefined}
+        // Folded, the icon is all there is to go on, so the name becomes the
+        // hover label. Unfolded it is already on screen and a tooltip would
+        // only repeat it.
+        title={folded ? item.label : undefined}
+      >
+        <span className="nav-link-icon d-md-none d-lg-inline-block">
+          {item.icon}
+        </span>
+        <span className="nav-link-title">{item.label}</span>
+      </a>
+    </li>
+  );
+}
+
 /** Light/dark switch. One button that shows the scheme it would switch *to*,
  * which is how Tabler's own header reads (it swaps two links; we swap an icon). */
 function ThemeToggle({
@@ -562,9 +575,19 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   // Routes are matched on their path; a query is what a screen is opened with
   // (the builder's way back to `views/:name?step=n`).
   const { path, query } = splitRoute(route);
+  if (path === "/entities") {
+    return <Entities />;
+  }
   const tableDataMatch = path.match(/^\/tables\/([^/]+)\/data$/);
   if (tableDataMatch) {
     return <TableData table={decodeURIComponent(tableDataMatch[1])} />;
+  }
+  const changesetMatch = path.match(/^\/changesets\/([^/]+)$/);
+  if (changesetMatch) {
+    return <ChangesetDetail key={route} id={decodeURIComponent(changesetMatch[1])} />;
+  }
+  if (path === "/changesets") {
+    return <Changesets key={route} initialTable={query.get("table") ?? undefined} />;
   }
   const tableMatch = path.match(/^\/tables\/([^/]+)$/);
   if (tableMatch) {
@@ -729,6 +752,11 @@ function Screen({ route, user }: { route: string; user: CurrentUser }) {
   const agentChatMatch = path.match(/^\/agents\/([^/]+)\/chat$/);
   if (agentChatMatch) {
     return <AgentChat agent={decodeURIComponent(agentChatMatch[1])} />;
+  }
+  // Runs are keyed by the agent's name too (the run's `subject`).
+  const agentRunsMatch = path.match(/^\/agents\/([^/]+)\/runs$/);
+  if (agentRunsMatch) {
+    return <AgentRuns agent={decodeURIComponent(agentRunsMatch[1])} />;
   }
   const agentEditMatch = path.match(/^\/agents\/([^/]+)\/edit$/);
   if (agentEditMatch) {

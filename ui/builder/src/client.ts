@@ -10,26 +10,28 @@ export type CreateFirstUserRequest = { email: string; password: string };
 export type CreateFirstUserResponse = { id: string; email: string; role: number };
 export type LoginRequest = { email: string; password: string };
 export type LoginResponse = { id: string; email: string; role: number };
-export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }>;
+export type ListTablesResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }>;
+export type ListEntitiesQuery = { deep?: boolean };
+export type ListEntitiesResponse = Array<{ kind: string; id: string; name: string; description: string; details: Array<string>; access: string; updated_at?: string | null; runnable: boolean; subdomain?: string | null; channel?: string | null; definition?: string | null }>;
 export type CreateTableRequest = { name: string; database?: string | null };
-export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type CreateTableFromCsvRequest = { name: string; csv: string; database?: string | null };
-export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number };
+export type CreateTableFromCsvResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number };
 export type CreateTableFromGeoFileRequest = { name: string; file_name: string; content_base64: string; layer?: string | null; database?: string | null };
-export type CreateTableFromGeoFileResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number; warnings: Array<string> };
-export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean };
-export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateTableFromGeoFileResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; inserted: number; warnings: Array<string> };
+export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null };
+export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DropTableResponse = { dropped: string };
 export type ListMetadataTablesResponse = Array<string>;
 export type CreateMetadataTableRequest = { name: string };
-export type CreateMetadataTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateMetadataTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type ListTableProvidersResponse = Array<{ module: string; provider: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>;
 export type CreateProvidedTableRequest = { name: string; module: string; provider: string; configuration?: unknown | null };
-export type CreateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type CreateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type UpdateProvidedTableRequest = { configuration: unknown };
-export type UpdateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
+export type UpdateProvidedTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DeleteTableSettingsResponse = { deleted: boolean };
-export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean }>;
+export type ListOrphanTableSettingsResponse = Array<{ name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null }>;
 export type ListRolesResponse = Array<{ role: number; name: string; description: string; builtin: boolean }>;
 export type CreateRoleRequest = { role: number; name: string; description: string };
 export type CreateRoleResponse = { role: number; name: string; description: string; builtin: boolean };
@@ -38,7 +40,7 @@ export type ListFieldsResponse = Array<{ name: string; label: string; descriptio
 export type ListInboundKeysResponse = Array<{ table: string; field: string }>;
 export type CreateFieldRequest = { name: string; type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; required?: boolean | null; unique?: boolean | null; primary_key?: boolean | null; default_expression?: string | null };
 export type CreateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; primary_key: boolean; generated: boolean; default_expression: string; kind: unknown; attributes: unknown };
-export type UpdateFieldRequest = { type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; primary_key?: boolean | null; required?: boolean | null; default_expression?: string | null };
+export type UpdateFieldRequest = { name?: string | null; type?: string | null; kind?: unknown | null; attributes?: unknown | null; label?: string | null; description?: string | null; primary_key?: boolean | null; required?: boolean | null; default_expression?: string | null };
 export type UpdateFieldResponse = { name: string; label: string; description: string; sql_type: string; type: string; nullable: boolean; required: boolean; unique: boolean; primary_key: boolean; generated: boolean; default_expression: string; kind: unknown; attributes: unknown };
 export type DeleteFieldResponse = { dropped: string };
 export type ListConstraintsResponse = Array<{ name: string; type: string; fields: Array<string>; expression?: string | null; method?: string | null; language?: string | null; formula?: string | null; error_message?: string | null; managed: boolean }>;
@@ -55,6 +57,19 @@ export type CreateRowResponse = unknown;
 export type UpdateRowRequest = unknown;
 export type UpdateRowResponse = unknown;
 export type DeleteAllRowsResponse = { deleted: number };
+export type GetRowHistoryResponse = Array<{ seq: number; version: number; table: string; key: string; op: string; at: string; changes: Array<{ field: string; old: unknown; new: unknown; removed: boolean }>; changeset: { id: string; at: string; user_id?: string | null; user_email?: string | null; source: string; application?: string | null; description?: string | null; cause?: string | null; undo_table?: string | null; client_id?: string | null; mutation?: number | null } }>;
+export type ListDeletedRowsQuery = { limit?: number; offset?: number };
+export type ListDeletedRowsResponse = Array<{ key: string; seq: number; at: string; row: unknown; removed: unknown; changeset: { id: string; at: string; user_id?: string | null; user_email?: string | null; source: string; application?: string | null; description?: string | null; cause?: string | null; undo_table?: string | null; client_id?: string | null; mutation?: number | null } }>;
+export type GetRowAsOfQuery = { as_of: string };
+export type GetRowAsOfResponse = { row?: unknown | null; removed: unknown };
+export type ListChangesetsQuery = { user?: string; table?: string; source?: string; since?: string; limit?: number; offset?: number };
+export type ListChangesetsResponse = Array<{ id: string; at: string; user_id?: string | null; user_email?: string | null; source: string; application?: string | null; description?: string | null; cause?: string | null; undo_table?: string | null; client_id?: string | null; mutation?: number | null; entries: number; tables: Array<string> }>;
+export type GetChangesetResponse = { id: string; at: string; user_id?: string | null; user_email?: string | null; source: string; application?: string | null; description?: string | null; cause?: string | null; undo_table?: string | null; client_id?: string | null; mutation?: number | null; entries: Array<{ seq: number; version: number; table: string; key: string; op: string; at: string; changes: Array<{ field: string; old: unknown; new: unknown; removed: boolean }>; changeset: { id: string; at: string; user_id?: string | null; user_email?: string | null; source: string; application?: string | null; description?: string | null; cause?: string | null; undo_table?: string | null; client_id?: string | null; mutation?: number | null } }> };
+export type RestoreRowResponse = { changeset: string; row: unknown; dropped: Array<string> };
+export type RevertRowRequest = { version: number };
+export type RevertRowResponse = { changeset: string; row: unknown; dropped: Array<string> };
+export type UndoChangesetRequest = { table?: string | null; force?: boolean | null };
+export type UndoChangesetResponse = { undone: boolean; changeset?: string | null; entries: number; dropped: Array<string>; conflicts: Array<{ table: string; key: string; field?: string | null; expected: unknown; actual: unknown; reason: string }> };
 export type ExportTableCsvResponse = { filename: string; csv: string };
 export type ImportTableCsvRequest = { csv: string };
 export type ImportTableCsvResponse = { inserted: number; updated: number; errors: Array<string> };
@@ -95,11 +110,11 @@ export type ListLlmModelSettingsResponse = Array<{ name: string; label: string; 
 export type FetchLlmModelsResponse = { ok: boolean; message: string; names: Array<string> };
 export type TestLlmModelRequest = { provider_id?: string | null; backend: string; config: unknown; name: string; model_config?: unknown | null };
 export type TestLlmModelResponse = { ok: boolean; message: string; model: string; capabilities: unknown; prices: unknown };
-export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; tables: Array<string>; services: Array<string>; permissions: unknown; installed: boolean }> };
+export type ListModulesResponse = { modules: Array<{ id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null }>; root: string; npm: boolean; npm_too_old?: { version: string; minimum: string } | null; node: boolean; python: boolean; pip: boolean; python_dir?: string | null; bundled: Array<{ id: string; name: string; language: string; title: string; description: string; supplies: Array<string>; installs: Array<string>; tables: Array<string>; services: Array<string>; webhooks: Array<{ name: string; path: string }>; permissions: unknown; installed: boolean }> };
 export type InstallModuleRequest = { source: string; location: string; language?: string | null };
-export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type InstallModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type UpdateModuleRequest = { configuration?: unknown | null; permissions?: unknown | null };
-export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
+export type UpdateModuleResponse = { id: string; name: string; language: string; source: string; location: string; version?: string | null; configuration: unknown; permissions: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; actions: Array<{ name: string; description: string; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }> }>; functions: Array<{ name: string; description: string; is_async: boolean; arguments: Array<{ name: string; type?: string | null }> }>; table_providers: Array<string>; tables: Array<string>; reads: Array<string>; services: Array<{ name: string; description: string; state: string; restarts: number; last_error?: string | null }>; webhooks: Array<{ name: string; description: string; path: string }>; model_providers: Array<string>; stream_providers: Array<string>; view_patterns: Array<string>; csp_sources: Array<{ key: string; name: string; description: string; sources: unknown }>; unsupported: Array<{ key: string; count?: number | null }>; issues: Array<string>; loaded: boolean; api_version?: number | null };
 export type DeleteModuleResponse = { deleted: boolean };
 export type ReloadModulesResponse = { modules: number };
 export type ListCodeLibrariesResponse = Array<{ id: string; name: string; description: string; code: string; application_id?: string | null; application?: string | null; used_by?: Array<{ kind: string; name: string; application?: string | null }> | null }>;
@@ -141,12 +156,13 @@ export type GetFileMetaRequest = { path: string };
 export type GetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
 export type SetFileMetaRequest = { path: string; min_role?: number | null; attributes: unknown };
 export type SetFileMetaResponse = { path: string; min_role?: number | null; effective_min_role?: number | null; attributes: unknown };
-export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }> }>;
-export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string };
-export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }>; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null; building?: boolean | null; created_file_stores?: Array<string> | null };
-export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string };
-export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }> };
+export type ListApplicationsResponse = Array<{ id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }> }>;
+export type CreateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string };
+export type CreateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }>; scaffolded?: string | null; scaffold_error?: string | null; agent?: string | null; agent_error?: string | null; building?: boolean | null; created_file_stores?: Array<string> | null };
+export type UpdateApplicationRequest = { name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string };
+export type UpdateApplicationResponse = { id: string; name: string; description: string; subdomain: string; framework: { name: string; config: unknown }; extra_frameworks: Array<{ name: string; config: unknown }>; tables: Array<string>; file_stores: Array<string>; triggers: Array<string>; streams: Array<string>; apis: Array<{ provider: string; mount: string; config: unknown }>; static_dirs: Array<{ mount: string; store: string; path: string }>; uploads: Array<{ name: string; store: string; folder: string; min_role: number; max_bytes: number; mime_allow: Array<string>; hook?: string | null }>; agents: Array<{ name: string; chat: boolean; prompt: boolean; anonymous: boolean; tools: string; prompt_template?: string | null }>; csp: unknown; attributes: unknown; min_role: number; max_role: number; access_if: string; source?: { store: string; path: string } | null; builds: boolean; installs: boolean; has_views: boolean; targets: Array<{ name: string; label: string; readiness: { ready: boolean; missing: Array<string>; from_environment: Array<string>; build_host?: string | null } }> };
 export type DeleteApplicationResponse = { deleted: boolean; agent?: string | null };
+export type BuildApplicationQuery = { quick?: boolean };
 export type BuildApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type DeepCleanApplicationResponse = { built: boolean; git_repo: boolean; log: string };
 export type BuildApplicationTargetResponse = { target: string; label: string; status: string; build_host?: string | null; store: string; log_path: string; started_at: string; finished_at?: string | null; artifact?: string | null; size?: number | null; log?: string | null; error?: string | null };
@@ -222,8 +238,17 @@ export type SetUserDisabledResponse = { id: string; email: string; role: number;
 export type ForceLogoutUserResponse = { ok: boolean };
 export type BecomeUserResponse = { id: string; email: string; role: number };
 export type SetRandomPasswordResponse = { email: string; password: string };
+export type ListUserRoleGrantsResponse = { base_role: number; effective_role: number; grants: Array<{ id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean }> };
+export type GrantUserRoleRequest = { role: number; expires_in_days?: number | null; note?: string | null };
+export type GrantUserRoleResponse = { id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean };
+export type RevokeUserRoleGrantResponse = { id: string; role: number; source: string; source_ref: string; starts_at: string; expires_at?: string | null; revoked_at?: string | null; note?: string | null; in_force: boolean };
+export type GetUserCreditsResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
+export type GrantUserCreditsRequest = { amount: string; expires_in_days?: number | null; note?: string | null };
+export type GrantUserCreditsResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
+export type SetUserCreditThresholdRequest = { threshold?: string | null };
+export type SetUserCreditThresholdResponse = { balance: string; available: string; debt: string; next_expiry?: string | null; low_balance_threshold?: string | null; buckets: Array<{ id: string; amount: string; remaining: string; kind: string; source: string; key: string; expires_at?: string | null; note?: string | null; created_at: string; live: boolean }>; entries: Array<{ id: string; kind: string; amount: string; balance: string; source: string; key: string; run?: string | null; agent?: string | null; model?: string | null; input_tokens?: number | null; output_tokens?: number | null; cost?: string | null; note?: string | null; created_at: string }> };
 export type ListApiTokensResponse = Array<{ id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }>;
-export type CreateApiTokenRequest = { label: string; grants?: { allow_create?: boolean | null; allow_edit?: boolean | null; allow_drop?: boolean | null; allow_access_changes?: boolean | null; allow_triggers?: boolean | null; allow_applications?: boolean | null; allow_modules?: boolean | null; allow_all?: boolean | null } | null; expires_in_days?: number | null };
+export type CreateApiTokenRequest = { label: string; grants?: { allow_create?: boolean | null; allow_edit?: boolean | null; allow_drop?: boolean | null; allow_access_changes?: boolean | null; allow_triggers?: boolean | null; allow_applications?: boolean | null; allow_modules?: boolean | null; allow_history?: boolean | null; allow_all?: boolean | null } | null; expires_in_days?: number | null };
 export type CreateApiTokenResponse = { token: { id: string; user_id: string; label: string; grants: unknown; created_at: string; expires_at?: string | null; last_used_at?: string | null; revoked_at?: string | null; live: boolean }; secret: string };
 export type RevokeApiTokenResponse = { revoked: boolean };
 export type ListBuildHostsResponse = Array<{ id: string; name: string; targets: Array<string>; created_at: string; last_seen_at?: string | null; online: boolean; report?: unknown | null }>;
@@ -415,6 +440,7 @@ export interface ApiClient {
   login(body: LoginRequest): Promise<LoginResponse>;
   logout(): Promise<void>;
   listTables(): Promise<ListTablesResponse>;
+  listEntities(query?: ListEntitiesQuery): Promise<ListEntitiesResponse>;
   createTable(body: CreateTableRequest): Promise<CreateTableResponse>;
   createTableFromCsv(body: CreateTableFromCsvRequest): Promise<CreateTableFromCsvResponse>;
   createTableFromGeoFile(body: CreateTableFromGeoFileRequest): Promise<CreateTableFromGeoFileResponse>;
@@ -445,6 +471,14 @@ export interface ApiClient {
   updateRow(table: string, id: string, body: UpdateRowRequest): Promise<UpdateRowResponse>;
   deleteRow(table: string, id: string): Promise<void>;
   deleteAllRows(table: string): Promise<DeleteAllRowsResponse>;
+  getRowHistory(table: string, id: string): Promise<GetRowHistoryResponse>;
+  listDeletedRows(table: string, query?: ListDeletedRowsQuery): Promise<ListDeletedRowsResponse>;
+  getRowAsOf(table: string, id: string, query: GetRowAsOfQuery): Promise<GetRowAsOfResponse>;
+  listChangesets(query?: ListChangesetsQuery): Promise<ListChangesetsResponse>;
+  getChangeset(id: string): Promise<GetChangesetResponse>;
+  restoreRow(table: string, id: string): Promise<RestoreRowResponse>;
+  revertRow(table: string, id: string, body: RevertRowRequest): Promise<RevertRowResponse>;
+  undoChangeset(id: string, body: UndoChangesetRequest): Promise<UndoChangesetResponse>;
   exportTableCsv(table: string): Promise<ExportTableCsvResponse>;
   importTableCsv(table: string, body: ImportTableCsvRequest): Promise<ImportTableCsvResponse>;
   listDatabaseConnections(): Promise<ListDatabaseConnectionsResponse>;
@@ -505,7 +539,7 @@ export interface ApiClient {
   createApplication(body: CreateApplicationRequest): Promise<CreateApplicationResponse>;
   updateApplication(id: string, body: UpdateApplicationRequest): Promise<UpdateApplicationResponse>;
   deleteApplication(id: string): Promise<DeleteApplicationResponse>;
-  buildApplication(id: string): Promise<BuildApplicationResponse>;
+  buildApplication(id: string, query?: BuildApplicationQuery): Promise<BuildApplicationResponse>;
   deepCleanApplication(id: string): Promise<DeepCleanApplicationResponse>;
   buildApplicationTarget(id: string, target: string): Promise<BuildApplicationTargetResponse>;
   runApplicationTargetOperation(id: string, target: string, operation: string, body: RunApplicationTargetOperationRequest): Promise<RunApplicationTargetOperationResponse>;
@@ -557,6 +591,12 @@ export interface ApiClient {
   forceLogoutUser(id: string): Promise<ForceLogoutUserResponse>;
   becomeUser(id: string): Promise<BecomeUserResponse>;
   setRandomPassword(id: string): Promise<SetRandomPasswordResponse>;
+  listUserRoleGrants(id: string): Promise<ListUserRoleGrantsResponse>;
+  grantUserRole(id: string, body: GrantUserRoleRequest): Promise<GrantUserRoleResponse>;
+  revokeUserRoleGrant(id: string, grant: string): Promise<RevokeUserRoleGrantResponse>;
+  getUserCredits(id: string): Promise<GetUserCreditsResponse>;
+  grantUserCredits(id: string, body: GrantUserCreditsRequest): Promise<GrantUserCreditsResponse>;
+  setUserCreditThreshold(id: string, body: SetUserCreditThresholdRequest): Promise<SetUserCreditThresholdResponse>;
   listApiTokens(): Promise<ListApiTokensResponse>;
   createApiToken(body: CreateApiTokenRequest): Promise<CreateApiTokenResponse>;
   revokeApiToken(id: string): Promise<RevokeApiTokenResponse>;
@@ -729,6 +769,17 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("listTables", res);
       return (await res.json()) as ListTablesResponse;
+    },
+    async listEntities(query) {
+      const search = new URLSearchParams();
+      if (query?.deep !== undefined && query?.deep !== null) search.append("deep", String(query?.deep));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/entities${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listEntities", res);
+      return (await res.json()) as ListEntitiesResponse;
     },
     async createTable(body) {
       const res = await doFetch(`${baseUrl}/api/tables`, {
@@ -991,6 +1042,87 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("deleteAllRows", res);
       return (await res.json()) as DeleteAllRowsResponse;
+    },
+    async getRowHistory(table, id) {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}/history`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getRowHistory", res);
+      return (await res.json()) as GetRowHistoryResponse;
+    },
+    async listDeletedRows(table, query) {
+      const search = new URLSearchParams();
+      if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
+      if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/deleted${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listDeletedRows", res);
+      return (await res.json()) as ListDeletedRowsResponse;
+    },
+    async getRowAsOf(table, id, query) {
+      const search = new URLSearchParams();
+      search.append("as_of", String(query.as_of));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getRowAsOf", res);
+      return (await res.json()) as GetRowAsOfResponse;
+    },
+    async listChangesets(query) {
+      const search = new URLSearchParams();
+      if (query?.user !== undefined && query?.user !== null) search.append("user", String(query?.user));
+      if (query?.table !== undefined && query?.table !== null) search.append("table", String(query?.table));
+      if (query?.source !== undefined && query?.source !== null) search.append("source", String(query?.source));
+      if (query?.since !== undefined && query?.since !== null) search.append("since", String(query?.since));
+      if (query?.limit !== undefined && query?.limit !== null) search.append("limit", String(query?.limit));
+      if (query?.offset !== undefined && query?.offset !== null) search.append("offset", String(query?.offset));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/changesets${qs ? `?${qs}` : ""}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listChangesets", res);
+      return (await res.json()) as ListChangesetsResponse;
+    },
+    async getChangeset(id) {
+      const res = await doFetch(`${baseUrl}/api/changesets/${encodeURIComponent(id)}`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getChangeset", res);
+      return (await res.json()) as GetChangesetResponse;
+    },
+    async restoreRow(table, id) {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/deleted/${encodeURIComponent(id)}/restore`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("restoreRow", res);
+      return (await res.json()) as RestoreRowResponse;
+    },
+    async revertRow(table, id, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(id)}/revert`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("revertRow", res);
+      return (await res.json()) as RevertRowResponse;
+    },
+    async undoChangeset(id, body) {
+      const res = await doFetch(`${baseUrl}/api/changesets/${encodeURIComponent(id)}/undo`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("undoChangeset", res);
+      return (await res.json()) as UndoChangesetResponse;
     },
     async exportTableCsv(table) {
       const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/csv`, {
@@ -1506,8 +1638,11 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       if (!res.ok) throw await clientError("deleteApplication", res);
       return (await res.json()) as DeleteApplicationResponse;
     },
-    async buildApplication(id) {
-      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build`, {
+    async buildApplication(id, query) {
+      const search = new URLSearchParams();
+      if (query?.quick !== undefined && query?.quick !== null) search.append("quick", String(query?.quick));
+      const qs = search.toString();
+      const res = await doFetch(`${baseUrl}/api/applications/${encodeURIComponent(id)}/build${qs ? `?${qs}` : ""}`, {
         method: "POST",
         headers: requestHeaders("POST", false),
       });
@@ -1946,6 +2081,57 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("setRandomPassword", res);
       return (await res.json()) as SetRandomPasswordResponse;
+    },
+    async listUserRoleGrants(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("listUserRoleGrants", res);
+      return (await res.json()) as ListUserRoleGrantsResponse;
+    },
+    async grantUserRole(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("grantUserRole", res);
+      return (await res.json()) as GrantUserRoleResponse;
+    },
+    async revokeUserRoleGrant(id, grant) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/role-grants/${encodeURIComponent(grant)}/revoke`, {
+        method: "POST",
+        headers: requestHeaders("POST", false),
+      });
+      if (!res.ok) throw await clientError("revokeUserRoleGrant", res);
+      return (await res.json()) as RevokeUserRoleGrantResponse;
+    },
+    async getUserCredits(id) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits`, {
+        method: "GET",
+        headers: requestHeaders("GET", false),
+      });
+      if (!res.ok) throw await clientError("getUserCredits", res);
+      return (await res.json()) as GetUserCreditsResponse;
+    },
+    async grantUserCredits(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("grantUserCredits", res);
+      return (await res.json()) as GrantUserCreditsResponse;
+    },
+    async setUserCreditThreshold(id, body) {
+      const res = await doFetch(`${baseUrl}/api/users/${encodeURIComponent(id)}/credits/threshold`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("setUserCreditThreshold", res);
+      return (await res.json()) as SetUserCreditThresholdResponse;
     },
     async listApiTokens() {
       const res = await doFetch(`${baseUrl}/api/api-tokens`, {

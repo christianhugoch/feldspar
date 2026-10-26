@@ -43,8 +43,9 @@ sc-email.workspace = true
 # reads back. This crate is layer 9 and `sc-model` is layer 6, so the
 # dependency runs the way every other one here does.
 sc-model.workspace = true
-# `fit_model` waits for the fit it started by reading its row back on a timer.
-tokio = { workspace = true, features = ["time"] }
+# `fit_model` waits for the fit it started by reading its row back on a timer;
+# `fetch` resolves a templated host itself, to keep to public addresses.
+tokio = { workspace = true, features = ["time", "net"] }
 # `send_email`'s attachments: the store the row's file path points into is read
 # through `FileStore`, and `mime_for_path` types the part from the file's own
 # extension — the same inference the File field's `mime_allow` check uses, so a
@@ -57,6 +58,9 @@ reqwest.workspace = true
 # A response that is not text, and a request body that is not text, cross the
 # code seam base64'd: the seam is JSON, and JSON has no bytes.
 base64.workspace = true
+# A role grant's period and its user (TODO-payments P3.4, `grant_role`).
+chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 # Every action is pinned against a real database (principle 4) and, where its

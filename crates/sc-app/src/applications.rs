@@ -79,6 +79,13 @@ pub const COL_STATIC_DIRS: &str = "static_dirs";
 /// [`bootstrap`] adds it to tables that already have rows. `NULL` reads back as
 /// "no upload slots".
 pub const COL_UPLOADS: &str = "uploads";
+/// The exposed agents (JSON array of `{name, chat, prompt, anonymous, …}`,
+/// §11.7).
+///
+/// Nullable for [`COL_TRIGGERS`]' reason: it arrived after the table did, so
+/// [`bootstrap`] adds it to tables that already have rows. `NULL` reads back as
+/// "exposes no agents".
+pub const COL_AGENTS: &str = "agents";
 /// The content-security policy (JSON object of directive → source list).
 pub const COL_CSP: &str = "csp";
 /// The least privileged role that may use the application (an integer,
@@ -126,12 +133,17 @@ fn applications_fields() -> Vec<DataField> {
         DataField::plain(COL_STATIC_DIRS, json()).required(),
         // Not `required`, for the reason above it: see [`COL_UPLOADS`].
         DataField::plain(COL_UPLOADS, json()),
+        // Not `required`, for the reason above it: see [`COL_AGENTS`].
+        DataField::plain(COL_AGENTS, json()),
         DataField::plain(COL_CSP, json()).required(),
         DataField::plain(COL_ATTRIBUTES, json()).required(),
         // Not `required`, for the reason above it: see [`COL_MIN_ROLE`].
         DataField::plain(COL_MIN_ROLE, int()),
         DataField::plain(COL_MAX_ROLE, int()),
         DataField::plain(COL_ACCESS_IF, text()),
+        // When it was last saved (`sc_catalog::edited`): bookkeeping for the
+        // entities list, written by every save and read by nothing else.
+        sc_catalog::updated_at_field(),
     ]
 }
 

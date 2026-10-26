@@ -10,9 +10,11 @@
 //! selection ([`selection`], A5.10) and toolbox ([`tools`], A5.12); a
 //! dashboard's stat cards ([`card`], A6.2) and cross-filtering
 //! ([`crossfilter`], A6.3–A6.6); the Analytics UI as an application framework
-//! ([`app`], A9); and the demo data ([`demo`]). Datasets are not here: they are `sc-dataset`'s, because models
+//! ([`app`], A9); the A/B tests workspace over the Astro module's tables ([`ab`],
+//! TODO-astro W3.6); and the demo data ([`demo`]). Datasets are not here: they are `sc-dataset`'s, because models
 //! read them too.
 
+pub mod ab;
 pub mod app;
 pub mod card;
 pub mod classify;

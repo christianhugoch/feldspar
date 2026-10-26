@@ -53,6 +53,18 @@ pub struct AppRequest {
     /// The headers a framework may read, lower-cased — `referer`,
     /// `x-requested-with`, `accept`. Not every header: a cookie is the router's.
     pub headers: BTreeMap<String, String>,
+    /// The request's cookies **the application owns** — every cookie but the
+    /// server's own (`sc_*`: the session, the CSRF token, the guest session),
+    /// which stay the router's. What `Astro.cookies.get` reads.
+    pub cookies: BTreeMap<String, String>,
+    /// This browser's **anonymous visitor id** (TODO-astro W3.1): the server's
+    /// `sc_visitor` cookie, or one the router minted for this request when it
+    /// carried none. What an A/B test assigns a variant by. It is the router's
+    /// cookie, so it is not among [`cookies`](Self::cookies); a framework that
+    /// read it says so with [`AppResponse::keeps_visitor`], and only then does
+    /// the router set a newly minted one. Empty when there is none (a build's
+    /// prerender, a test).
+    pub visitor: String,
     /// Who is looking, from the application's session; `None` for nobody.
     pub user: Option<User>,
     /// The application's own origin, `https://books.example.com` — v1's
@@ -80,6 +92,10 @@ pub struct AppRequest {
     /// framework that serves data or pages must refuse them everything else.
     /// A framework that serves only a bundle has nothing to refuse.
     pub admitted: bool,
+    /// The client's address, as the router resolved it (trusted proxies
+    /// applied) — what a framework's own sign-in form throttles guesses by, as
+    /// the admin and REST logins do. `None` when unknown (a test, a prerender).
+    pub client_ip: Option<std::net::IpAddr>,
 }
 
 impl AppRequest {
@@ -96,11 +112,14 @@ impl AppRequest {
             query: BTreeMap::new(),
             body: RequestBody::Empty,
             headers: BTreeMap::new(),
+            cookies: BTreeMap::new(),
+            visitor: String::new(),
             user: None,
             base_url: String::new(),
             csrf_token: String::new(),
             locale: Locale::source(),
             admitted: true,
+            client_ip: None,
         }
     }
 
@@ -152,6 +171,10 @@ pub struct AppResponse {
     /// §2.2): the router answers it through its one file response builder —
     /// streamed, with Range and the file's name. The access check is made.
     pub file: Option<Box<sc_files::ServeFile>>,
+    /// The answer depends on [`AppRequest::visitor`] (an A/B test chose a
+    /// variant by it, TODO-astro W3.1), so the router must make the id last:
+    /// it sets the visitor cookie when it minted the id for this request.
+    pub keeps_visitor: bool,
 }
 
 impl AppResponse {
@@ -174,6 +197,7 @@ impl AppResponse {
             headers: Vec::new(),
             session: SessionAction::Keep,
             file: None,
+            keeps_visitor: false,
         }
     }
 
@@ -241,6 +265,11 @@ pub struct BuildSpec {
     /// absent from the source directory. `None` for a framework that does not
     /// manage dependencies.
     pub install: Option<InstallSpec>,
+    /// The code body the build emits **within** the output directory, for a
+    /// server-rendered framework ([`crate::server_render`]): taken out of the
+    /// bundle when it is mounted, never served, and run per request. `None` for
+    /// a bundle that is only static files.
+    pub server_entry: Option<String>,
 }
 
 /// How to install an app's dependencies before building it (TODO §2.3).
@@ -732,6 +761,26 @@ impl AssetBundle {
     }
 
     /// Look up an asset by (normalised) path.
+    /// Every asset's key, in no particular order.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.assets.keys().map(String::as_str)
+    }
+
+    /// Drop every asset under directory `dir` (and an asset named `dir`) —
+    /// what a server-rendered framework does to its server entry, which is the
+    /// site's source and never a file to serve.
+    pub fn remove_prefix(&mut self, dir: &str) {
+        let dir = normalize_key(dir);
+        let under = format!("{dir}/");
+        self.assets
+            .retain(|key, _| key != &dir && !key.starts_with(&under));
+    }
+
+    /// Serve no SPA fallback: an unknown path is a 404.
+    pub fn clear_fallback(&mut self) {
+        self.fallback = None;
+    }
+
     pub fn get(&self, path: &str) -> Option<&Asset> {
         self.assets.get(&normalize_key(path))
     }
@@ -770,6 +819,12 @@ fn load_dir(root: &Path, current: &Path, bundle: &mut AssetBundle) -> Result<()>
     Ok(())
 }
 
+/// An asset key for a request path — [`normalize_key`], for a framework in
+/// this crate that looks assets up itself.
+pub(crate) fn normalize_asset_key(path: &str) -> String {
+    normalize_key(path)
+}
+
 /// Normalise an asset key: strip leading slashes, use `/` separators.
 fn normalize_key(path: &str) -> String {
     let mut normalized = PathBuf::new();
@@ -797,12 +852,18 @@ fn content_type_for(path: &str) -> &'static str {
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "webmanifest" => "application/manifest+json",
         "map" => "application/json; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
         "ico" => "image/x-icon",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
@@ -841,6 +902,12 @@ impl CodeFramework {
     pub fn with_build(mut self, build: BuildSpec) -> CodeFramework {
         self.build = Some(build);
         self
+    }
+
+    /// The asset stored under exactly `key`, with no `index.html` rule and no
+    /// fallback.
+    pub fn asset(&self, key: &str) -> Option<&Asset> {
+        self.bundle.get(key)
     }
 
     /// The asset the framework would serve for `path`, applying the `/` →
@@ -1228,6 +1295,7 @@ mod tests {
             source_dir: "web".to_owned(),
             output_dir: "web/dist".to_owned(),
             install: None,
+            server_entry: None,
         };
         let fw = CodeFramework::new("code", sample_bundle()).with_build(spec.clone());
         assert_eq!(fw.name(), "code");

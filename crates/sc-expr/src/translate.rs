@@ -64,6 +64,12 @@ use crate::subquery::{AggFunc, AggregateSpec, correlated_aggregate, correlation}
 /// construction.
 pub const USER_GUC: &str = "sc.user";
 
+/// The GUC that carries the caller's **guest session** public id in
+/// [`UserEnv::Guc`] mode (TODO-payments P1.5): `session.id` in a policy reads
+/// it, as plain text. Unset or `''` reads as `NULL`, so a policy over it fails
+/// closed for everybody without one.
+pub const SESSION_GUC: &str = "sc.session";
+
 /// The access operation a formula is being translated for. Chooses the value
 /// of each operation flag (`_write` is true for everything but [`Read`]).
 ///
@@ -175,6 +181,16 @@ pub type AmbientValues = BTreeMap<Ambient, Option<BTreeMap<String, Value>>>;
 /// triggering row.
 static EMPTY_AMBIENT: AmbientValues = BTreeMap::new();
 
+/// The ambient map holding only `session`, for an ownership translation or a
+/// reified check (TODO-payments P1.5): `{ id }` for a caller with a guest
+/// session, null for anybody else.
+pub fn session_ambient(session: Option<&str>) -> AmbientValues {
+    BTreeMap::from([(
+        Ambient::Session,
+        session.map(|id| BTreeMap::from([("id".to_owned(), Value::Text(id.to_owned()))])),
+    )])
+}
+
 /// Everything a translation resolves against beyond the schema: the caller, the
 /// ambient objects, and the calc fields to inline.
 ///
@@ -215,7 +231,7 @@ impl<'a> Env<'a> {
     /// exactly when the caller put them in the ambient map (even with a null
     /// value — `old` on an insert is in scope *and* null).
     fn in_scope(&self, ambient: Ambient) -> bool {
-        ambient == Ambient::User || self.ambient.contains_key(&ambient)
+        Ambient::CALLER.contains(&ambient) || self.ambient.contains_key(&ambient)
     }
 
     /// The inlined values of an ambient object — `user`'s from [`UserEnv`],
@@ -636,7 +652,13 @@ impl<'a> Translator<'a> {
     /// Ordered comparisons translate operand-for-operand and keep SQL's null
     /// semantics: a null operand yields SQL `NULL`, which grants nothing.
     fn comparison(&mut self, op: QBinOp, l: &Ast, r: &Ast) -> Result<QExpr, TranslateError> {
-        Ok(QExpr::binary(op, self.value(l)?, self.value(r)?))
+        let (l, r) = (self.value(l)?, self.value(r)?);
+        if let (QExpr::Lit(a), QExpr::Lit(b)) = (&l, &r)
+            && let Some(verdict) = fold_comparison(op, a, b)
+        {
+            return Ok(QExpr::lit(verdict));
+        }
+        Ok(QExpr::binary(op, l, r))
     }
 
     // ---- values ------------------------------------------------------------
@@ -687,6 +709,10 @@ impl<'a> Translator<'a> {
                 UnaryOp::TypeOf => untranslatable("`typeof`"),
             },
             Ast::Binary { op, l, r } => match op {
+                // JavaScript's `+` joins strings when either side is one. A string
+                // literal on either side is the case a formula can see for certain
+                // (`"Invoice " + number`); without one, `+` is addition.
+                BinaryOp::Add if joins_strings(l) || joins_strings(r) => self.concatenation(l, r),
                 BinaryOp::Add => self.arithmetic(QBinOp::Add, l, r),
                 BinaryOp::Sub => self.arithmetic(QBinOp::Sub, l, r),
                 BinaryOp::Mul => self.arithmetic(QBinOp::Mul, l, r),
@@ -785,6 +811,27 @@ impl<'a> Translator<'a> {
 
     fn arithmetic(&mut self, op: QBinOp, l: &Ast, r: &Ast) -> Result<QExpr, TranslateError> {
         Ok(QExpr::binary(op, self.value(l)?, self.value(r)?))
+    }
+
+    /// `l + r` where one side is a string: SQL's `||` over each side as text. A
+    /// null side is the text `null`, as JavaScript writes it, where SQL's `||`
+    /// would make the whole value null.
+    fn concatenation(&mut self, l: &Ast, r: &Ast) -> Result<QExpr, TranslateError> {
+        let mut text = |ast: &Ast| -> Result<QExpr, TranslateError> {
+            let value = QExpr::Cast {
+                expr: Box::new(self.value(ast)?),
+                type_name: "text".into(),
+            };
+            Ok(match ast {
+                Ast::Str(_) => value,
+                _ => QExpr::Func {
+                    name: "COALESCE".into(),
+                    args: vec![value, QExpr::lit("null")],
+                },
+            })
+        };
+        let (l, r) = (text(l)?, text(r)?);
+        Ok(QExpr::binary(QBinOp::Concat, l, r))
     }
 
     // ---- Ⱶ-join paths ------------------------------------------------------
@@ -1185,9 +1232,18 @@ impl<'a> Translator<'a> {
         }
     }
 
+    /// Whether this object is `session` rendering as a read of [`SESSION_GUC`]:
+    /// under [`UserEnv::Guc`], where an RLS policy outlives every request.
+    fn session_guc(&self, ambient: Ambient) -> bool {
+        ambient == Ambient::Session && matches!(self.env.user, UserEnv::Guc { .. })
+    }
+
     /// Bare `user`/`row`/`old` as a condition: object-or-null, so truthy ⇔
     /// present (for `user`, ⇔ logged in).
     fn ambient_truthy(&self, ambient: Ambient) -> QExpr {
+        if self.session_guc(ambient) {
+            return QExpr::unary(QUnOp::IsNotNull, session_guc_raw());
+        }
         match self.guc_types(ambient) {
             Some(_) => QExpr::unary(QUnOp::IsNotNull, guc_raw()),
             None => QExpr::lit(self.env.values(ambient).is_some()),
@@ -1196,6 +1252,9 @@ impl<'a> Translator<'a> {
 
     /// `user === null` (and the same for `row`/`old`).
     fn ambient_is_null(&self, ambient: Ambient) -> QExpr {
+        if self.session_guc(ambient) {
+            return QExpr::unary(QUnOp::IsNull, session_guc_raw());
+        }
         match self.guc_types(ambient) {
             Some(_) => QExpr::unary(QUnOp::IsNull, guc_raw()),
             None => QExpr::lit(self.env.values(ambient).is_none()),
@@ -1206,6 +1265,13 @@ impl<'a> Translator<'a> {
     /// values (null when the object is null or has no such field), or the cast
     /// JSON extraction from the GUC for an RLS policy's `user`.
     fn ambient_field(&self, ambient: Ambient, field: &str) -> QExpr {
+        if self.session_guc(ambient) {
+            // `session` has one field, its id, which is the whole GUC.
+            return match field {
+                "id" => session_guc_raw(),
+                _ => QExpr::Lit(Value::Null),
+            };
+        }
         let Some(field_types) = self.guc_types(ambient) else {
             let value = self
                 .env
@@ -1238,6 +1304,14 @@ impl<'a> Translator<'a> {
     /// the env declares boolean (null-safe `IS NOT DISTINCT FROM TRUE`, so a
     /// missing user or field is false, as JS truthiness of `undefined` is).
     fn ambient_field_truthy(&self, ambient: Ambient, field: &str) -> Result<QExpr, TranslateError> {
+        if self.session_guc(ambient) {
+            // An id is truthy exactly when there is one: it is never `''`,
+            // which the GUC read folds to null anyway.
+            return Ok(QExpr::unary(
+                QUnOp::IsNotNull,
+                self.ambient_field(ambient, field),
+            ));
+        }
         let Some(field_types) = self.guc_types(ambient) else {
             let truthy = self
                 .env
@@ -1282,6 +1356,22 @@ fn guc_raw() -> QExpr {
     }
 }
 
+/// `NULLIF(current_setting('sc.session', true), '')` — the caller's guest
+/// session public id, or `NULL` when there is none ([`guc_raw`]'s `NULLIF`, for
+/// its reason).
+fn session_guc_raw() -> QExpr {
+    QExpr::Func {
+        name: "NULLIF".into(),
+        args: vec![
+            QExpr::Func {
+                name: "current_setting".into(),
+                args: vec![QExpr::lit(SESSION_GUC), QExpr::lit(true)],
+            },
+            QExpr::lit(""),
+        ],
+    }
+}
+
 /// Accumulate a child predicate onto whatever was already there.
 fn and_opt(acc: Option<QExpr>, p: QExpr) -> Option<QExpr> {
     Some(match acc {
@@ -1310,6 +1400,34 @@ fn not_pred(p: QExpr) -> QExpr {
 /// A JS number literal as a SQL value: integral f64s (the common case — row
 /// ids, role numbers) become `Int` so they compare cleanly with integer
 /// columns; everything else stays `Float`.
+/// An ordered comparison of two literals, decided here — `user.role <= 60`
+/// under [`UserEnv::Inline`], where `user.role` is already a number. Sent to
+/// the database it would be `$1 <= $2`, two parameters with nothing to type
+/// them by, which Postgres reads as text and then refuses to bind an integer
+/// to (TODO-payments P3.1).
+///
+/// Only two non-null values of one kind (numbers with numbers, text with text):
+/// a null compares as SQL's unknown, which is the database's to decide, and a
+/// mixed pair is JavaScript coercion this translation does not attempt.
+fn fold_comparison(op: QBinOp, a: &Value, b: &Value) -> Option<bool> {
+    use std::cmp::Ordering;
+    let ordering = match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y)?,
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64))?,
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y)?,
+        (Value::Text(x), Value::Text(y)) => x.cmp(y),
+        _ => return None,
+    };
+    Some(match op {
+        QBinOp::Lt => ordering == Ordering::Less,
+        QBinOp::Le => ordering != Ordering::Greater,
+        QBinOp::Gt => ordering == Ordering::Greater,
+        QBinOp::Ge => ordering != Ordering::Less,
+        _ => return None,
+    })
+}
+
 fn num_value(n: f64) -> Value {
     const MAX_EXACT_INT: f64 = 9_007_199_254_740_992.0; // 2^53
     if n.fract() == 0.0 && n.abs() <= MAX_EXACT_INT {
@@ -1344,6 +1462,19 @@ fn js_truthy(v: &Value) -> bool {
         | Value::Date(_)
         | Value::Time(_)
         | Value::Timestamp(_) => true,
+    }
+}
+
+/// Whether `+` over `ast` joins strings: a string literal, or a `+` that does.
+fn joins_strings(ast: &Ast) -> bool {
+    match ast {
+        Ast::Str(_) => true,
+        Ast::Binary {
+            op: BinaryOp::Add,
+            l,
+            r,
+        } => joins_strings(l) || joins_strings(r),
+        _ => false,
     }
 }
 
@@ -1478,6 +1609,54 @@ mod tests {
             .unwrap_or_else(|| panic!("unexpected statement shape: {sql}"))
             .to_string();
         (clause, binds)
+    }
+
+    /// TODO-payments P1.5: `session` is always in scope. Inline, its id is a
+    /// literal (null without a guest session, so the rule grants nothing); in
+    /// an RLS policy, it is the `sc.session` GUC read.
+    #[test]
+    fn session_inlines_its_id_or_reads_the_session_guc() {
+        let anon = UserEnv::Inline(None);
+        let rule = "user ? owner === user.email : owner === session.id";
+        let (sql, binds) = where_sql_ambient(rule, &anon, &session_ambient(Some("gs_1")));
+        assert!(
+            sql.contains("\"books\".\"owner\" IS NOT DISTINCT FROM $"),
+            "{sql}"
+        );
+        assert!(binds.contains(&Value::Text("gs_1".into())), "{binds:?}");
+        // No guest session: the id is null, and a non-null owner never matches.
+        let (_, binds) = where_sql_ambient(rule, &anon, &session_ambient(None));
+        assert!(
+            !binds
+                .iter()
+                .any(|b| matches!(b, Value::Text(t) if t.starts_with("gs_")))
+        );
+        // Not passed at all is the same as null: `session` is never unbound.
+        let (sql, _) = where_sql_ambient("session === null", &anon, &AmbientValues::new());
+        assert!(sql.contains("TRUE") || sql.contains("$1"), "{sql}");
+
+        let policy = guc(&[("email", "text")]);
+        let (sql, _) = where_sql_ambient("owner === session.id", &policy, &AmbientValues::new());
+        assert!(sql.contains("current_setting"), "{sql}");
+        assert!(sql.contains("NULLIF"), "{sql}");
+        let (_, binds) = where_sql_ambient("owner === session.id", &policy, &AmbientValues::new());
+        assert!(
+            binds.contains(&Value::Text(SESSION_GUC.into())),
+            "{binds:?}"
+        );
+        let (sql, _) = where_sql_ambient("session !== null", &policy, &AmbientValues::new());
+        assert!(sql.contains("IS NOT NULL") || sql.contains("NOT"), "{sql}");
+    }
+
+    #[test]
+    fn session_has_one_field() {
+        let formula = Formula::parse("owner === session.token").unwrap();
+        let err = formula.validate(&shape(), "books").unwrap_err().to_string();
+        assert!(err.contains("token"), "{err}");
+        Formula::parse("owner === session.id")
+            .unwrap()
+            .validate(&shape(), "books")
+            .unwrap();
     }
 
     #[test]
@@ -1615,6 +1794,29 @@ mod tests {
         let (sql, binds) = where_sql("owner === user.id", Operation::Read, &env);
         assert_eq!(sql, "(\"books\".\"owner\" IS NOT DISTINCT FROM $1)");
         assert_eq!(binds, vec![Value::Text("u1".into())]);
+    }
+
+    #[test]
+    fn an_inline_users_role_compared_with_a_number_is_decided_here() {
+        // `$1 <= $2` would leave Postgres nothing to type either parameter by.
+        let env = inline_user(&[("role", Value::Int(60))]);
+        let (sql, binds) = where_sql("user.role <= 60", Operation::Read, &env);
+        assert!(
+            binds.iter().all(|b| *b == Value::Bool(true)),
+            "{sql} {binds:?}"
+        );
+        let (sql, binds) = where_sql("user.role < 60", Operation::Read, &env);
+        assert!(
+            binds.iter().all(|b| *b == Value::Bool(false)),
+            "{sql} {binds:?}"
+        );
+        // A column on either side is still the database's to compare.
+        let (sql, _) = where_sql("pages > user.role", Operation::Read, &env);
+        assert!(sql.contains("\"books\".\"pages\" >"), "{sql}");
+        // And a null user field is SQL's unknown, not a verdict made here.
+        let env = inline_user(&[("role", Value::Null)]);
+        let (sql, _) = where_sql("user.role <= 60", Operation::Read, &env);
+        assert!(sql.contains("<="), "{sql}");
     }
 
     #[test]
@@ -1865,6 +2067,31 @@ mod tests {
         let (sql, binds) = where_sql("pages % 2 === 0", Operation::Read, &env);
         assert_eq!(sql, "((\"books\".\"pages\" % $1) IS NOT DISTINCT FROM $2)");
         assert_eq!(binds, vec![Value::Int(2), Value::Int(0)]);
+    }
+
+    #[test]
+    fn plus_with_a_string_on_either_side_joins_text() {
+        let env = UserEnv::Inline(None);
+        let (sql, binds) = where_sql("\"No. \" + pages === \"No. 3\"", Operation::Read, &env);
+        assert_eq!(
+            sql,
+            "((CAST($1 AS text) || COALESCE(CAST(\"books\".\"pages\" AS text), $2)) \
+             IS NOT DISTINCT FROM $3)"
+        );
+        assert_eq!(
+            binds,
+            vec![
+                Value::Text("No. ".into()),
+                Value::Text("null".into()),
+                Value::Text("No. 3".into())
+            ]
+        );
+        // A string further along still makes the whole chain text, as in JavaScript.
+        let (sql, _) = where_sql("pages + \"\" + title === \"x\"", Operation::Read, &env);
+        assert!(sql.matches("||").count() == 2, "{sql}");
+        // With no string in sight, `+` is addition.
+        let (sql, _) = where_sql("pages + 1 === 4", Operation::Read, &env);
+        assert!(sql.contains("(\"books\".\"pages\" + $1)"), "{sql}");
     }
 
     #[test]

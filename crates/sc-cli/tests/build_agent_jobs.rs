@@ -53,6 +53,7 @@ fn framework() -> FrameworkDecl {
             install: None,
             runtime: None,
             client_file: "client.ts".to_owned(),
+            server: None,
         },
         csp: None,
         builder_prompt: None,

@@ -146,6 +146,7 @@ pub fn react_build_spec(project: &str) -> BuildSpec {
             args: REACT_INSTALL_ARGS.iter().map(|a| (*a).to_owned()).collect(),
             marker: REACT_INSTALL_MARKER.to_owned(),
         }),
+        server_entry: None,
     }
 }
 

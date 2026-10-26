@@ -1,0 +1,126 @@
+//! LLM credits from JavaScript modules (TODO-payments P6.4, design C4): a
+//! fixture module's action grants credits through `credits`, keyed so that a
+//! replayed grant does nothing, reads the balance, sets the low-balance
+//! threshold, rolls an allowance over into the next (P7.1), and has no way to
+//! spend them. The ledger is the module's to declare (`core_tables`): a new
+//! installation has none until it loads.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+#[cfg(feature = "deno-host")]
+mod deno {
+    use std::sync::Arc;
+
+    use rust_decimal::Decimal;
+    use sc_action::{ActionContext, ActionRegistry, Event, EventKind};
+    use sc_auth::{Role, create_user, credit_balance, list_credit_buckets, save_role};
+    use sc_catalog::{Catalog, bootstrap_field_meta, bootstrap_table_meta};
+    use sc_db::DatabaseDriver;
+    use sc_db_postgres::PgDriver;
+    use sc_module::{Module, ModulePermissions, ModuleSet, ModuleSource, save_module};
+    use sc_test_harness::TestDb;
+    use sc_types::Attrs;
+    use serde_json::json;
+
+    use crate::common::{have_npm, installed, surfaces};
+
+    #[tokio::test]
+    async fn a_module_grants_credits_once_per_key_and_cannot_spend_them() {
+        skip_without!(have_npm(), "npm is not on the PATH");
+        let db = TestDb::new().await.unwrap();
+        let driver = Arc::new(PgDriver::from_pool(db.pool().clone()));
+        let cat = Catalog::init(driver as Arc<dyn DatabaseDriver>)
+            .await
+            .unwrap();
+        sc_auth::bootstrap(&cat).await.unwrap();
+        bootstrap_table_meta(&cat).await.unwrap();
+        bootstrap_field_meta(&cat).await.unwrap();
+        sc_module::bootstrap_modules(&cat).await.unwrap();
+        save_role(&cat, &Role::new(80, "Member")).await.unwrap();
+        let user = create_user(&cat, "c@example.com", "pw", 80).await.unwrap();
+
+        let (installer, host, names) = installed("module-credits", &["credits-module"]).await;
+        let name = names[0].clone();
+        // No permission of its own: granting credits needs none.
+        let mut module = Module::new(&name, ModuleSource::Local, &name);
+        module.permissions = ModulePermissions::closed();
+        save_module(&cat, &module).await.unwrap();
+        let mut registry = ActionRegistry::new();
+        // A new installation has no ledger; the module that declares it does.
+        assert!(cat.get(sc_auth::CREDIT_BUCKETS_TABLE).unwrap().is_none());
+        let set = ModuleSet::load(&cat, &host, &installer, &surfaces(), &mut registry)
+            .await
+            .unwrap();
+        let issues: Vec<String> = set.issues().iter().map(|i| i.problem.clone()).collect();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].contains("`invoices`, which is not one"),
+            "{issues:?}"
+        );
+        for table in [
+            sc_auth::CREDIT_BUCKETS_TABLE,
+            sc_auth::CREDIT_ENTRIES_TABLE,
+            sc_auth::CREDIT_ACCOUNTS_TABLE,
+        ] {
+            assert!(cat.get(table).unwrap().is_some(), "{table}: made on load");
+        }
+        assert!(
+            cat.get(sc_auth::ROLE_GRANTS_TABLE).unwrap().is_none(),
+            "only what it named"
+        );
+
+        let event = Event::new(EventKind::None).payload(json!({ "user": user.id.to_string() }));
+        let config = Attrs::new();
+        let action = registry.require("grant_credits").unwrap();
+        let mut ctx = ActionContext::new(&cat, &event, &config, "grant credits");
+        let result = action.run(&mut ctx).await.unwrap();
+
+        // Numbers, as JavaScript reads them.
+        let num = |v: &serde_json::Value| v.as_f64().unwrap_or(f64::NAN);
+        assert_eq!(num(&result["granted"]["ok"]["amount"]), 100.0, "{result}");
+        assert_eq!(result["granted"]["ok"]["replayed"], json!(false));
+        assert_eq!(
+            result["replayed"]["ok"]["replayed"],
+            json!(true),
+            "{result}"
+        );
+        assert_eq!(
+            result["replayed"]["ok"]["bucket"],
+            result["granted"]["ok"]["bucket"]
+        );
+        assert_eq!(num(&result["topUp"]["ok"]["balance"]), 102.5, "{result}");
+        let keyless = result["keyless"]["refused"].as_str().unwrap();
+        assert!(keyless.contains("needs `key`"), "{keyless}");
+        assert_eq!(
+            num(&result["threshold"]["ok"]["low_balance_threshold"]),
+            10.0
+        );
+        assert_eq!(num(&result["balance"]["balance"]), 102.5);
+        // 50 of the first allowance's 100 carried into the second.
+        assert_eq!(num(&result["renewed"]["ok"]["carried"]), 50.0, "{result}");
+        assert_eq!(num(&result["renewed"]["ok"]["amount"]), 150.0, "{result}");
+        assert_eq!(num(&result["renewed"]["ok"]["balance"]), 152.5, "{result}");
+        assert_eq!(
+            result["debit"],
+            json!("undefined"),
+            "no way to spend credits"
+        );
+
+        // The buckets are the module's, under its own name.
+        let balance = credit_balance(&cat, user.id).await.unwrap();
+        assert_eq!(balance.balance, Decimal::new(1525, 1));
+        assert_eq!(balance.low_balance_threshold, Some(Decimal::from(10)));
+        let buckets = list_credit_buckets(&cat, user.id).await.unwrap();
+        assert_eq!(buckets.len(), 3);
+        let first = buckets.iter().find(|b| b.key == "invoice:in_1").unwrap();
+        assert!(first.remaining.is_zero(), "rolled over, and emptied");
+        assert!(buckets.iter().all(|b| b.source == name), "{buckets:?}");
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b.kind == "allowance" && b.expires_at.is_some())
+        );
+
+        host.shutdown().await;
+    }
+}

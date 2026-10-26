@@ -47,12 +47,20 @@ mod analytics_spa_typecheck;
 mod api_token_admin_api;
 #[path = "app_access.rs"]
 mod app_access;
+#[path = "app_agents.rs"]
+mod app_agents;
 #[path = "app_builder_agent.rs"]
 mod app_builder_agent;
+#[path = "app_calling_app.rs"]
+mod app_calling_app;
 #[path = "app_code_files.rs"]
 mod app_code_files;
 #[path = "app_file_access.rs"]
 mod app_file_access;
+#[path = "app_guest_live.rs"]
+mod app_guest_live;
+#[path = "app_guest_sessions.rs"]
+mod app_guest_sessions;
 #[path = "app_i18n.rs"]
 mod app_i18n;
 #[path = "app_invite.rs"]
@@ -69,6 +77,8 @@ mod app_live_presence;
 mod app_live_query_streams;
 #[path = "app_live_topics.rs"]
 mod app_live_topics;
+#[path = "app_server_render.rs"]
+mod app_server_render;
 #[path = "app_serving.rs"]
 mod app_serving;
 #[path = "app_signup.rs"]
@@ -101,6 +111,8 @@ mod constraint_api;
 mod db_connection_admin_api;
 #[path = "field_api.rs"]
 mod field_api;
+#[path = "entities_api.rs"]
+mod entities_api;
 #[path = "file_manager.rs"]
 mod file_manager;
 #[path = "file_operations_api.rs"]
@@ -125,6 +137,8 @@ mod ide_route;
 mod ide_typecheck;
 #[path = "live_mounting.rs"]
 mod live_mounting;
+#[path = "llm_credits.rs"]
+mod llm_credits;
 #[path = "llm_provider_admin_api.rs"]
 mod llm_provider_admin_api;
 #[path = "locale_negotiation.rs"]
@@ -147,6 +161,10 @@ mod model_formulas;
 mod model_handle;
 #[path = "models_without_actions.rs"]
 mod models_without_actions;
+#[path = "module_consent.rs"]
+mod module_consent;
+#[path = "module_seams.rs"]
+mod module_seams;
 #[path = "modules_api.rs"]
 mod modules_api;
 #[path = "named_datasets.rs"]
@@ -157,6 +175,8 @@ mod other_events;
 mod ownership_enforcement;
 #[path = "ownership_settings_api.rs"]
 mod ownership_settings_api;
+#[path = "payments_module.rs"]
+mod payments_module;
 #[path = "posterior_api.rs"]
 mod posterior_api;
 #[path = "primary_key_api.rs"]
@@ -171,6 +191,8 @@ mod python_trigger;
 mod query_contracts;
 #[path = "rls_enforcement.rs"]
 mod rls_enforcement;
+#[path = "role_grants.rs"]
+mod role_grants;
 #[path = "router.rs"]
 mod router;
 /// The process-wide registries `ModuleServices` installs into on boot and on
@@ -243,6 +265,12 @@ mod tutorial_code_queries;
 mod tutorial_live;
 #[path = "tutorial_live_documents.rs"]
 mod tutorial_live_documents;
+#[path = "tutorial_payments.rs"]
+mod tutorial_payments;
+#[path = "tutorial_payments_credits.rs"]
+mod tutorial_payments_credits;
+#[path = "tutorial_payments_saas.rs"]
+mod tutorial_payments_saas;
 #[path = "tutorial_workflows.rs"]
 mod tutorial_workflows;
 #[path = "view_app.rs"]

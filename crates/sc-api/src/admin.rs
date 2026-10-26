@@ -28,7 +28,9 @@
 //! `listAgentTraits`, `listTableProviders`, `listActions`, `listTriggers`), the
 //! objects it may be asked to **build** that have no composite tool (the agents,
 //! the workflows), and the one thing it must do **after** a schema change
-//! (`buildApplication`, since re-projection runs no bundler). Row CRUD, the file
+//! (`buildApplication`, since re-projection runs no bundler). Row history's
+//! reads are tagged too, in an area of their own that is off unless granted
+//! (§14.12): they are row data. Row CRUD, the file
 //! store, backup and restore and user management are tier 3 — absent on purpose,
 //! not overlooked.
 
@@ -94,6 +96,22 @@ pub fn admin_endpoints() -> EndpointSet {
     set.register(
         Endpoint::new("listTables", Method::Get, api().lit("tables"))
             .output(TypeSchema::array(table_schema()))
+            .auth(AuthRequirement::admin()),
+    );
+
+    // --- entities: the admin UI's home page --------------------------------
+
+    // Every entity an admin configures — tables, file stores, triggers, agents
+    // and applications — in one list, each with when it was last saved, so the
+    // home page can show the recently edited ones and search them all. The
+    // per-kind lists stay the place to read one kind in full; this carries what
+    // a row of a mixed list shows. With `deep`, each also carries its whole
+    // definition as text, for a search that looks inside it (secrets masked,
+    // as the per-kind lists mask them).
+    set.register(
+        Endpoint::new("listEntities", Method::Get, api().lit("entities"))
+            .query([QueryParam::new("deep", ValueType::Bool)])
+            .output(TypeSchema::array(entity_schema()))
             .auth(AuthRequirement::admin()),
     );
 
@@ -452,10 +470,11 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
-    // Overlay-only edits: label, description, rich type, kind parameters,
-    // attributes. Renaming or retyping a *column* is a schema change and is out
-    // of scope (§3.3), so this endpoint cannot touch `name`, `required`, `unique`
-    // or the storage SQL type.
+    // Overlay edits: label, description, rich type, kind parameters,
+    // attributes; plus the key, `required`, and `name`, which renames the
+    // column (its row history follows, §14.12). Retyping a column is a
+    // migration and is out of scope (§3.3), so this endpoint cannot touch
+    // `unique` or the storage SQL type.
     set.register(
         Endpoint::new(
             "updateField",
@@ -675,6 +694,231 @@ pub fn admin_endpoints() -> EndpointSet {
             TypeSchema::int(),
         )]))
         .auth(AuthRequirement::admin()),
+    );
+
+    // --- row history (§14.12 "Reading", TODO-history H2) --------------------
+    //
+    // Admin-only, like the rows themselves above, and for the same reason: a
+    // table whose history is opened to role 80 (`history.min_role`) is opened
+    // for the surfaces an application's users reach, and this is not one of
+    // them. That rule and the row-by-row read check live in `sc_api::history`,
+    // which these handlers call too. Each is a tool in the history area, off
+    // unless granted, because history is row data (see
+    // `the_surfaces_that_were_left_out_stayed_out`).
+
+    set.register(
+        Endpoint::new(
+            "getRowHistory",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows")
+                .param("id", ValueType::Text)
+                .lit("history"),
+        )
+        .output(TypeSchema::array(history_entry_schema()))
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Read the history of one row of a table that keeps row history: \
+                 its versions newest first, each with the fields it changed (old \
+                 and new value; `removed` marks a field dropped since), who made \
+                 the change, when, and from where (`source`: request, import, \
+                 workflow, undo, restore, sync, mcp or sql). `id` is the row's \
+                 primary key. Secrets show as a placeholder.",
+            )
+            .in_area(Area::History),
+        ),
+    );
+
+    set.register(
+        Endpoint::new(
+            "listDeletedRows",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("deleted"),
+        )
+        .query([
+            QueryParam::new("limit", ValueType::Int),
+            QueryParam::new("offset", ValueType::Int),
+        ])
+        .output(TypeSchema::array(deleted_row_schema()))
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "List the rows deleted from a table that keeps row history and not \
+                 put back since, newest deletion first: each row as it was when \
+                 deleted (`removed` holds values of fields dropped since), and \
+                 who deleted it, when.",
+            )
+            .in_area(Area::History),
+        ),
+    );
+
+    // The row as it was. `as_of` is a time (RFC 3339, or a date) or an entry's
+    // `seq` from the row's history; `row` is null when it did not exist then.
+    set.register(
+        Endpoint::new(
+            "getRowAsOf",
+            Method::Get,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows")
+                .param("id", ValueType::Text),
+        )
+        .query([QueryParam::new("as_of", ValueType::Text).required()])
+        .output(row_as_of_schema())
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Rebuild one row of a table that keeps row history as it was at \
+                 `as_of`: a time (like 2026-10-22T09:30:00Z, or a date) or the \
+                 `seq` of an entry in the row's history, meaning just after it. \
+                 `row` is null when the row did not exist then; `removed` holds \
+                 its values of fields dropped since.",
+            )
+            .in_area(Area::History),
+        ),
+    );
+
+    set.register(
+        Endpoint::new("listChangesets", Method::Get, api().lit("changesets"))
+            .query([
+                QueryParam::new("user", ValueType::Text),
+                QueryParam::new("table", ValueType::Text),
+                QueryParam::new("source", ValueType::Text),
+                QueryParam::new("since", ValueType::Text),
+                QueryParam::new("limit", ValueType::Int),
+                QueryParam::new("offset", ValueType::Int),
+            ])
+            .output(TypeSchema::array(changeset_summary_schema()))
+            .auth(AuthRequirement::admin())
+            .mcp(
+                McpTag::new(
+                    "List changesets, newest first: each is one user action (a \
+                     request, an import, a workflow run, an MCP call, an offline \
+                     upload, a psql transaction…) with how many rows it changed in \
+                     which tables that keep history. Filter by `user` (id), \
+                     `table`, `source` and `since` (a time).",
+                )
+                .in_area(Area::History),
+            ),
+    );
+
+    set.register(
+        Endpoint::new(
+            "getChangeset",
+            Method::Get,
+            api().lit("changesets").param("id", ValueType::Text),
+        )
+        .output(changeset_detail_schema())
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Read one changeset: who did it, when and from where, and every row \
+                 it changed in tables that keep history, with the fields' old and \
+                 new values.",
+            )
+            .in_area(Area::History),
+        ),
+    );
+
+    // --- restore and undo (§14.12 "Restore and undo", TODO-history H3) ------
+    //
+    // Writes through the row layer as the caller, each in one transaction and
+    // its own changeset (`restore` or `undo`), which is recorded like any other
+    // change and so can be undone in turn. The logic is `sc_api::undo`.
+
+    set.register(
+        Endpoint::new(
+            "restoreRow",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("deleted")
+                .param("id", ValueType::Text)
+                .lit("restore"),
+        )
+        .output(restored_row_schema())
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Put a deleted row back, as it was when it was deleted, with the same \
+                 primary key `id`. Fields dropped from the table since are left out \
+                 and listed in `dropped`. Refused when the row refers to a row that \
+                 no longer exists (restore that first). Triggers run as for any \
+                 insert.",
+            )
+            .in_area(Area::History)
+            .needs(Grant::Edit),
+        ),
+    );
+
+    set.register(
+        Endpoint::new(
+            "revertRow",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rows")
+                .param("id", ValueType::Text)
+                .lit("revert"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "version",
+            TypeSchema::int(),
+        )]))
+        .output(restored_row_schema())
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Set one row back to how it was at one of its versions (the \
+                 `version` number from its history), as one update, or an insert \
+                 when the row has been deleted since. Fields dropped since are left \
+                 out and listed in `dropped`.",
+            )
+            .in_area(Area::History)
+            .needs(Grant::Edit),
+        ),
+    );
+
+    set.register(
+        Endpoint::new(
+            "undoChangeset",
+            Method::Post,
+            api()
+                .lit("changesets")
+                .param("id", ValueType::Text)
+                .lit("undo"),
+        )
+        .input(TypeSchema::struct_of([
+            // Undo only this table's entries; absent, all of them.
+            StructField::new("table", TypeSchema::optional(TypeSchema::text())),
+            // Overwrite rows changed since instead of refusing.
+            StructField::new("force", TypeSchema::optional(TypeSchema::bool())),
+        ]))
+        .output(undo_outcome_schema())
+        .auth(AuthRequirement::admin())
+        .mcp(
+            McpTag::new(
+                "Undo a changeset: reverse what it did to every row (or only to \
+                 `table`'s rows), in one transaction. Inserted rows are deleted, \
+                 deleted rows put back and updated fields set back. If any of those \
+                 rows has been changed since, nothing is done and `conflicts` says \
+                 which rows and fields; pass `force: true` to overwrite them. The \
+                 undo is a changeset itself, so it can be undone. Effects outside \
+                 the database, such as emails a trigger sent, are not undone.",
+            )
+            .in_area(Area::History)
+            .needs(Grant::Edit)
+            .and_needs(Grant::Drop),
+        ),
     );
 
     // --- rows in bulk, as CSV ----------------------------------------------
@@ -1281,6 +1525,10 @@ pub fn admin_endpoints() -> EndpointSet {
     // A save reloads the module, so the next run of any of its actions uses the
     // new value; a permissions save also *moves* it, onto a worker built with
     // the new set, because a permission set belongs to an isolate.
+    //
+    // Tagged in the modules area: a setting written straight into `_fd_modules`
+    // reaches neither the module's actions nor its services, which read it
+    // when the module is loaded — this endpoint is the one way that reloads.
     set.register(
         Endpoint::new(
             "updateModule",
@@ -1295,6 +1543,21 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("permissions", TypeSchema::optional(TypeSchema::json())),
         ]))
         .output(module_schema())
+        .mcp(
+            McpTag::new(
+                "Change an installed module's settings (`configuration`, an object of \
+                 the fields its settings form has — `listModules` shows each module's \
+                 current values, secrets as `••••••••`) and/or its `permissions` \
+                 (`{ net, read, write, env }`, lists of what its worker may reach). \
+                 `id` is the module's id from `listModules`. Each part is changed only \
+                 when sent, and `configuration` replaces the whole object: send every \
+                 setting, with a secret left as `••••••••` to keep it. The module is \
+                 reloaded and its services restarted, so its actions and services use \
+                 the new values at once.",
+            )
+            .in_area(Area::Modules)
+            .needs(Grant::Edit),
+        )
         .auth(AuthRequirement::admin()),
     );
 
@@ -1850,6 +2113,7 @@ pub fn admin_endpoints() -> EndpointSet {
                 .param("id", ValueType::Uuid)
                 .lit("build"),
         )
+        .query([QueryParam::new("quick", ValueType::Bool)])
         .output(build_result_schema())
         // Tagged (§13.6) because of the one gap re-projection leaves: a schema
         // change rewrites an application's generated client but runs no bundler,
@@ -2843,6 +3107,110 @@ pub fn admin_endpoints() -> EndpointSet {
             StructField::new("email", TypeSchema::text()),
             StructField::new("password", TypeSchema::text()),
         ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Role grants (TODO-payments P3.2): roles a user holds for a while beside
+    // the base role `updateUser` sets — a subscription's, a trial's, or one an
+    // admin gives by hand. The effective role is the most privileged of the two.
+    set.register(
+        Endpoint::new(
+            "listUserRoleGrants",
+            Method::Get,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants"),
+        )
+        .output(crate::auth::user_role_grants_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "grantUserRole",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("role", TypeSchema::int()),
+            // Days from now; left out, the grant lasts until it is revoked.
+            StructField::new("expires_in_days", TypeSchema::optional(TypeSchema::int())),
+            StructField::new("note", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::role_grant_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "revokeUserRoleGrant",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("role-grants")
+                .param("grant", ValueType::Uuid)
+                .lit("revoke"),
+        )
+        .output(crate::auth::role_grant_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // LLM credits (TODO-payments P6.2): the balance an agent run's model calls
+    // are charged to. The page shows the balance, the buckets and the latest
+    // entries, grants credits by hand, and sets the low-balance threshold.
+    // Amounts are exact decimal strings.
+    set.register(
+        Endpoint::new(
+            "getUserCredits",
+            Method::Get,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits"),
+        )
+        .output(crate::auth::user_credits_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "grantUserCredits",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("amount", TypeSchema::text()),
+            // Days from now; left out, the credits never expire.
+            StructField::new("expires_in_days", TypeSchema::optional(TypeSchema::int())),
+            StructField::new("note", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::user_credits_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    set.register(
+        Endpoint::new(
+            "setUserCreditThreshold",
+            Method::Post,
+            api()
+                .lit("users")
+                .param("id", ValueType::Uuid)
+                .lit("credits")
+                .lit("threshold"),
+        )
+        .input(TypeSchema::struct_of([
+            // Left out or null: no low-balance notices.
+            StructField::new("threshold", TypeSchema::optional(TypeSchema::text())),
+        ]))
+        .output(crate::auth::user_credits_schema())
         .auth(AuthRequirement::admin()),
     );
 
@@ -4586,6 +4954,123 @@ fn row_read_params() -> Vec<QueryParam> {
     ]
 }
 
+/// A changeset as history shows it (§14.12): who, when, from where.
+fn changeset_fields() -> Vec<StructField> {
+    let text = || TypeSchema::optional(TypeSchema::text());
+    vec![
+        StructField::new("id", TypeSchema::text()),
+        StructField::new("at", TypeSchema::text()),
+        StructField::new("user_id", text()),
+        // For the admin only: below it, a reader sees who by id.
+        StructField::new("user_email", text()),
+        StructField::new("source", TypeSchema::text()),
+        StructField::new("application", text()),
+        StructField::new("description", text()),
+        StructField::new("cause", text()),
+        StructField::new("undo_table", text()),
+        StructField::new("client_id", text()),
+        StructField::new("mutation", TypeSchema::optional(TypeSchema::int())),
+    ]
+}
+
+/// One entry of a row's history: one changeset's net change to the row, field
+/// by field.
+fn history_entry_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("seq", TypeSchema::int()),
+        // The row's version this made, from 1; 0 in a changeset's entries.
+        StructField::new("version", TypeSchema::int()),
+        StructField::new("table", TypeSchema::text()),
+        StructField::new("key", TypeSchema::text()),
+        // `i`, `u` or `d`.
+        StructField::new("op", TypeSchema::text()),
+        StructField::new("at", TypeSchema::text()),
+        StructField::new(
+            "changes",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("field", TypeSchema::text()),
+                StructField::new("old", TypeSchema::json()),
+                StructField::new("new", TypeSchema::json()),
+                // The field has been dropped from the table since.
+                StructField::new("removed", TypeSchema::bool()),
+            ])),
+        ),
+        StructField::new("changeset", TypeSchema::Struct(changeset_fields())),
+    ])
+}
+
+/// A deleted row: its image, split by whether each field still exists.
+fn deleted_row_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("key", TypeSchema::text()),
+        StructField::new("seq", TypeSchema::int()),
+        StructField::new("at", TypeSchema::text()),
+        StructField::new("row", TypeSchema::json()),
+        StructField::new("removed", TypeSchema::json()),
+        StructField::new("changeset", TypeSchema::Struct(changeset_fields())),
+    ])
+}
+
+fn row_as_of_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("row", TypeSchema::optional(TypeSchema::json())),
+        StructField::new("removed", TypeSchema::json()),
+    ])
+}
+
+fn changeset_summary_schema() -> TypeSchema {
+    let mut fields = changeset_fields();
+    fields.push(StructField::new("entries", TypeSchema::int()));
+    fields.push(StructField::new(
+        "tables",
+        TypeSchema::array(TypeSchema::text()),
+    ));
+    TypeSchema::Struct(fields)
+}
+
+/// A restored or reverted row, and the `restore` changeset it was written in.
+fn restored_row_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("changeset", TypeSchema::text()),
+        StructField::new("row", TypeSchema::json()),
+        // Fields the old row had that the table no longer has.
+        StructField::new("dropped", TypeSchema::array(TypeSchema::text())),
+    ])
+}
+
+/// What an undo did, or the conflicts that stopped it.
+fn undo_outcome_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("undone", TypeSchema::bool()),
+        // The undo's own changeset; null when refused.
+        StructField::new("changeset", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("entries", TypeSchema::int()),
+        // `table.field` of values left out because the field is gone.
+        StructField::new("dropped", TypeSchema::array(TypeSchema::text())),
+        StructField::new(
+            "conflicts",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("table", TypeSchema::text()),
+                StructField::new("key", TypeSchema::text()),
+                // Null when the row itself is gone, or back.
+                StructField::new("field", TypeSchema::optional(TypeSchema::text())),
+                StructField::new("expected", TypeSchema::json()),
+                StructField::new("actual", TypeSchema::json()),
+                StructField::new("reason", TypeSchema::text()),
+            ])),
+        ),
+    ])
+}
+
+fn changeset_detail_schema() -> TypeSchema {
+    let mut fields = changeset_fields();
+    fields.push(StructField::new(
+        "entries",
+        TypeSchema::array(history_entry_schema()),
+    ));
+    TypeSchema::Struct(fields)
+}
+
 /// A `PathSpec` rooted at the admin API prefix.
 fn api() -> PathSpec {
     PathSpec::root().lit(ADMIN_API_PREFIX)
@@ -4619,6 +5104,9 @@ fn table_schema() -> TypeSchema {
     // Whether offline sync can be switched on: a one-column primary key, in
     // Saltcorn's own Postgres database. The form shows the switch only then.
     fields.push(StructField::new("sync_available", TypeSchema::bool()));
+    // Whether row history can be switched on: the same conditions as sync's
+    // (§14.12), reported apart so neither form has to know that.
+    fields.push(StructField::new("history_available", TypeSchema::bool()));
     // Which database hosts the table: `primary`, or the name of the connection
     // it came from (§5's Connections). Reported on every table rather than only
     // on foreign ones, so a client never has to read absence as "the primary".
@@ -4707,6 +5195,17 @@ fn table_settings_fields() -> Vec<StructField> {
         // save without a one-column primary key, or on a database that cannot
         // record changes.
         StructField::new("sync_enabled", TypeSchema::bool()),
+        // Whether the table keeps row history (§14.12), off by default. The same
+        // refusals as `sync_enabled`; the two share one change trigger.
+        StructField::new("history_enabled", TypeSchema::bool()),
+        // Who may read the table's history (§14.12): the admin unless a wider
+        // role is named, and then each row is checked against its read rule
+        // too. Optional, and absent is the admin's.
+        StructField::new("history_min_role", TypeSchema::optional(TypeSchema::int())),
+        // How many days history keeps a change; absent or 0 keeps it forever.
+        // The cleanup job removes older entries, and the files of rows whose
+        // delete entry went.
+        StructField::new("history_keep_days", TypeSchema::optional(TypeSchema::int())),
     ]
 }
 
@@ -4913,6 +5412,8 @@ fn create_constraint_schema() -> TypeSchema {
 /// Both are **omitted means leave it**, unlike the rest of this body.
 fn field_settings_schema() -> TypeSchema {
     TypeSchema::struct_of([
+        // Omitted keeps the name; another renames the field.
+        StructField::new("name", TypeSchema::optional(TypeSchema::text())),
         StructField::new("type", TypeSchema::optional(TypeSchema::text())),
         StructField::new("kind", TypeSchema::optional(TypeSchema::json())),
         StructField::new("attributes", TypeSchema::optional(TypeSchema::json())),
@@ -5195,6 +5696,9 @@ fn module_schema() -> TypeSchema {
         StructField::new("table_providers", TypeSchema::array(TypeSchema::text())),
         // The tables it declares (TODO-imap M4), created when it loaded.
         StructField::new("tables", TypeSchema::array(TypeSchema::text())),
+        // The application tables it reads because its settings name them
+        // (TODO-payments P4.1): read only, by its services and webhooks.
+        StructField::new("reads", TypeSchema::array(TypeSchema::text())),
         // The services it runs in the background (TODO-imap M5), each with its
         // state: `running`, `restarting` (after a failure, with `last_error`)
         // or `stopped`.
@@ -5206,6 +5710,17 @@ fn module_schema() -> TypeSchema {
                 StructField::new("state", TypeSchema::text()),
                 StructField::new("restarts", TypeSchema::int()),
                 StructField::new("last_error", TypeSchema::optional(TypeSchema::text())),
+            ])),
+        ),
+        // The webhooks it receives (TODO-payments P1.2): `path` is where each
+        // is served on the admin host, which the admin registers with the
+        // service that calls it.
+        StructField::new(
+            "webhooks",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
             ])),
         ),
         // The model providers it supplies — names only, for the same reason:
@@ -5220,6 +5735,18 @@ fn module_schema() -> TypeSchema {
         // what one *asks for* is its configuration wizard, a call per step on
         // `viewConfigStep`.
         StructField::new("view_patterns", TypeSchema::array(TypeSchema::text())),
+        // The content-security sources it suggests (TODO-payments P1.4): an
+        // application allows one when its admin puts the `key` in the
+        // application's `csp_sources` attribute. `sources` is directive → hosts.
+        StructField::new(
+            "csp_sources",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("key", TypeSchema::text()),
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("description", TypeSchema::text()),
+                StructField::new("sources", TypeSchema::json()),
+            ])),
+        ),
         // What it also supplies and this version does not load: `{key, count}`,
         // so the tab can say "also supplies 1 table provider (not yet
         // supported)".
@@ -5269,6 +5796,15 @@ fn bundled_module_schema() -> TypeSchema {
         // The services it runs in the background (TODO-imap M5): the card says
         // so before the click.
         StructField::new("services", TypeSchema::array(TypeSchema::text())),
+        // The webhooks it receives (TODO-payments P1.2), with the path each will
+        // be served at once installed.
+        StructField::new(
+            "webhooks",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("name", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
+            ])),
+        ),
         // What it will be granted: the same `{ net, read, write, env }` shape a
         // module's own permissions have, so one renderer draws both. Always
         // closed for a Python module — there is nothing to enforce it (§10).
@@ -5830,6 +6366,21 @@ fn upload_slot_schema() -> TypeSchema {
     ])
 }
 
+/// An agent an application exposes to its client (§11.7): for chat, single
+/// prompts or both, to signed-in callers or — with `anonymous` — to anybody the
+/// agent's own floor admits, showing its tools to the extent `tools` says
+/// (`none` | `names` | `full`). `prompt_template` null takes free text.
+fn agent_exposure_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("chat", TypeSchema::bool()),
+        StructField::new("prompt", TypeSchema::bool()),
+        StructField::new("anonymous", TypeSchema::bool()),
+        StructField::new("tools", TypeSchema::text()),
+        StructField::new("prompt_template", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
 /// The fields common to an application on the wire — everything but its id. The
 /// nested `csp` and `attributes` are opaque JSON (a directive→sources map and a
 /// sparse bag respectively), matching how they are stored (§13.2).
@@ -5854,6 +6405,7 @@ fn application_fields() -> Vec<StructField> {
         StructField::new("apis", TypeSchema::array(api_config_schema())),
         StructField::new("static_dirs", TypeSchema::array(static_dir_schema())),
         StructField::new("uploads", TypeSchema::array(upload_slot_schema())),
+        StructField::new("agents", TypeSchema::array(agent_exposure_schema())),
         StructField::new("csp", TypeSchema::json()),
         StructField::new("attributes", TypeSchema::json()),
         // Who may use the application at all (TODO F9): the least privileged
@@ -6315,6 +6867,36 @@ fn build_result_schema() -> TypeSchema {
 /// whose action a removed plugin provided is **not in the live set** and will not
 /// fire, but it is still stored, still listed and still editable — and the reason
 /// is the only thing that says what to fix.
+/// One row of `listEntities`.
+fn entity_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        // `table`, `file_store`, `trigger`, `stream`, `agent` or `application`.
+        StructField::new("kind", TypeSchema::text()),
+        // What the entity's own screen is addressed by: a table's name, or the
+        // id of any other kind's row.
+        StructField::new("id", TypeSchema::text()),
+        StructField::new("name", TypeSchema::text()),
+        StructField::new("description", TypeSchema::text()),
+        // Short facts for the Details column, most telling first: a trigger's
+        // event and action, an agent's provider and model, a store's backend.
+        StructField::new("details", TypeSchema::array(TypeSchema::text())),
+        // Who may use it, as role names: `read/write` for a table.
+        StructField::new("access", TypeSchema::text()),
+        // Null for one not saved since edit times were recorded.
+        StructField::new("updated_at", TypeSchema::optional(TypeSchema::timestamp())),
+        // Whether the Run link means anything now: false for a trigger that is
+        // switched off or not usable.
+        StructField::new("runnable", TypeSchema::bool()),
+        // An application's subdomain, for the link that opens it.
+        StructField::new("subdomain", TypeSchema::optional(TypeSchema::text())),
+        // What a trigger's event is about: the table of a table event, the
+        // stream of a stream event. Null for every other entity.
+        StructField::new("channel", TypeSchema::optional(TypeSchema::text())),
+        // The whole definition as JSON text — only when asked for with `deep`.
+        StructField::new("definition", TypeSchema::optional(TypeSchema::text())),
+    ])
+}
+
 fn trigger_schema() -> TypeSchema {
     let mut fields = vec![StructField::new("id", TypeSchema::uuid())];
     fields.extend(trigger_fields());
@@ -7018,11 +7600,25 @@ mod tests {
                 "createRole",
                 "deleteRole",
                 "listFieldTypes",
+                // Row history (TODO-history H2.4), behind its own area that is
+                // off unless granted: it is row data, which the schema tools
+                // are deliberately not.
+                "getRowHistory",
+                "listDeletedRows",
+                "getRowAsOf",
+                "listChangesets",
+                "getChangeset",
+                // …and restore and undo (H3.3), in the same area, needing the
+                // grants their writes need.
+                "restoreRow",
+                "revertRow",
+                "undoChangeset",
                 // Modules, behind their own area that is off unless granted: an
                 // agent writing Python needs a library installed to import it,
                 // and asking a human to click Install is the gap this closes.
                 "listModules",
                 "installModule",
+                "updateModule",
                 "listAgents",
                 "createAgent",
                 "updateAgent",
@@ -7120,6 +7716,19 @@ mod tests {
         // Installing a package is its own area, off unless granted.
         assert_eq!(area_of("listModules"), Some(Area::Modules));
         assert_eq!(area_of("installModule"), Some(Area::Modules));
+        assert_eq!(area_of("updateModule"), Some(Area::Modules));
+        for name in [
+            "getRowHistory",
+            "listDeletedRows",
+            "getRowAsOf",
+            "listChangesets",
+            "getChangeset",
+            "restoreRow",
+            "revertRow",
+            "undoChangeset",
+        ] {
+            assert_eq!(area_of(name), Some(Area::History), "{name}");
+        }
         // The schema half has no area: it is what this surface is.
         assert_eq!(area_of("listFieldTypes"), None);
         assert_eq!(area_of("listAgents"), None);

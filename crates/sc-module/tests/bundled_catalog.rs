@@ -222,6 +222,114 @@ fn the_sklearn_module_ships_and_promises_the_download_it_makes() {
     );
 }
 
+/// Run `script` under node with `arg`, answering its stdout — or `None`, said
+/// on stderr, when this machine has no `node`.
+fn node(script: &str, arg: &Path, what: &str) -> Option<String> {
+    let output = match std::process::Command::new("node")
+        .args(["-e", script])
+        .arg(arg)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("{what}: skipped, there is no `node`");
+            return None;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "{what}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// TODO-payments P2.1: the payments module ships, declares the three tables
+/// its card lists, the two webhooks and its service, and may reach **exactly**
+/// the hosts its adapters name — an allow-list, never `*` (design §9).
+#[test]
+fn the_payments_module_ships_and_may_reach_only_its_adapters_hosts() {
+    let catalog = catalog();
+    let payments = catalog.get("payments").expect("the payments module ships");
+    assert_eq!(payments.name, "@feldspar/payments");
+    assert_eq!(payments.language, ModuleLanguage::JavaScript);
+    assert_eq!(
+        payments.tables,
+        ["pay_accounts", "pay_objects", "pay_events"]
+    );
+    assert_eq!(payments.webhooks, ["events", "fake"]);
+    assert_eq!(payments.services, ["reconcile"]);
+    assert!(
+        !payments.permissions.any_host(),
+        "{:?}",
+        payments.permissions
+    );
+
+    let script = "const m = require(process.argv[1]); \
+                  console.log(JSON.stringify({ tables: m.tables, \
+                    webhooks: Object.keys(m.webhooks), \
+                    hosts: require(require('path').join(require('path').dirname(process.argv[1]), \
+                      'adapters/index.js')).hosts() }))";
+    let Some(out) = node(
+        script,
+        &payments.directory.join("index.js"),
+        "the payments module",
+    ) else {
+        return;
+    };
+    let declared: serde_json::Value = serde_json::from_str(&out).expect("JSON");
+    let tables: Vec<serde_json::Value> = declared["tables"].as_array().unwrap().clone();
+    let (decls, issues) = sc_module::tables::parse_declarations(&tables);
+    assert!(issues.is_empty(), "{issues:?}");
+    let names: Vec<String> = decls.iter().map(|d| d.name.clone()).collect();
+    assert_eq!(names, payments.tables);
+    assert_eq!(declared["webhooks"], serde_json::json!(payments.webhooks));
+    let mut hosts: Vec<String> = serde_json::from_value(declared["hosts"].clone()).unwrap();
+    hosts.sort();
+    let mut net = payments.permissions.net.clone();
+    net.sort();
+    assert_eq!(
+        net, hosts,
+        "the module's net permission is the union of its adapters' hosts"
+    );
+}
+
+/// The payments module's own tests (`plugins/payments/test`): the money, the
+/// capabilities, the fake provider, the webhook processing, the checkout's
+/// configuration, the Stripe adapter against recorded responses, refunds and
+/// the sweep — run here so `cargo test` runs them, and skipped where there is
+/// no `node`. (The live Stripe test skips itself without a key.)
+#[test]
+fn the_payments_modules_own_tests_pass() {
+    let dir = catalog().get("payments").expect("ships").directory.clone();
+    let tests: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("test"))
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".test.mjs"))
+        .collect();
+    assert!(!tests.is_empty());
+    let output = match std::process::Command::new("node")
+        .arg("--test")
+        .args(&tests)
+        .current_dir(&dir)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("the payments module's tests: skipped, there is no `node`");
+            return;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn the_mail_module_ships_and_declares_the_tables_its_card_lists() {
     // TODO-imap M7.1. The card promises four tables; the plugin object is what
@@ -268,6 +376,42 @@ fn the_mail_module_ships_and_declares_the_tables_its_card_lists() {
     assert_eq!(names, imap.tables);
 }
 
+#[test]
+fn the_astro_module_declares_the_ab_tables_its_card_lists() {
+    // TODO-astro W3.3: the exposures and conversions an A/B test records.
+    let catalog = catalog();
+    let astro = catalog.get("astro").expect("the Astro module ships");
+    assert_eq!(astro.tables, ["astro_exposures", "astro_conversions"]);
+    let script = "console.log(JSON.stringify(require(process.argv[1]).tables))";
+    let output = match std::process::Command::new("node")
+        .args(["-e", script])
+        .arg(astro.directory.join("index.js"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!(
+                "the Astro module's tables: skipped, there is no `node` to evaluate index.js"
+            );
+            return;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let declared: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).expect("`tables` is JSON");
+    let (decls, issues) = sc_module::tables::parse_declarations(&declared);
+    assert!(issues.is_empty(), "{issues:?}");
+    let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, astro.tables);
+    // One exposure per visitor and experiment is what keeps an arm stable.
+    assert_eq!(decls[0].unique, [["site", "experiment", "visitor"]]);
+}
+
 /// Every mail action declares what an application sends it and gets back, and
 /// each declaration lowers — so `api.runMailSend()` and the rest are typed, and
 /// no declaration is dropped as "not a type" when the module loads.
@@ -299,7 +443,7 @@ fn the_mail_actions_declare_types_that_lower() {
     );
     let actions: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&output.stdout).expect("the actions' types are JSON");
-    assert_eq!(actions.len(), 10, "{actions:?}");
+    assert_eq!(actions.len(), 12, "{actions:?}");
     for (name, types) in &actions {
         match sc_api::parse_returns(&types["payload"]) {
             Ok(sc_api::TypeSchema::Struct(_)) => {}

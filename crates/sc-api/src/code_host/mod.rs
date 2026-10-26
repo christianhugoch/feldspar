@@ -115,6 +115,7 @@
 //! is refused naming `.rows()`, which can decide row by row.
 
 mod files;
+mod history;
 mod models;
 mod plan;
 pub mod schema;
@@ -841,7 +842,9 @@ impl<'a> TableHost<'a> {
     /// The caller every statement of this run carries: **admin, in the event's
     /// user's name**, with the trigger chain that led here.
     fn caller(&self) -> CallerContext {
-        CallerContext::new(ROLE_ADMIN, self.user.clone()).chained(self.chain.clone())
+        CallerContext::new(ROLE_ADMIN, self.user.clone())
+            .chained(self.chain.clone())
+            .in_current_origin()
     }
 
     /// §5's one asymmetry, said in the code body's own terms.
@@ -1023,6 +1026,12 @@ impl CodeHost for TableHost<'_> {
         // budget, and a write-back under this run's authority and chain.
         if request.get("op").and_then(Json::as_str) == Some("models") {
             return models::answer(self, request).await;
+        }
+        // Row history (§14.12): a row's versions read, a deleted row restored,
+        // a row put back — through the same reader and reverser as the admin
+        // API, at the plan's authority.
+        if request.get("op").and_then(Json::as_str) == Some("history") {
+            return history::answer(self, request).await;
         }
         let plan: Plan = serde_json::from_value(request).map_err(refuse)?;
         self.run(&plan).await

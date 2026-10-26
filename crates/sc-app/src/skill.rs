@@ -86,10 +86,10 @@ fn tool_lines(catalog: &Catalog) -> (Vec<ToolLine>, Vec<ToolLine>, Vec<ToolLine>
         None => always.push(line),
         Some(Area::Triggers) => triggers.push(line),
         Some(Area::Applications) => applications.push(line),
-        // No composite tool is in the modules area — its two tools are tagged
+        // No composite tool is in the modules or history area — their tools are tagged
         // endpoints, which this set does not hold — so this arm is for a tool
         // added there later, listed rather than dropped.
-        Some(Area::Modules) => always.push(line),
+        Some(Area::Modules) | Some(Area::History) => always.push(line),
     };
 
     for tool in set.tools() {
@@ -300,7 +300,11 @@ pub fn generate_skill(catalog: &Catalog, app: &Application, client_file: &str) -
          should run (a module's action such as `mail_send`) is exposed likewise: \
          `save_trigger` with `when: \"none\"` and a `min_role` (80 for any signed-in \
          user; unset is admin-only), then `update_application` with \
-         `triggers: {{ add: [...] }}`, which adds `api.run<Name>()` to the client.\n\
+         `triggers: {{ add: [...] }}`, which adds `api.run<Name>()` to the client. \
+         An agent the pages should talk to — a chat, or a button whose prompt sets \
+         the agent's tools to work — is exposed with `update_application` and \
+         `agents: {{ add: [{{ name }}] }}`, which adds `api.agents[\"<name>\"]`; its \
+         own `min_role` decides who may use it, and its tools run as that person.\n\
          4. Read the result. It names the applications it re-projected and which \
          of them **want a build** — a schema change rewrites the generated client \
          but runs no bundler, so an application with a build is serving one made \

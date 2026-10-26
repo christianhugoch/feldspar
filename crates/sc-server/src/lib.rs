@@ -21,17 +21,21 @@
 
 mod admin_host;
 mod agents;
+// An application's exposed agents: chat, prompts and history (§11.7).
 mod analytics;
 mod analytics_app;
+mod app_agents;
 mod apps;
 mod backup;
 mod browser;
 mod build_agent;
 mod build_archive;
 mod builder;
+mod change_log_cleanup;
 mod chat;
 mod clear_all;
 mod config;
+mod entities;
 mod file_response;
 mod fit_progress;
 mod handler;
@@ -62,6 +66,7 @@ mod tls;
 pub mod translations;
 mod triggers;
 mod uploads;
+mod webhooks;
 
 pub use admin_host::{AdminHost, HANDOFF_ROUTE, HANDOFF_TTL};
 pub use agents::{AgentServices, install_agents, install_agents_on};
@@ -73,7 +78,8 @@ pub use backup::{
 };
 pub use oauth::{
     BINDING_COOKIE as OAUTH_BINDING_COOKIE, CALLBACK_ROUTE as OAUTH_CALLBACK_ROUTE,
-    COMPLETE_ROUTE as OAUTH_COMPLETE_ROUTE, PROVIDERS_ROUTE as OAUTH_PROVIDERS_ROUTE,
+    COMPLETE_ROUTE as OAUTH_COMPLETE_ROUTE, CONSENT_ROUTE as OAUTH_CONSENT_ROUTE,
+    PROVIDERS_ROUTE as OAUTH_PROVIDERS_ROUTE,
 };
 // The S3 request signer, for the fake S3 server the automated-backup tests
 // check every request's signature against.
@@ -176,8 +182,8 @@ pub use observe::STREAM_OBSERVE_ROUTE;
 pub use reload::{ReloadReport, reload_all, spawn_sighup_reload};
 pub use requests::{AppRequests, MAX_RESPONSE_BYTES, install_app_requests};
 pub use router::{
-    ANALYTICS_PREFIX, BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, build_router,
-    build_router_with_apps,
+    ANALYTICS_PREFIX, BOOTSTRAP_HTML, CSRF_REQUEST_HEADER, IDE_PREFIX, URL_SCHEME_ATTRIBUTE,
+    build_router, build_router_with_apps,
 };
 /// The guest-language adapter trait, re-exported: a caller that hands
 /// [`install_triggers_with_adapters`] a set of adapters needs to name it, and
@@ -192,7 +198,8 @@ pub use security::{
 };
 pub use security::{BUILDER_CONTENT_SECURITY_POLICY, builder_content_security_policy};
 pub use security::{
-    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, PREVIEW_COOKIE, SESSION_COOKIE,
+    CONTENT_SECURITY_POLICY, CSRF_COOKIE, CSRF_HEADER, GUEST_COOKIE, PREVIEW_COOKIE,
+    SECURE_CSRF_COOKIE, SESSION_COOKIE, VISITOR_COOKIE, csrf_cookie,
 };
 pub use serve::{serve, serve_browser};
 pub use streams::{StreamServices, TriggerBridge, install_streams, install_streams_with};

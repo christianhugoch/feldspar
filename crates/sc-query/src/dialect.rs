@@ -68,6 +68,13 @@ pub trait SqlDialect {
         Some(" FOR UPDATE")
     }
 
+    /// Whether this is SQLite's spelling of SQL. The renderer never asks; the
+    /// few hand-written statements whose functions differ between the two
+    /// backends (the change log's JSON handling, §14.12) do.
+    fn is_sqlite(&self) -> bool {
+        false
+    }
+
     /// Render a statement to a SQL string plus its ordered bind values.
     ///
     /// The returned `Vec<Value>` is exactly the parameters the SQL placeholders
@@ -352,7 +359,24 @@ impl<'a, D: SqlDialect + ?Sized> Renderer<'a, D> {
                 Ok(())
             }
             Projection::Expr { expr, alias } => {
-                self.expr(expr)?;
+                // A bare literal in the select list has no context to take its
+                // type from, so Postgres reads its placeholder as text — and an
+                // integer bound to it is refused. Say what it is.
+                let typed = match expr {
+                    Expr::Lit(Value::Int(_)) => Some("BIGINT"),
+                    Expr::Lit(Value::Float(_)) => Some("DOUBLE PRECISION"),
+                    Expr::Lit(Value::Bool(_)) => Some("BOOLEAN"),
+                    _ => None,
+                };
+                if let Some(type_name) = typed {
+                    self.push("CAST(");
+                    self.expr(expr)?;
+                    self.push(" AS ");
+                    self.push(type_name);
+                    self.push(")");
+                } else {
+                    self.expr(expr)?;
+                }
                 if let Some(alias) = alias {
                     self.push(" AS ");
                     self.ident(alias);
@@ -837,7 +861,7 @@ mod tests {
         let row = Select::from(Source::Nothing)
             .columns(vec![Projection::expr_as(Expr::lit(1_i64), "one")]);
         let (sql, binds) = render(row.clone());
-        assert_eq!(sql, "SELECT $1 AS \"one\"");
+        assert_eq!(sql, "SELECT CAST($1 AS BIGINT) AS \"one\"");
         assert_eq!(binds, vec![Value::Int(1)]);
 
         let joined = Select::from(Source::table("t")).join(Join {
@@ -1111,6 +1135,23 @@ mod tests {
         // than guessed — the DDL would otherwise be malformed or unsafe.
         let expr = Expr::Lit(Value::Uuid(uuid::Uuid::nil()));
         assert!(render_policy_expr(&TestDialect, &expr).is_err());
+    }
+
+    #[test]
+    fn a_bare_literal_in_the_select_list_says_its_type() {
+        // `SELECT $1 AS q` gives Postgres nothing to type the placeholder by,
+        // so it reads it as text and refuses the integer bound to it.
+        let (sql, binds) = render(Select::from(Source::table("t")).columns(vec![
+            Projection::expr_as(Expr::lit(1i64), "q"),
+            Projection::expr_as(Expr::lit(true), "b"),
+            Projection::expr_as(Expr::lit("x"), "s"),
+            Projection::expr_as(Expr::col("c"), "c2"),
+        ]));
+        assert!(sql.contains("CAST($1 AS BIGINT) AS \"q\""), "got: {sql}");
+        assert!(sql.contains("CAST($2 AS BOOLEAN) AS \"b\""), "got: {sql}");
+        assert!(sql.contains("$3 AS \"s\""), "got: {sql}");
+        assert!(!sql.contains("CAST(\"c\""), "got: {sql}");
+        assert_eq!(binds.len(), 3);
     }
 
     #[test]

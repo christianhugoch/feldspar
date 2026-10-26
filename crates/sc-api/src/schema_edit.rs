@@ -57,12 +57,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sc_catalog::{
-    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ConstraintKind, DataField, DataFieldKind, DbId,
-    FIELD_META_TABLE, FieldId, FieldMeta, ReprojectedApp, SchemaChanged, SchemaProjection,
-    SchemaStep, Table, TableConstraint, TableId, TableMeta, create_constraint_steps,
-    disable_rls_sql, drop_constraint_steps, enable_rls_sql, formula_fields,
-    load_field_meta_by_field, load_table_meta_by_name, save_field_meta_row, save_table_meta_row,
-    validate_formula,
+    ATTR_OWNERSHIP_FORMULA, Attrs, Catalog, ChangeLogFeature, ConstraintKind, DataField,
+    DataFieldKind, DbId, FIELD_META_TABLE, FieldId, FieldMeta, ReprojectedApp, SchemaChanged,
+    SchemaProjection, SchemaStep, Table, TableConstraint, TableId, TableMeta,
+    create_constraint_steps, disable_rls_sql, drop_constraint_steps, enable_rls_sql,
+    formula_fields, load_field_meta_by_field, load_table_meta_by_name, save_field_meta_row,
+    save_table_meta_row, validate_formula,
 };
 use sc_db::{ColumnGenerator, ColumnRef, SchemaChange};
 use sc_error::{Error, Result};
@@ -105,6 +105,16 @@ pub fn key_generator(storage: &TypeRef, kind: &DataFieldKind) -> Option<ColumnGe
 const USERS_TABLE: &str = "users";
 /// The role table, protected for the same reason.
 const ROLES_TABLE: &str = "_fd_roles";
+/// The role grants (TODO-payments P3): an ordinary table, but every session
+/// reads it to decide the role a user is served at.
+const ROLE_GRANTS_TABLE: &str = sc_auth::ROLE_GRANTS_TABLE;
+/// The LLM credits ledger (TODO-payments P6): ordinary tables, but every
+/// metered agent run reads and writes them by name.
+const CREDIT_TABLES: [&str; 3] = [
+    sc_auth::CREDIT_BUCKETS_TABLE,
+    sc_auth::CREDIT_ENTRIES_TABLE,
+    sc_auth::CREDIT_ACCOUNTS_TABLE,
+];
 
 /// The columns of `users` and `_fd_roles` that the rest of the system requires
 /// to exist. Dropping one is refused regardless of grant: authentication reads
@@ -113,6 +123,64 @@ const ROLES_TABLE: &str = "_fd_roles";
 const PROTECTED_COLUMNS: &[(&str, &[&str])] = &[
     (USERS_TABLE, &["id", "email", "password_hash", "role"]),
     (ROLES_TABLE, &["id", "role", "name"]),
+    (
+        ROLE_GRANTS_TABLE,
+        &[
+            sc_auth::COL_GRANT_ID,
+            sc_auth::COL_GRANT_USER,
+            sc_auth::COL_GRANT_ROLE,
+            sc_auth::COL_GRANT_SOURCE,
+            sc_auth::COL_GRANT_SOURCE_REF,
+            sc_auth::COL_GRANT_STARTS_AT,
+            sc_auth::COL_GRANT_EXPIRES_AT,
+            sc_auth::COL_GRANT_REVOKED_AT,
+            sc_auth::COL_GRANT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_BUCKETS_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_CREDIT_AMOUNT,
+            sc_auth::COL_CREDIT_REMAINING,
+            sc_auth::COL_CREDIT_KIND,
+            sc_auth::COL_CREDIT_SOURCE,
+            sc_auth::COL_CREDIT_KEY,
+            sc_auth::COL_CREDIT_EXPIRES_AT,
+            sc_auth::COL_CREDIT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_ENTRIES_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_CREDIT_KIND,
+            sc_auth::COL_CREDIT_AMOUNT,
+            sc_auth::COL_ENTRY_BALANCE,
+            sc_auth::COL_CREDIT_SOURCE,
+            sc_auth::COL_CREDIT_KEY,
+            sc_auth::COL_ENTRY_BUCKET,
+            sc_auth::COL_ENTRY_RUN,
+            sc_auth::COL_ENTRY_AGENT,
+            sc_auth::COL_ENTRY_MODEL,
+            sc_auth::COL_ENTRY_INPUT_TOKENS,
+            sc_auth::COL_ENTRY_OUTPUT_TOKENS,
+            sc_auth::COL_ENTRY_COST,
+            sc_auth::COL_CREDIT_CREATED_AT,
+        ],
+    ),
+    (
+        sc_auth::CREDIT_ACCOUNTS_TABLE,
+        &[
+            sc_auth::COL_CREDIT_ID,
+            sc_auth::COL_CREDIT_USER,
+            sc_auth::COL_ACCOUNT_DEBT,
+            sc_auth::COL_ACCOUNT_THRESHOLD,
+            sc_auth::COL_ACCOUNT_UPDATED_AT,
+        ],
+    ),
 ];
 
 // --- what a batch may do ------------------------------------------------------
@@ -236,7 +304,8 @@ pub struct FieldSpec {
     pub attributes: Attrs,
     /// A JavaScript expression giving the value when an insert leaves the field
     /// out, with `user` and the row's other values in scope
-    /// ([`DataField::default_expression`]). Only for a `required` field.
+    /// ([`DataField::default_expression`]). On a nullable field, an expression
+    /// that gives nothing leaves the field null.
     pub default_expression: Option<String>,
 }
 
@@ -283,13 +352,22 @@ pub struct TableSettings {
     pub rls_enabled: Option<bool>,
     /// Whether offline sync records the table's changes (§14.11).
     pub sync_enabled: Option<bool>,
+    /// Whether row history records the table's changes (§14.12).
+    pub history_enabled: Option<bool>,
+    /// The least-privileged role that may read the table's history; the
+    /// admin's by default (§14.12 "Reading"). Kept only while history is on.
+    pub history_min_role: Option<u8>,
+    /// How many days the table's history keeps an entry; `0` keeps it
+    /// forever, the default (§14.12). Kept only while history is on.
+    pub history_keep_days: Option<u32>,
 }
 
 impl TableSettings {
-    /// Whether anything here touches the access rules — the four settings behind
+    /// Whether anything here touches the access rules — the settings behind
     /// [`Grants::access_changes`].
     pub fn touches_access(&self) -> bool {
         self.min_role_read.is_some()
+            || self.history_min_role.is_some()
             || self.min_role_write.is_some()
             || self.ownership_formula.is_some()
             || self.rls_enabled.is_some()
@@ -299,6 +377,8 @@ impl TableSettings {
         self.label.is_none()
             && self.description.is_none()
             && self.sync_enabled.is_none()
+            && self.history_enabled.is_none()
+            && self.history_keep_days.is_none()
             && !self.touches_access()
     }
 }
@@ -310,6 +390,13 @@ impl TableSettings {
 /// migration, and a migration framework is out of scope.
 #[derive(Debug, Clone, Default)]
 pub struct FieldSettings {
+    /// A new name for the field: its column is renamed (`RENAME COLUMN`), its
+    /// overlay row follows, and the change log's entries for the table are
+    /// rewritten to the new name in the same batch, so history stays readable
+    /// (§14.12 "Schema edits"). Refused while a formula, a constraint or
+    /// another table's key names the field. Applied first, so the other
+    /// settings of the operation are about the renamed field.
+    pub name: Option<String>,
     /// The human label.
     pub label: Option<String>,
     /// The description.
@@ -562,6 +649,16 @@ pub async fn apply(
 
     catalog.reload().await?;
 
+    // Every table the batch created or changed was edited now (the entities
+    // list's "recently edited"); a dropped one forgot its time with its overlay.
+    let edited: Vec<&str> = plan
+        .changes
+        .iter()
+        .filter(|change| !matches!(change, SchemaChanged::TableDropped(_)))
+        .map(SchemaChanged::table)
+        .collect();
+    sc_catalog::touch_tables(catalog, &edited).await?;
+
     let mut applied = plan.applied;
     for change in &plan.changes {
         match catalog.notify_schema_changed(change) {
@@ -643,6 +740,13 @@ fn refuse_on_module_table(catalog: &Catalog, op: &Operation) -> Result<()> {
     match op {
         Operation::DropTable { table } => tables.refuse_drop(table, None),
         Operation::DropField { table, field } => tables.refuse_drop(table, Some(field)),
+        Operation::AlterField {
+            table,
+            field,
+            settings,
+        } if settings.name.as_deref().is_some_and(|n| n.trim() != field) => {
+            tables.refuse_rename(table, field)
+        }
         _ => Ok(()),
     }
 }
@@ -770,11 +874,18 @@ struct Plan {
     was_rls: BTreeMap<String, bool>,
     /// Tables whose policies must be re-emitted or dropped at the end.
     rls_dirty: BTreeSet<String>,
-    /// Which tables offline sync was recording *before* the batch.
-    was_sync: BTreeSet<String>,
-    /// Tables whose sync trigger must be re-created or dropped at the end: sync
-    /// switched on or off, or a synced table's key changed.
-    sync_dirty: BTreeSet<String>,
+    /// Which tables had the change-log trigger (sync or history on) *before*
+    /// the batch.
+    was_logged: BTreeSet<String>,
+    /// Tables whose change-log trigger must be re-created or dropped at the
+    /// end: sync or history switched on or off, or a recorded table's key
+    /// changed.
+    change_log_dirty: BTreeSet<String>,
+    /// Statements that keep the change log (`_fd_changes`) in step with the
+    /// schema, run in the batch's transaction after its DDL: a renamed column's
+    /// key rewritten in the entries, a dropped table's entries removed
+    /// (§14.12 "Schema edits"; sync's S2.8 hooks here too).
+    change_log_edits: Vec<String>,
     /// Tables dropped by this batch, so nothing is emitted for them afterwards.
     dropped: BTreeSet<String>,
     /// Calculated-field expressions to validate against the final schema, as
@@ -811,17 +922,18 @@ impl Plan {
             .iter()
             .map(|t| (t.name.clone(), t.rls_enabled))
             .collect();
-        let was_sync = projection
+        let was_logged = projection
             .tables()
             .iter()
-            .filter(|t| t.sync_enabled())
+            .filter(|t| t.change_log_enabled())
             .map(|t| t.name.clone())
             .collect();
         Ok(Plan {
             projection,
             was_rls,
-            was_sync,
-            sync_dirty: BTreeSet::new(),
+            was_logged,
+            change_log_dirty: BTreeSet::new(),
+            change_log_edits: Vec::new(),
             ddl: Vec::new(),
             metas: Vec::new(),
             table_metas: BTreeMap::new(),
@@ -923,7 +1035,7 @@ impl Plan {
             }
             Operation::DropTable { table } => {
                 grants.check(grants.drop, "drop a table", GRANT_DROP)?;
-                self.drop_table(index, op, table)
+                self.drop_table(catalog, index, op, table)
             }
             Operation::AddConstraint {
                 table,
@@ -1168,7 +1280,23 @@ impl Plan {
             // Checked at the end of the batch, against the key the table ends
             // up with.
             sc_catalog::set_sync_enabled(&mut meta.attributes, enabled);
-            self.sync_dirty.insert(table.to_owned());
+            self.change_log_dirty.insert(table.to_owned());
+        }
+        if let Some(enabled) = settings.history_enabled {
+            // Likewise; the trigger is shared with sync.
+            sc_catalog::set_history_enabled(&mut meta.attributes, enabled);
+            self.change_log_dirty.insert(table.to_owned());
+        }
+        if let Some(role) = settings.history_min_role {
+            if !(1..=100).contains(&role) {
+                return Err(Error::invalid(format!(
+                    "`history_min_role` must be a role from 1 to 100, not {role}"
+                )));
+            }
+            sc_catalog::history::set_history_min_role(&mut meta.attributes, role);
+        }
+        if let Some(days) = settings.history_keep_days {
+            sc_catalog::retention::set_history_keep_days(&mut meta.attributes, days);
         }
         let meta = meta.clone();
 
@@ -1275,6 +1403,15 @@ impl Plan {
         settings: &FieldSettings,
     ) -> Result<()> {
         self.require_editable(table)?;
+        // The overlay row as stored, found by the name the field has now.
+        let stored = stored_field_meta(catalog, table, field).await?;
+        let field = match settings.name.as_deref().map(str::trim) {
+            Some(name) if name != field => {
+                self.rename_field(catalog, table, field, name)?;
+                name
+            }
+            _ => field,
+        };
         let projected = self
             .projection
             .get(table)
@@ -1290,7 +1427,6 @@ impl Plan {
             })?
             .clone();
 
-        let stored = stored_field_meta(catalog, table, field).await?;
         let mut meta = FieldMeta::new(table, field);
         if let Some(row) = &stored {
             meta = meta.id(row.id);
@@ -1442,9 +1578,9 @@ impl Plan {
                 table: table.to_owned(),
                 columns: projected.primary_key.clone(),
             });
-            // The sync trigger is keyed by the primary-key column.
-            if projected.sync_enabled() {
-                self.sync_dirty.insert(table.to_owned());
+            // The change-log trigger is keyed by the primary-key column.
+            if projected.change_log_enabled() {
+                self.change_log_dirty.insert(table.to_owned());
             }
             if generator.is_some() {
                 self.ddl.push(SchemaChange::SetColumnGenerator {
@@ -1469,6 +1605,124 @@ impl Plan {
         });
         self.applied.fields_altered.push(format!("{table}.{field}"));
         self.note_changed(table);
+        Ok(())
+    }
+
+    /// Rename `table.field` to `name`, on the projection and in the DDL, and
+    /// rewrite the change log's entries for the table to the new name.
+    ///
+    /// Refused, by name, wherever the old name is written down somewhere the
+    /// rename cannot follow: a calculated field, a row constraint or index, the
+    /// ownership formula, another table's key. Views, pages and code that name
+    /// the field are the application's, and the caller is told to update them.
+    fn rename_field(
+        &mut self,
+        catalog: &Catalog,
+        table: &str,
+        field: &str,
+        name: &str,
+    ) -> Result<()> {
+        check_identifier(name, "field")?;
+        let projected = self
+            .projection
+            .get(table)
+            .ok_or_else(|| Error::not_found(format!("table `{table}` is not in the catalog")))?
+            .clone();
+        let existing = projected.field(field).ok_or_else(|| {
+            Error::not_found(format!(
+                "table `{table}` has no field `{field}`; it has {}",
+                field_list(&projected)
+            ))
+        })?;
+        if projected.field(name).is_some() {
+            return Err(Error::invalid(format!(
+                "`{table}` already has a field `{name}`"
+            )));
+        }
+        if let Some((_, columns)) = PROTECTED_COLUMNS.iter().find(|(t, _)| *t == table)
+            && columns.contains(&field)
+        {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is a built-in column of `{table}` and keeps its name"
+            )));
+        }
+        let readers = calc_readers(&projected, field);
+        if !readers.is_empty() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is read by the calculated field(s) {}; \
+                 change them so they do not, rename, then change them back",
+                quoted(&readers)
+            )));
+        }
+        let referencing = keys_targeting(&self.projection, table, field);
+        if !referencing.is_empty() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is referenced by {}, which name it; it cannot be renamed \
+                 while they do",
+                quoted(&referencing)
+            )));
+        }
+        let constraining: Vec<String> = projected
+            .constraints
+            .iter()
+            .filter(|c| match &c.kind {
+                ConstraintKind::Formula { formula } => {
+                    formula_fields(&self.projection, table, formula).contains(field)
+                }
+                kind => kind.fields().iter().any(|f| f == field),
+            })
+            .map(|c| c.name.clone())
+            .collect();
+        if !constraining.is_empty() {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is named by the constraint(s) {}; drop them, rename, and \
+                 add them again",
+                quoted(&constraining)
+            )));
+        }
+        if projected
+            .ownership
+            .as_ref()
+            .is_some_and(|f| names_identifier(f.source(), field))
+        {
+            return Err(Error::invalid(format!(
+                "`{table}.{field}` is named by the table's ownership formula; change the \
+                 formula first"
+            )));
+        }
+
+        if !existing.is_calc() {
+            self.ddl.push(SchemaChange::RenameColumn {
+                table: table.to_owned(),
+                from: field.to_owned(),
+                to: name.to_owned(),
+            });
+        }
+        let is_key = projected.primary_key.iter().any(|k| k == field);
+        let mut projected = projected;
+        for slot in &mut projected.fields {
+            if slot.base.name == field {
+                slot.base.name = name.to_owned();
+            }
+        }
+        for key in &mut projected.primary_key {
+            if key == field {
+                *key = name.to_owned();
+            }
+        }
+        // The change-log trigger is keyed by the primary-key column's name.
+        if is_key && projected.change_log_enabled() {
+            self.change_log_dirty.insert(table.to_owned());
+        }
+        self.projection.insert(projected);
+        self.refresh_full_text_index(table);
+        if let Some(sql) = rename_in_change_log_sql(catalog, &self.projection, table, field, name) {
+            self.change_log_edits.push(sql);
+        }
+        self.applied.notes.push(format!(
+            "`{table}.{field}` is now `{table}.{name}`; views, pages and code that name \
+             `{field}` need the new name"
+        ));
         Ok(())
     }
 
@@ -1718,9 +1972,19 @@ impl Plan {
         Ok(())
     }
 
-    fn drop_table(&mut self, index: usize, op: &Operation, table: &str) -> Result<()> {
+    fn drop_table(
+        &mut self,
+        catalog: &Catalog,
+        index: usize,
+        op: &Operation,
+        table: &str,
+    ) -> Result<()> {
         self.require_editable(table)?;
-        if table == USERS_TABLE || table == ROLES_TABLE {
+        if table == USERS_TABLE
+            || table == ROLES_TABLE
+            || table == ROLE_GRANTS_TABLE
+            || CREDIT_TABLES.contains(&table)
+        {
             return Err(Error::invalid(format!(
                 "`{table}` is a built-in table and is never dropped"
             )));
@@ -1737,6 +2001,11 @@ impl Plan {
                 quoted(&names)
             )));
         }
+        // Its change-log entries go with it, so a later table of the same name
+        // does not inherit its history.
+        if let Some(sql) = forget_in_change_log_sql(catalog, &self.projection, table) {
+            self.change_log_edits.push(sql);
+        }
         self.ddl.push(SchemaChange::DropTable {
             name: table.to_owned(),
             if_exists: false,
@@ -1745,7 +2014,7 @@ impl Plan {
         self.dropped.insert(table.to_owned());
         self.rls_dirty.remove(table);
         // Dropping the table drops its trigger.
-        self.sync_dirty.remove(table);
+        self.change_log_dirty.remove(table);
         self.table_metas.remove(table);
         self.metas.push(MetaWrite {
             index,
@@ -2234,11 +2503,15 @@ impl Plan {
             };
             validate_ownership(catalog, &self.projection, table)?;
         }
-        for name in &self.sync_dirty {
-            if let Some(table) = self.projection.get(name)
-                && table.sync_enabled()
-            {
-                sc_catalog::sync_key(catalog, table)?;
+        for name in &self.change_log_dirty {
+            let Some(table) = self.projection.get(name) else {
+                continue;
+            };
+            if table.sync_enabled() {
+                sc_catalog::change_log_key(catalog, table, ChangeLogFeature::Sync)?;
+            }
+            if table.history_enabled() {
+                sc_catalog::change_log_key(catalog, table, ChangeLogFeature::History)?;
             }
         }
         Ok(notes)
@@ -2290,21 +2563,122 @@ impl Plan {
             }
         }
         // Last, so the trigger is keyed by the column the batch ends with.
-        for name in &self.sync_dirty {
+        // One trigger serves sync and history, so it is dropped only when
+        // both are off.
+        for name in &self.change_log_dirty {
             let Some(table) = self.projection.get(name) else {
                 continue;
             };
-            if table.sync_enabled() {
-                let pk = sc_catalog::sync_key(catalog, table)?;
-                steps.push(SchemaStep::Sql(sc_catalog::enable_sync_sql(
-                    dialect, name, &pk,
+            if table.change_log_enabled() {
+                let feature = if table.sync_enabled() {
+                    ChangeLogFeature::Sync
+                } else {
+                    ChangeLogFeature::History
+                };
+                let pk = sc_catalog::change_log_key(catalog, table, feature)?;
+                steps.push(SchemaStep::Sql(sc_catalog::enable_change_log_sql(
+                    dialect, table, &pk,
                 )));
-            } else if self.was_sync.contains(name) {
-                steps.push(SchemaStep::Sql(sc_catalog::disable_sync_sql(dialect, name)));
+            } else if self.was_logged.contains(name) {
+                steps.push(SchemaStep::Sql(sc_catalog::disable_change_log_sql(
+                    dialect, name,
+                )));
             }
         }
+        steps.extend(self.change_log_edits.iter().cloned().map(SchemaStep::Sql));
         Ok(steps)
     }
+}
+
+/// Whether `table` may have change-log entries, in the database the batch
+/// changes it in: the log is kept in Saltcorn's own database, once it has been
+/// bootstrapped there.
+fn has_change_log(catalog: &Catalog, projection: &SchemaProjection, table: &str) -> bool {
+    catalog.primary().capabilities().change_triggers
+        && catalog
+            .get(sc_catalog::CHANGES_TABLE)
+            .is_ok_and(|log| log.is_some())
+        && catalog
+            .get(sc_catalog::SYNC_KEYS_TABLE)
+            .is_ok_and(|keys| keys.is_some())
+        && projection
+            .get(table)
+            .is_some_and(|t| t.database == DbId::primary())
+}
+
+/// The statement that rewrites the key `from` to `to` in `table`'s change-log
+/// entries, old and new values both, or `None` when the table has no log.
+fn rename_in_change_log_sql(
+    catalog: &Catalog,
+    projection: &SchemaProjection,
+    table: &str,
+    from: &str,
+    to: &str,
+) -> Option<String> {
+    if !has_change_log(catalog, projection, table) {
+        return None;
+    }
+    let dialect = catalog.primary().dialect();
+    if dialect.is_sqlite() {
+        let path =
+            |key: &str| dialect.quote_literal(&format!("$.\"{}\"", key.replace('"', "\\\"")));
+        let (table, from, to) = (dialect.quote_literal(table), path(from), path(to));
+        let renamed = |column: &str| {
+            format!(
+                "{column} = CASE WHEN json_type({column}, {from}) IS NOT NULL \
+                 THEN json_set(json_remove({column}, {from}), {to}, {column} -> {from}) \
+                 ELSE {column} END"
+            )
+        };
+        return Some(format!(
+            "UPDATE {log} SET {old}, {new} WHERE table_name = {table} \
+             AND (json_type(old_values, {from}) IS NOT NULL \
+                  OR json_type(new_values, {from}) IS NOT NULL);",
+            log = dialect.quote_ident(sc_catalog::CHANGES_TABLE),
+            old = renamed("old_values"),
+            new = renamed("new_values"),
+        ));
+    }
+    let (table, from, to) = (
+        dialect.quote_literal(table),
+        dialect.quote_literal(from),
+        dialect.quote_literal(to),
+    );
+    let renamed = |column: &str| {
+        format!(
+            "{column} = CASE WHEN {column} ? {from} \
+             THEN ({column} - {from}) || jsonb_build_object({to}, {column} -> {from}) \
+             ELSE {column} END"
+        )
+    };
+    Some(format!(
+        "UPDATE {log} SET {old}, {new} WHERE table_name = {table} \
+         AND (old_values ? {from} OR new_values ? {from});",
+        log = dialect.quote_ident(sc_catalog::CHANGES_TABLE),
+        old = renamed("old_values"),
+        new = renamed("new_values"),
+    ))
+}
+
+/// The statements that remove a dropped table's change-log entries and sync's
+/// key pairs for it, or `None` when the table has no log. Its changesets are
+/// left to the cleanup job, which removes those left empty.
+fn forget_in_change_log_sql(
+    catalog: &Catalog,
+    projection: &SchemaProjection,
+    table: &str,
+) -> Option<String> {
+    if !has_change_log(catalog, projection, table) {
+        return None;
+    }
+    let dialect = catalog.primary().dialect();
+    let table = dialect.quote_literal(table);
+    Some(format!(
+        "DELETE FROM {log} WHERE table_name = {table};\n\
+         DELETE FROM {keys} WHERE table_name = {table};",
+        log = dialect.quote_ident(sc_catalog::CHANGES_TABLE),
+        keys = dialect.quote_ident(sc_catalog::SYNC_KEYS_TABLE),
+    ))
 }
 
 /// The stored `_fd_fields` row for a field, or `None` — including on a database
@@ -2433,9 +2807,10 @@ fn validate_ownership(
 }
 
 /// Validate a field's default-value expression against a projected schema: it
-/// must parse and validate over the insert scope (`user` and the row's fields),
-/// and it belongs on a stored `NOT NULL` field only — a nullable field is
-/// already allowed to be left out, and a calculated one is never written.
+/// must parse and validate over the insert scope (`user`, `session` and the
+/// row's fields), and it belongs on a stored field — a calculated one is never
+/// written. A nullable field may have one too: what it gives is used, and
+/// nothing (`user && user.id` for a guest) leaves the field null.
 fn validate_default_expression(
     shape: &sc_expr::SchemaShape,
     table: &str,
@@ -2449,12 +2824,6 @@ fn validate_default_expression(
         return Err(Error::invalid(format!(
             "field `{table}.{name}`: a calculated field is never written, so it cannot \
              have a default value"
-        )));
-    }
-    if !field.required {
-        return Err(Error::invalid(format!(
-            "field `{table}.{name}`: only a required (NOT NULL) field can have a default \
-             value; make it required, or clear its default"
         )));
     }
     let formula = sc_expr::Formula::parse(expression)
@@ -2480,10 +2849,10 @@ fn validate_calc_expression(
     let analysis = formula
         .validate(shape, table)
         .map_err(|e| Error::invalid(format!("calculated field `{table}.{field}`: {e}")))?;
-    if analysis.uses(sc_expr::Ambient::User) || !analysis.flags.is_empty() {
+    if analysis.uses_caller() || !analysis.flags.is_empty() {
         return Err(Error::invalid(format!(
-            "calculated field `{table}.{field}`: a calculated field cannot use `user` \
-             or the operation flags"
+            "calculated field `{table}.{field}`: a calculated field cannot use `user`, \
+             `session` or the operation flags"
         )));
     }
     Ok(analysis)

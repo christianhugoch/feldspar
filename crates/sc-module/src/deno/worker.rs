@@ -44,15 +44,15 @@
 //! before its main module ran. A function set on `globalThis` is not, and it
 //! costs less: `v8::Function::new` and a `v8::Global`.
 //!
-//! The `id` is still the worker's, because the reason for it never was the
-//! transport: many calls are in flight at once and a slow module's action must
+//! The `id` is still the worker's — a random token rather than a counter, see
+//! [`CallToken`] — because the reason for it never was the transport: many calls are in flight at once and a slow module's action must
 //! not hold anybody else's. What crosses back is `JSON.stringify`'s text and not
 //! the value, because the value is a *module's* object — a function property, a
 //! stream, a cycle — and `JSON.stringify` is the rule v1 itself applies to one.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -251,6 +251,17 @@ impl Watchdog {
         self.tick.store(now, Ordering::SeqCst);
     }
 
+    /// Hold the slice until the next [`tick`](Watchdog::tick): the stamp is put
+    /// out of reach, so no elapsed time is over it. What `Host::start` holds it
+    /// over is the host script coming up — this binary's own JavaScript and
+    /// `deno_node`'s, no module's — which can take longer than a slice on a
+    /// machine that is busy (a build and a reload at once). A slice trip there
+    /// stops the isolate mid-load, which is the `Uncaught null` a start then
+    /// fails with. The heap is still watched.
+    fn hold(&self) {
+        self.tick.store(u64::MAX, Ordering::SeqCst);
+    }
+
     /// Stop the isolate, and remember why. The first reason wins: a heap trip
     /// and a slice trip in the same instant are one termination, and the worker
     /// should report whichever actually stopped it.
@@ -288,9 +299,25 @@ impl Watchdog {
 // The three functions the isolate answers through
 // ---------------------------------------------------------------------------
 
+/// What a call is named by inside the isolate: a random (v4) UUID's 122 bits.
+///
+/// Not a counter, because the name is **authority**. Every module on a worker
+/// shares one global, so any of them can call `__scAsk`, `__scDbCall`,
+/// `__scDone` or `__scFail` with a call id of its choosing — and an ask is run
+/// as the caller of the call it names. A counter would let one module guess a
+/// concurrent call's id and have its queries run as that call's user (an
+/// admin's, say), or settle that call with an answer of its own making. A
+/// token is only known to the code the call was handed to.
+type CallToken = String;
+
+/// A fresh [`CallToken`].
+fn call_token() -> CallToken {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 /// One call, settled.
 struct Settled {
-    id: u64,
+    id: CallToken,
     outcome: Result<Json>,
 }
 
@@ -298,7 +325,7 @@ struct Settled {
 struct Asked {
     /// The call it belongs to — which is what says whose authority it runs
     /// under, because the caller of that call is where the host is borrowed.
-    call: u64,
+    call: CallToken,
     /// The ask's own id, which the answer carries back.
     ask: u64,
     /// `{ surface, plan }`, as the host script built it.
@@ -324,7 +351,7 @@ struct Bridge {
 /// A closed channel is not an error worth a word: it means the worker has
 /// already ended and is failing its calls by name, and this answer is one the
 /// caller was told about a moment ago.
-fn settle(scope: &mut v8::PinScope, id: u64, outcome: Result<Json>) {
+fn settle(scope: &mut v8::PinScope, id: CallToken, outcome: Result<Json>) {
     let op_state = deno_core::JsRuntime::op_state_from(scope);
     let state = op_state.borrow();
     if let Some(bridge) = state.try_borrow::<Bridge>() {
@@ -334,7 +361,7 @@ fn settle(scope: &mut v8::PinScope, id: u64, outcome: Result<Json>) {
 
 /// `__scDone(id, jsonText)` — the module answered.
 fn host_done(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    let id = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
+    let id = args.get(0).to_rust_string_lossy(scope);
     let text = args.get(1).to_rust_string_lossy(scope);
     // The host script encodes with `JSON.stringify` and encodes a failure to do
     // so as a *failure*, so anything unreadable here is a bug in this pair
@@ -351,7 +378,7 @@ fn host_done(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv:
 /// is [`module_error`]'s, so a module's throw is an **Application** error, as it
 /// was over the pipe.
 fn host_fail(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    let id = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
+    let id = args.get(0).to_rust_string_lossy(scope);
     let message = args.get(1).to_rust_string_lossy(scope);
     settle(scope, id, Err(module_error(&message)));
 }
@@ -366,7 +393,7 @@ fn host_fail(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv:
 /// own side, so an unreadable one here is a bug in this pair rather than a
 /// module's doing.
 fn host_ask(scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
-    let call = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
+    let call = args.get(0).to_rust_string_lossy(scope);
     let ask = args.get(1).integer_value(scope).unwrap_or(0).max(0) as u64;
     let text = args.get(2).to_rust_string_lossy(scope);
     let request = serde_json::from_str(&text).unwrap_or(Json::Null);
@@ -481,8 +508,7 @@ impl Host {
         // and a stale copy from an older version would be a bug nobody would
         // look for.
         let script = config.root.join(HOST_SCRIPT_NAME);
-        std::fs::write(&script, host_script())
-            .map_err(|e| Error::config(format!("writing {}: {e}", script.display())))?;
+        write_host_script(&script, config.index)?;
         let cwd = std::env::current_dir()
             .map_err(|e| Error::config(format!("the server has no working directory: {e}")))?;
         let url = deno_core::resolve_path(script.to_string_lossy().as_ref(), &cwd)
@@ -493,6 +519,7 @@ impl Host {
             &url,
             config.max_heap,
             &config.permissions,
+            config.view_runtime.as_deref(),
         )
         .map_err(|reason| {
             Error::config(format!("the module runtime could not be started: {reason}"))
@@ -539,10 +566,15 @@ impl Host {
         // three functions off the global and hold them.
         install_seam(&mut worker, config.view_runtime.as_deref())?;
 
+        watchdog.hold();
+        let started = worker.execute_main_module(&url).await;
         watchdog.tick();
-        worker
-            .execute_main_module(&url)
-            .await
+        if let Some(Trip::Heap) = watchdog.took_fired() {
+            return Err(Error::config(
+                "the module host script would not start: it exhausted the worker's heap",
+            ));
+        }
+        started
             .map_err(|e| Error::config(format!("the module host script would not start: {e}")))?;
         let entry = global_function(&mut worker, "__scModuleHost")?;
         let answer = global_function(&mut worker, "__scAnswer")?;
@@ -602,17 +634,14 @@ impl Host {
     /// — which is at its first `await`. The answer arrives later, through
     /// [`host_done`] or [`host_fail`], while this worker's event loop is being
     /// polled.
-    fn call(&mut self, id: u64, request: &Json) -> Result<()> {
+    fn call(&mut self, id: &str, request: &Json) -> Result<()> {
         deno_core::scope!(scope, self.worker.js_runtime);
         v8::tc_scope!(let scope, scope);
         let entry = v8::Local::new(scope, &self.entry);
         let receiver: v8::Local<v8::Value> = v8::undefined(scope).into();
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "an id is a per-worker counter; a worker that answered 2^53 calls has \
-                      other problems"
-        )]
-        let id_value: v8::Local<v8::Value> = v8::Number::new(scope, id as f64).into();
+        let id_value: v8::Local<v8::Value> = v8::String::new(scope, id)
+            .ok_or_else(|| Error::msg("the module worker could not name this call"))?
+            .into();
         let request = deno_core::serde_v8::to_v8(scope, request)
             .map_err(|e| Error::msg(format!("encoding a module-host request: {e}")))?;
         entry.call(scope, receiver, &[id_value, request]);
@@ -811,27 +840,25 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
             }
         };
 
-        let mut pending: HashMap<u64, Pending> = HashMap::new();
-        let mut next_id: u64 = 1;
+        let mut pending: HashMap<CallToken, Pending> = HashMap::new();
 
         // Replayed **before** the first job is called, so no caller's `run` can
         // reach a fresh worker before its modules are back. Not awaited: the
         // host script's own `loading` map makes a `run` wait for a load that is
         // still in flight, which is the same guarantee for less machinery.
         for (name, request) in &loads {
-            let id = next_id;
-            next_id += 1;
+            let id = call_token();
             let request = json!({
                 "op": "load",
                 "module": name,
                 "dir": request.dir.display().to_string(),
                 "configuration": request.configuration,
             });
-            if host.call(id, &request).is_ok() {
+            if host.call(&id, &request).is_ok() {
                 pending.insert(id, Pending::Replay(name.clone()));
             }
         }
-        submit(&mut host, &mut next_id, &mut pending, *first);
+        submit(&mut host, &mut pending, *first);
 
         // Whether the event loop has said it has nothing left to do.
         //
@@ -864,7 +891,7 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
                 }
                 Woke::Control(Some(Control::Job(job))) => {
                     resting = false;
-                    submit(&mut host, &mut next_id, &mut pending, *job);
+                    submit(&mut host, &mut pending, *job);
                 }
                 // Settling a promise queues microtasks, so the event loop has
                 // work again — exactly as submitting a job does, and for the
@@ -928,6 +955,28 @@ async fn serve(config: WorkerConfig, mut rx: tokio::sync::mpsc::UnboundedReceive
     }
 }
 
+/// Write the host script where the workers load it from, unless it is already
+/// there as this binary has it.
+///
+/// Every worker of every process over this modules directory (the server, and a
+/// `feldspar` command run beside it) writes the same file as it starts, so a
+/// plain write — truncate, then fill — can be read half-written by a worker
+/// starting at that moment. Writing a file of this worker's own and renaming it
+/// over the shared one is atomic: a reader sees the old script or the new one.
+fn write_host_script(script: &Path, index: usize) -> Result<()> {
+    let wanted = host_script();
+    if std::fs::read(script).is_ok_and(|have| have == wanted.as_bytes()) {
+        return Ok(());
+    }
+    let staged = script.with_extension(format!("mjs.{}-{index}.tmp", std::process::id()));
+    std::fs::write(&staged, wanted)
+        .and_then(|()| std::fs::rename(&staged, script))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            Error::config(format!("writing {}: {e}", script.display()))
+        })
+}
+
 /// Name what stopped a worker, in a sentence an admin can act on.
 fn ending_reason(host: &Host, ended: &End, slice: Duration) -> String {
     if let Some(trip) = host.watchdog.took_fired() {
@@ -960,9 +1009,8 @@ fn ending_reason(host: &Host, ended: &End, slice: Duration) -> String {
 /// Give a job an id, put this server's schema in front of it if the isolate does
 /// not already hold it, call the isolate, and remember who is waiting for the
 /// answer.
-fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending>, job: Job) {
-    let id = *next_id;
-    *next_id += 1;
+fn submit(host: &mut Host, pending: &mut HashMap<CallToken, Pending>, job: Job) {
+    let id = call_token();
     let Job {
         mut request,
         remember,
@@ -999,7 +1047,7 @@ fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending
             views_defined = Some((application, generation));
         }
     }
-    if let Err(e) = host.call(id, &request) {
+    if let Err(e) = host.call(&id, &request) {
         let _ = reply.send(Err(e));
         return;
     }
@@ -1031,7 +1079,7 @@ fn submit(host: &mut Host, next_id: &mut u64, pending: &mut HashMap<u64, Pending
 /// for. A module told that fails at its `await`; one told nothing would hang
 /// until the call's own wall clock ran out, which is the failure this whole
 /// system's naming rule exists to prevent.
-fn route(host: &mut Host, pending: &HashMap<u64, Pending>, asked: Asked) {
+fn route(host: &mut Host, pending: &HashMap<CallToken, Pending>, asked: Asked) {
     let refused = match pending.get(&asked.call) {
         Some(Pending::Call { asks: Some(to), .. }) => {
             match to.send(HostAsk {
@@ -1060,7 +1108,7 @@ fn route(host: &mut Host, pending: &HashMap<u64, Pending>, asked: Asked) {
 /// One answer: to whoever is waiting for it, and to the replay table if it was a
 /// load that worked.
 fn dispatch(
-    pending: &mut HashMap<u64, Pending>,
+    pending: &mut HashMap<CallToken, Pending>,
     loads: &mut BTreeMap<String, LoadRequest>,
     answer: Settled,
 ) {
@@ -1085,5 +1133,55 @@ fn dispatch(
                 sc_log::log_error!("feldspar: replaying the load of `{name}` failed: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host script's own start is not a module's slice: held, the
+    /// watchdog lets any amount of time pass, and the next tick re-arms it.
+    #[test]
+    fn a_held_watchdog_does_not_trip_until_it_is_ticked_again() {
+        let mut runtime = deno_core::JsRuntime::new(Default::default());
+        let dog = Watchdog::start(
+            runtime.v8_isolate().thread_safe_handle(),
+            Duration::from_millis(40),
+        );
+        dog.hold();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(!dog.tripped(), "a held slice tripped");
+        dog.tick();
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(dog.tripped(), "the slice was not re-armed by the tick");
+        dog.halt();
+    }
+
+    /// Workers starting together never read a half-written host script: it is
+    /// renamed into place, and left alone when it is already this binary's.
+    #[test]
+    fn the_host_script_is_replaced_whole_and_only_when_it_differs() {
+        let dir = std::env::temp_dir().join(format!("sc-host-script-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join(HOST_SCRIPT_NAME);
+        std::fs::write(&script, "// an older binary's").unwrap();
+
+        write_host_script(&script, 0).unwrap();
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), host_script());
+        let written = std::fs::metadata(&script).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        write_host_script(&script, 1).unwrap();
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().modified().unwrap(),
+            written,
+            "an identical script was rewritten"
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from(HOST_SCRIPT_NAME)]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

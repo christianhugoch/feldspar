@@ -120,6 +120,7 @@ pub(crate) fn bindings(
     if let Some(request) = request {
         bindings.extend(request.iter().map(|(k, v)| (k.clone(), v.clone())));
         bindings.insert("user".to_owned(), event.user.clone().unwrap_or(Json::Null));
+        origin_bindings(event, &mut bindings);
         return bindings;
     }
     if let Some(context) = run_context {
@@ -145,7 +146,26 @@ pub(crate) fn bindings(
     }
     bindings.insert("user".to_owned(), event.user.clone().unwrap_or(Json::Null));
     bindings.insert("payload".to_owned(), event.payload.clone());
+    origin_bindings(event, &mut bindings);
     bindings
+}
+
+/// Where the event came from, bound beside `user`: `app` — the application
+/// whose request raised it, `{ id, url, scheme }` (TODO-payments P1.3) — and
+/// `session` — the caller's guest session, `{ id }` (P1.5). Each is null when
+/// there is none, so a body may always ask.
+fn origin_bindings(event: &Event, bindings: &mut BTreeMap<String, Json>) {
+    bindings.insert(
+        "app".to_owned(),
+        event.app.as_ref().map_or(Json::Null, |app| app.to_json()),
+    );
+    bindings.insert(
+        "session".to_owned(),
+        event
+            .session
+            .as_ref()
+            .map_or(Json::Null, |id| serde_json::json!({ "id": id })),
+    );
 }
 
 /// What an error from this run is about: the trigger, or the custom query whose
@@ -192,6 +212,9 @@ pub struct Hosts<'a> {
     /// capability: every body has a console, and this is only whether anybody
     /// is reading it.
     console: Option<ConsoleSink>,
+    /// Where this run records what it touched, when the context wants it (a
+    /// render cache).
+    trace: Option<sc_expr::TraceSink>,
     /// The code libraries this run's `lib()` may import (TODO F3.2).
     libraries: Option<Arc<sc_expr::CodeLibraries>>,
     /// Where this run's `ratelimit` counts (TODO F4.5): its application, or
@@ -278,6 +301,7 @@ impl<'a> Hosts<'a> {
             live: ctx.catalog.live_host(),
             // Whoever asked for the transcript, if anyone did.
             console: ctx.console().cloned(),
+            trace: ctx.trace().cloned(),
             // What `lib()` may import (TODO F3.2): the application's libraries
             // over the instance's for a custom query, the instance's alone for
             // a trigger.
@@ -327,6 +351,7 @@ impl<'a> Hosts<'a> {
             live: surfaces.live,
             schema: self.schema(),
             console: self.console.clone(),
+            trace: self.trace.clone(),
             timeout,
             libraries: self.libraries.clone(),
             ratelimit_scope: self.ratelimit_scope.clone(),
@@ -416,7 +441,7 @@ mod tests {
         let bound = bindings(&update, None, None);
         assert_eq!(
             bound.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["old", "payload", "row", "user"]
+            vec!["app", "old", "payload", "row", "session", "user"]
         );
         assert_eq!(bound["old"]["title"], json!("was"));
         assert_eq!(bound["user"]["email"], json!("a@b.c"));
@@ -462,7 +487,7 @@ mod tests {
         let bound = bindings(&called, None, Some(&request));
         assert_eq!(
             bound.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["body", "query", "user"]
+            vec!["app", "body", "query", "session", "user"]
         );
         assert_eq!(bound["body"]["title"], json!("Dune"));
         assert_eq!(bound["query"]["since"], json!(1965));

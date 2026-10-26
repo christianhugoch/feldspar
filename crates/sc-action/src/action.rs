@@ -271,6 +271,10 @@ pub struct ActionContext<'a> {
     /// straight to the engine — nothing between here and the isolate has to
     /// know the admin is watching.
     console: Option<ConsoleSink>,
+    /// Where this run's code body records what it touched — the tables it
+    /// named and whether it wrote — when somebody wants to reuse its answer (a
+    /// server-rendered site's render cache). `None` for every ordinary firing.
+    trace: Option<sc_expr::TraceSink>,
     /// Whether this action is a **workflow step** rather than a trigger's own
     /// body, which is what puts [`context`](ActionContext::context) in scope for
     /// its settings.
@@ -321,6 +325,7 @@ impl<'a> ActionContext<'a> {
             triggers: None,
             tx: None,
             console: None,
+            trace: None,
             context: Attrs::new(),
             in_run: false,
             request: None,
@@ -367,6 +372,17 @@ impl<'a> ActionContext<'a> {
     /// Where this action's code body should send what it prints, if anywhere.
     pub fn console(&self) -> Option<&ConsoleSink> {
         self.console.as_ref()
+    }
+
+    /// Record what this action's code body touches into `trace`.
+    pub fn with_trace(mut self, trace: sc_expr::TraceSink) -> ActionContext<'a> {
+        self.trace = Some(trace);
+        self
+    }
+
+    /// Where this action's code body should record what it touches, if anywhere.
+    pub fn trace(&self) -> Option<&sc_expr::TraceSink> {
+        self.trace.as_ref()
     }
 
     /// Supply the dispatcher, so this action can run another trigger.

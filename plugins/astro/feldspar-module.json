@@ -1,0 +1,16 @@
+{
+  "name": "@feldspar/astro",
+  "language": "javascript",
+  "title": "Astro (websites)",
+  "description": "Build a website — a landing page, a blog, a news page, a contact form — in Astro's .astro syntax, rendered on the server for fast, search-friendly pages.",
+  "supplies": [
+    "An application framework, \"Astro (website)\": pages in .astro files whose frontmatter reads the database like a JavaScript code action; pages without live data are prerendered at build time, the rest are rendered per request; scoped styles, bundled scripts, a sitemap and robots.txt.",
+    "Two tables for A/B tests of landing pages, astro_exposures and astro_conversions: which variant of an <Optimise> each visitor was shown, and the goals they reached."
+  ],
+  "installs": [],
+  "permissions": {},
+  "tables": [
+    "astro_exposures",
+    "astro_conversions"
+  ]
+}

@@ -54,6 +54,7 @@ pub mod delegate;
 pub mod driver;
 pub mod ledger;
 pub mod machine;
+pub mod meter;
 pub mod registry;
 pub mod run;
 pub mod run_store;
@@ -98,11 +99,15 @@ pub use machine::{
     AgentLoop, Budget, Budgets, Conclusion, IMAGE_STUB, Step, StepMeta, ToolOutcome,
     trait_state_key,
 };
+pub use meter::{
+    ATTR_CREDITS_MIN_BALANCE, ATTR_CREDITS_PER_1K_INPUT, ATTR_CREDITS_PER_1K_OUTPUT,
+    ATTR_CREDITS_PER_DOLLAR, Meter,
+};
 pub use registry::AgentRegistry;
 pub use run::{ATTR_MODE, ATTR_ROLE, Run, RunId, RunKind, RunMode, RunState};
 pub use run_store::{
-    RUNS_TABLE, abort_run, bootstrap_runs, delete_run, list_live_children, list_runs, load_run,
-    note_wakeup, require_run, run_insert, run_update, save_run,
+    RUNS_TABLE, abort_run, bootstrap_runs, delete_run, list_live_children, list_runs,
+    list_runs_for, load_run, note_wakeup, require_run, run_insert, run_update, save_run,
 };
 pub use store::{
     AGENTS_TABLE, bootstrap_agents, delete_agent, list_agents, load_agent, load_agent_by_name,

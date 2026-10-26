@@ -50,8 +50,8 @@ use crate::lsp::{LSP_ROUTE, ServerSlots, language_server_upgrade, server_slots};
 use crate::mcp::MCP_ROUTE;
 use crate::observe::{STREAM_OBSERVE_ROUTE, stream_observe_upgrade};
 use crate::security::{
-    ANALYTICS_CONTENT_SECURITY_POLICY, AnonymousCaller, CONTENT_SECURITY_POLICY, CSRF_COOKIE,
-    CSRF_HEADER, CsrfPolicy, IDE_CONTENT_SECURITY_POLICY, PREVIEW_COOKIE, SESSION_COOKIE,
+    ANALYTICS_CONTENT_SECURITY_POLICY, AnonymousCaller, CONTENT_SECURITY_POLICY, CSRF_HEADER,
+    CsrfPolicy, GUEST_COOKIE, IDE_CONTENT_SECURITY_POLICY, PREVIEW_COOKIE, SESSION_COOKIE,
     admin_content_security_policy, build_cookie, csrf_middleware, is_native_client,
     upgrade_origin_allowed, upgrade_origin_refused,
 };
@@ -165,6 +165,8 @@ pub(crate) struct AppState {
     extra_base_domains: Arc<Vec<String>>,
     /// How many more language servers the IDE may start (design §12.1).
     lsp_slots: ServerSlots,
+    /// The language server the IDE runs ([`ServerConfig::language_server`]).
+    language_server: Arc<std::path::PathBuf>,
     /// The tier-2 MCP tools: one per endpoint tagged
     /// [`Endpoint::mcp`](sc_api::Endpoint::mcp), built once here because
     /// dispatching one needs the handler registry (§13.6).
@@ -288,6 +290,7 @@ pub fn build_router_with_apps(
         base_domain: config.base_domain.clone().map(Arc::new),
         extra_base_domains: Arc::new(config.extra_base_domains.clone()),
         lsp_slots: server_slots(),
+        language_server: Arc::new(config.language_server.clone()),
         mcp_endpoint_tools,
         max_request_body: config.max_request_body,
         max_upload_bytes: config.max_upload_bytes,
@@ -418,6 +421,34 @@ pub fn build_router_with_apps(
             crate::oauth::COMPLETE_ROUTE,
             axum::routing::get(crate::oauth::complete),
         )
+        // Module webhooks (TODO-payments P1.1): a provider's events, on every
+        // host as the OAuth routes are. A route of their own because the
+        // answer is whatever the module says, bytes and all, and with a body
+        // limit of their own: an unauthenticated caller is held to 1 MiB.
+        .route(
+            crate::webhooks::HOOK_ROUTE,
+            axum::routing::on(
+                axum::routing::MethodFilter::GET.or(axum::routing::MethodFilter::POST),
+                crate::webhooks::hook,
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(
+                sc_module::WEBHOOK_MAX_BODY,
+            )),
+        )
+        .route(
+            crate::webhooks::HOOK_REST_ROUTE,
+            axum::routing::on(
+                axum::routing::MethodFilter::GET.or(axum::routing::MethodFilter::POST),
+                crate::webhooks::hook_rest,
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(
+                sc_module::WEBHOOK_MAX_BODY,
+            )),
+        )
+        .route(
+            crate::oauth::CONSENT_ROUTE,
+            axum::routing::get(crate::oauth::consent),
+        )
         .fallback(dispatch)
         // Explicit rather than axum's implicit 2 MiB (TODO F2.5): every `Bytes`
         // extractor above reads at most `--max-request-body`. The fallback reads
@@ -427,6 +458,9 @@ pub fn build_router_with_apps(
             config.max_request_body,
         ))
         .with_state(state.clone())
+        // Every request is one changeset (§14.12): what it writes, and what the
+        // triggers its writes fire write, is one action to read back or undo.
+        .layer(axum::middleware::from_fn(request_changeset))
         // CSRF runs outside dispatch so it guards every route and can mint the
         // double-submit cookie on the way out. It asks the live app registry
         // whether a failing request is for an endpoint open to the public role,
@@ -499,9 +533,34 @@ pub fn build_router_with_apps(
         // other refusal this server makes is `{error}` JSON, and a client should
         // not need a second parser for this one.
         .layer(axum::middleware::from_fn(json_payload_too_large))
+        // Outside everything that reads `Host` — routing, CSRF, the handlers
+        // that build links from it — and inside logging, so a refusal is logged.
+        .layer(axum::middleware::from_fn(
+            crate::security::host_header_guard,
+        ))
         .layer(axum::middleware::from_fn(crate::logging::log_requests));
 
     Ok(app)
+}
+
+/// Run the request inside a changeset of its own (§14.12), keyed to its
+/// session cookie when it carries one.
+///
+/// Minted here rather than where the caller is known because a request has
+/// many ways to learn its caller and one way in. The cookie is not checked
+/// here: a changeset records its session only for a writer with a user, and a
+/// cookie that names no live session has none. Minting costs nothing that is
+/// kept: the `_fd_changesets` row is written with the first recorded change.
+async fn request_changeset(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let session = CookieJar::from_headers(request.headers())
+        .get(SESSION_COOKIE)
+        .map(|cookie| sc_auth::changeset_session_key(cookie.value()));
+    let changeset =
+        sc_catalog::Changeset::new(sc_catalog::ChangesetSource::Request).session(session);
+    sc_catalog::changeset::scope(Arc::new(changeset), next.run(request)).await
 }
 
 /// The `413` every body over a limit gets, as `{error}` JSON.
@@ -620,10 +679,14 @@ async fn health() -> Response {
 /// lookup, the admin check, and reading the body.
 async fn upload(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     jar: CookieJar,
     AxumPath((store_name, path)): AxumPath<(String, String)>,
     body: axum::body::Body,
 ) -> Response {
+    if let Some(refused) = admin_host_only(&state, &headers, &jar) {
+        return refused;
+    }
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let user = match session_user(&state, &jar).await {
         Ok(user) => user,
@@ -697,6 +760,9 @@ async fn download(
     headers: axum::http::HeaderMap,
     AxumPath((store_name, path)): AxumPath<(String, String)>,
 ) -> Response {
+    if let Some(refused) = admin_host_only(&state, &headers, &jar) {
+        return refused;
+    }
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let user = match session_user(&state, &jar).await {
         Ok(user) => user,
@@ -743,8 +809,13 @@ async fn download(
 /// the half the endpoint model cannot describe. The work is the `createBackup`
 /// handler's: it holds the catalog, it persists the selection, and it is where an
 /// admin-only check has already been applied by the time the bytes exist.
-async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Bytes) -> Response {
-    let (user, session_token) = match admin_of(&state, &jar).await {
+async fn create_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+    body: Bytes,
+) -> Response {
+    let (user, session_token) = match admin_of(&state, &headers, &jar).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -804,8 +875,13 @@ async fn create_backup(State(state): State<AppState>, jar: CookieJar, body: Byte
 /// chosen from it. That is one upload rather than two — the alternative, sending
 /// the file again with the choice, means a browser holding a large archive twice
 /// and an admin waiting for it twice.
-async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body) -> Response {
-    let (user, session_token) = match admin_of(&state, &jar).await {
+async fn upload_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+    body: Body,
+) -> Response {
+    let (user, session_token) = match admin_of(&state, &headers, &jar).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -863,14 +939,45 @@ async fn upload_backup(State(state): State<AppState>, jar: CookieJar, body: Body
 /// different one.
 async fn admin_of(
     state: &AppState,
+    headers: &axum::http::HeaderMap,
     jar: &CookieJar,
 ) -> std::result::Result<(Option<User>, Option<String>), Box<Response>> {
+    if let Some(refused) = admin_host_only(state, headers, jar) {
+        return Err(Box::new(refused));
+    }
     let session_token = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let user = session_user(state, jar).await?;
     if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
         return Err(Box::new(rejection));
     }
     Ok((user, session_token))
+}
+
+/// A `404` for an admin-only real route — a socket, or the file and backup
+/// routes — asked for on an application's host (or a preview's), where it is
+/// nothing.
+///
+/// The Origin check (or the CSRF token, which a page can read from its own
+/// host's cookie) passes there — the page is on the host it calls — and with
+/// sign-in shared between applications, or an admin simply signed in to the
+/// application, the admin's cookie comes along. Without this a script on any
+/// application page an admin opens (an uploaded file, the application's own
+/// code) could hold the admin's chat or language server, download a whole
+/// backup, or read and write any store. The admin UI and the IDE call from the
+/// admin's host, and only from there. `call_api` always sends to an
+/// application's host, so it meets the same refusal.
+fn admin_host_only(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> Option<Response> {
+    match resolve_app(state, headers, jar) {
+        Resolved::Admin => None,
+        Resolved::App(_) | Resolved::HiddenPreview => Some(json_error(
+            StatusCode::NOT_FOUND,
+            "there is nothing at this path",
+        )),
+    }
 }
 
 /// The IDE's language-server socket (design §12.1): admin-only, one process per
@@ -892,6 +999,9 @@ async fn language_server(
     AxumPath(store): AxumPath<String>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
+    if let Some(refused) = admin_host_only(&state, &headers, &jar) {
+        return refused;
+    }
     if !upgrade_origin_allowed(&headers) {
         return upgrade_origin_refused();
     }
@@ -902,7 +1012,14 @@ async fn language_server(
     if let Some(rejection) = enforce_auth(&AuthRequirement::admin(), user.as_ref()) {
         return rejection;
     }
-    language_server_upgrade(ws, state.apps.catalog(), &state.lsp_slots, store).await
+    language_server_upgrade(
+        ws,
+        state.apps.catalog(),
+        &state.lsp_slots,
+        Arc::clone(&state.language_server),
+        store,
+    )
+    .await
 }
 
 /// The admin chat socket (§11.4): admin-only, one conversation per connection.
@@ -918,6 +1035,9 @@ async fn agent_chat(
     jar: CookieJar,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Response {
+    if let Some(refused) = admin_host_only(&state, &headers, &jar) {
+        return refused;
+    }
     if !upgrade_origin_allowed(&headers) {
         return upgrade_origin_refused();
     }
@@ -934,6 +1054,12 @@ async fn agent_chat(
         // caller is the one thing decision 5 says cannot exist.
         return json_error(StatusCode::UNAUTHORIZED, "this route requires a session");
     };
+    // The session is re-read for every turn and watched for its end, so a
+    // sign-out, a disabled account or a demotion closes the socket (#42).
+    let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned()) else {
+        return json_error(StatusCode::UNAUTHORIZED, "this route requires a session");
+    };
+    let session = crate::chat::ChatSession::new(state.sessions.clone(), token, &user);
     agent_chat_upgrade(
         ws,
         state.apps.catalog(),
@@ -941,6 +1067,7 @@ async fn agent_chat(
         state.apps.evaluator(),
         state.apps.triggers().cloned(),
         user,
+        session,
     )
     .await
 }
@@ -1116,9 +1243,12 @@ async fn dispatch(
     {
         let csp = state.apps.app_csp(&app.app);
         let anonymous = anonymous.is_some();
-        let response =
-            crate::uploads::handle(&state, app, route, &method, &headers, &jar, anonymous, body)
-                .await;
+        let origin = request_origin(&state, app, &headers);
+        let response = sc_catalog::with_origin(
+            origin,
+            crate::uploads::handle(&state, app, route, &method, &headers, &jar, anonymous, body),
+        )
+        .await;
         return with_csp(response, &csp);
     }
     let body = match read_body(body, state.max_request_body as u64, "--max-request-body").await {
@@ -1131,8 +1261,15 @@ async fn dispatch(
         Resolved::App(app) => {
             let csrf = csrf.map(|axum::Extension(token)| token.0);
             let anonymous = anonymous.is_some();
-            return dispatch_app(
-                &state, &app, method, &uri, &headers, jar, csrf, anonymous, client_ip, ws, &body,
+            // Everything the request does runs inside its origin: the events it
+            // raises carry the application (TODO-payments P1.3).
+            let origin = request_origin(&state, &app, &headers);
+            return sc_catalog::with_origin(
+                origin,
+                dispatch_app(
+                    &state, &app, method, &uri, &headers, jar, csrf, anonymous, client_ip, ws,
+                    &body,
+                ),
             )
             .await;
         }
@@ -1198,6 +1335,16 @@ async fn dispatch(
 /// failed its check. Only an API provider's endpoints qualify: an
 /// application's own pages and everything on the admin host keep the check.
 fn open_to_public(state: &AppState, request: &axum::extract::Request) -> bool {
+    // A module's webhook is called by a provider's server, which has no CSRF
+    // token to send; the route reads no cookie, so it lends no session to a
+    // forged request (TODO-payments P1.1).
+    if request
+        .uri()
+        .path()
+        .starts_with(&format!("{}/", sc_module::HOOKS_PREFIX))
+    {
+        return true;
+    }
     let jar = CookieJar::from_headers(request.headers());
     let Resolved::App(app) = resolve_app(state, request.headers(), &jar) else {
         return false;
@@ -1284,6 +1431,44 @@ pub(crate) fn resolve_app(
     }
 }
 
+/// Whether the request's `Host` is one this server serves **by name**: an
+/// application's host, or the admin UI's own (under the base domain or an extra
+/// one).
+///
+/// [`resolve_app`] answers any host that names no application as the admin, so
+/// a request with `Host: attacker.example` reaches the admin's routes. That is
+/// harmless for a page, but not for anything that sends a browser back to the
+/// host the request came in on carrying a credential — an OAuth flow's
+/// completion token. Without a base domain there is one host and nothing to
+/// compare it with; such a flow's way home is its own callback address, which
+/// the provider checks.
+pub(crate) fn is_served_host(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> bool {
+    let Some(base) = state.base_domain.as_ref().map(|b| b.as_str()) else {
+        return true;
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    match resolve_app(state, headers, jar) {
+        Resolved::App(_) => true,
+        Resolved::HiddenPreview => false,
+        Resolved::Admin => {
+            let name = crate::admin_host::hostname(host);
+            let admin = state.apps.admin().subdomain();
+            std::iter::once(base)
+                .chain(state.extra_base_domains.iter().map(String::as_str))
+                .any(|domain| match &admin {
+                    Some(subdomain) => name.eq_ignore_ascii_case(&format!("{subdomain}.{domain}")),
+                    None => name.eq_ignore_ascii_case(domain),
+                })
+        }
+    }
+}
+
 /// Whether `host` is the base domain itself, or one of the extra ones — the
 /// hosts the `@` application answers on.
 fn is_base_host(host: &str, base: &str, extra_base_domains: &[String]) -> bool {
@@ -1366,11 +1551,8 @@ async fn admin_handoff(
     else {
         return Redirect::to("/").into_response();
     };
-    match state
-        .sessions
-        .login_for(user, state.apps.session_ttl())
-        .await
-    {
+    let ttl = state.apps.current_session_ttl().await;
+    match state.sessions.login_for(user, ttl).await {
         Ok(token) => {
             let domain = session_cookie_domain(&state, Some(&host));
             let cookie = session_cookie(&state, token, domain.as_deref());
@@ -1429,7 +1611,7 @@ fn code_request_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)
 /// The address a request came from (TODO F4.2): its socket's peer, or the
 /// client a trusted proxy names in `X-Forwarded-For`. `None` for a request
 /// with no socket, which no per-IP limit then counts.
-fn request_client_ip(
+pub(crate) fn request_client_ip(
     state: &AppState,
     peer: Option<std::net::SocketAddr>,
     headers: &axum::http::HeaderMap,
@@ -1488,6 +1670,18 @@ async fn dispatch_app(
     if sc_app::is_live_path(&app.app, path) {
         return with_csp(
             app_live(state, app, headers, &jar, client_ip, ws).await,
+            &csp,
+        );
+    }
+
+    // An exposed agent (§11.7), beside the endpoint set for the live socket's
+    // reason: `{mount}/_agents/…` sits under a provider's mount.
+    if let Some(request) = sc_app::agent_route(&app.app, path) {
+        return with_csp(
+            crate::app_agents::handle(
+                state, app, request, &method, uri, &jar, anonymous, client_ip, body,
+            )
+            .await,
             &csp,
         );
     }
@@ -1578,9 +1772,18 @@ async fn dispatch_app(
             preview: app.is_preview(),
         };
 
+        // The guest session the request carries (TODO-payments P1.5), for a
+        // caller who is not signed in: everything the provider does runs inside
+        // it, so `session.id` is what ownership, defaults, RLS and triggers see.
+        let guest = guest_session_for(state, &app.app, &jar, anonymous, user.is_some()).await;
+        let mut origin = sc_catalog::current_origin();
+        origin.session = guest;
+
         // The provider enforces the endpoint's auth itself (§7), so unlike the
         // admin path there is no separate check here.
-        return match provider.handle(req, catalog, user.as_ref()).await {
+        let handled =
+            sc_catalog::with_origin(origin, provider.handle(req, catalog, user.as_ref())).await;
+        return match handled {
             // A store file — a `File` field's download — through the shared
             // builder (TODO F2, §2.2): streamed, ranged, and named.
             // A code query's `response({ file })` (TODO F2.10) takes this
@@ -1591,7 +1794,8 @@ async fn dispatch_app(
                 ..
             }) => {
                 let out = crate::file_response::serve(&file, &method, uri, headers).await;
-                with_csp(with_code_headers(out, extra), &csp)
+                // Last, so neither the code's headers nor the app's CSP undo it.
+                crate::file_response::as_user_content(with_csp(with_code_headers(out, extra), &csp))
             }
             // A raw-bytes response — a file download (§4), a code query's
             // `response({ body: bytes })` (TODO F2.9) — goes out as-is under
@@ -1720,19 +1924,36 @@ async fn dispatch_app(
     // framework is told so: a bundle is served all the same (it is what draws
     // the sign-in), and a framework that renders data refuses them (TODO F9).
     req.admitted = refused.is_none();
+    req.client_ip = client_ip;
     // The token the CSRF middleware checked this request against, or minted for
     // it: what a rendered form carries, and what `req.csrfToken()` answers.
     req.csrf_token = csrf
-        .or_else(|| jar.get(CSRF_COOKIE).map(|c| c.value().to_owned()))
+        .or_else(|| {
+            jar.get(crate::security::csrf_cookie(state.secure_cookies))
+                .map(|c| c.value().to_owned())
+        })
         .unwrap_or_default();
+    req.cookies = app_cookies(&jar);
+    // The anonymous visitor id an A/B test assigns by (TODO-astro W3.1): the
+    // cookie's, or a new one, which is only kept if the answer used it.
+    let minted_visitor = match crate::security::visitor_id(&jar) {
+        Some(id) => {
+            req.visitor = id;
+            None
+        }
+        None => {
+            req.visitor = crate::security::new_visitor_id();
+            Some(req.visitor.clone())
+        }
+    };
     match app.framework.handle(req, catalog).await {
         // A store file (`/files/serve/*`) through the shared builder.
         Ok(sc_app::AppResponse {
             file: Some(file), ..
-        }) => with_csp(
+        }) => crate::file_response::as_user_content(with_csp(
             crate::file_response::serve(&file, &method, uri, headers).await,
             &csp,
-        ),
+        )),
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
             // The same session code an API provider's response goes through, so
@@ -1743,7 +1964,13 @@ async fn dispatch_app(
                 Ok(cookies) => cookies,
                 Err(rejection) => return with_csp(*rejection, &csp),
             };
-            let mut out = (status, cookies.jar, cookies.stale, resp.body).into_response();
+            let jar = match minted_visitor {
+                Some(id) if resp.keeps_visitor => cookies
+                    .jar
+                    .add(crate::security::visitor_cookie(id, state.secure_cookies)),
+                _ => cookies.jar,
+            };
+            let mut out = (status, jar, cookies.stale, resp.body).into_response();
             if let Ok(ct) = HeaderValue::from_str(&resp.content_type) {
                 out.headers_mut().insert(header::CONTENT_TYPE, ct);
             }
@@ -2206,11 +2433,43 @@ pub(crate) async fn app_caller(
         None => None,
     };
     let (user, refused) = admit_caller(state, app, user).await;
+    // What this request writes, it writes in this application.
+    if let Some(changeset) = sc_catalog::changeset::current() {
+        changeset.set_application(app.id.0);
+    }
     Ok(AppCaller {
         session,
         user,
         refused,
     })
+}
+
+/// The public id of the guest session a request to `app` carries, when it may
+/// use one (TODO-payments P1.5, design C9): the application keeps guest
+/// sessions, the caller is not signed in, and the request passed the CSRF check
+/// — a mutating request that did not is served as a session-less anonymous
+/// caller, the rule §7.3 has for a signed-in one. A cookie that names no live
+/// session of this application — lapsed, ended, another application's — is
+/// nobody.
+pub(crate) async fn guest_session_for(
+    state: &AppState,
+    app: &sc_app::Application,
+    jar: &CookieJar,
+    anonymous: bool,
+    signed_in: bool,
+) -> Option<String> {
+    if anonymous || signed_in || app.guest_session_days().is_none() {
+        return None;
+    }
+    let token = jar.get(GUEST_COOKIE)?.value().to_owned();
+    let catalog = state.apps.catalog()?;
+    match sc_auth::guest_session(catalog, app.id.0, &token).await {
+        Ok(found) => found.map(|g| g.public_id),
+        Err(e) => {
+            log_failure("guest session lookup failed", &e);
+            None
+        }
+    }
 }
 
 /// [`sc_app::admit`] for a request: `(served as, refused)`. An application
@@ -2356,18 +2615,54 @@ async fn app_live(
         subdomain,
         client_ip,
     };
+    // A visitor's guest session, as the REST API would resolve it (TODO-payments
+    // P2.8). An upgrade is a GET, and a cross-site one is refused above by its
+    // `Origin`, which is what the CSRF check is for on a mutating request.
+    let guest = match guest_session_for(state, &app.app, jar, false, user.is_some()).await {
+        Some(public_id) => jar
+            .get(GUEST_COOKIE)
+            .map(|cookie| crate::live::GuestCaller {
+                token: cookie.value().to_owned(),
+                public_id,
+            }),
+        None => None,
+    };
     // A session is held only when it named somebody: an anonymous caller with
     // a dead cookie has no session to be signed out of.
     let caller = crate::live::LiveCaller {
         session: session.filter(|_| user.is_some()),
         user,
+        guest,
+        origin: sc_catalog::current_origin(),
     };
     crate::live::live_upgrade(ws, env, caller)
 }
 
 /// The headers an application framework is shown (§8): what v1's patterns read,
-/// and not the cookie, which is the router's.
-const APP_REQUEST_HEADERS: [&str; 3] = ["referer", "x-requested-with", "accept"];
+/// `if-none-match` for a framework that answers its own files with an ETag, and
+/// `user-agent` for a server-rendered page — and not the cookie, which is the
+/// router's.
+const APP_REQUEST_HEADERS: [&str; 5] = [
+    "referer",
+    "x-requested-with",
+    "accept",
+    "if-none-match",
+    "user-agent",
+];
+
+/// The cookies an application framework is shown: every one but the server's
+/// own. Those are named `sc_*` (the session, the CSRF token, the guest session,
+/// a preview, an OAuth binding) or are the shared session cookie, and they are
+/// credentials a page has no use for and must not be able to echo.
+fn app_cookies(jar: &CookieJar) -> std::collections::BTreeMap<String, String> {
+    jar.iter()
+        .filter(|cookie| {
+            let name = cookie.name();
+            !name.starts_with("sc_") && name != sc_config::authentication::SHARED_SESSION_COOKIE
+        })
+        .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()))
+        .collect()
+}
 
 /// The [`AppRequest`] for one live request to an application's framework.
 ///
@@ -2429,6 +2724,37 @@ fn app_request(
         format!("{scheme}://{host}")
     };
     Ok(req)
+}
+
+/// The attribute naming the URL scheme an application's native apps open
+/// (`myshop`), which an event's `app.scheme` reports (TODO-payments P1.3).
+pub const URL_SCHEME_ATTRIBUTE: &str = "url_scheme";
+
+/// Where a request to `app` comes from: the application, at the base URL this
+/// request reached it on, with its native apps' URL scheme
+/// (TODO-payments P1.3, design C5).
+fn request_origin(
+    state: &AppState,
+    app: &MountedApp,
+    headers: &axum::http::HeaderMap,
+) -> sc_catalog::Origin {
+    let links = RequestLinks::new(state, headers);
+    let scheme = app
+        .app
+        .attributes
+        .get(URL_SCHEME_ATTRIBUTE)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    sc_catalog::Origin {
+        app: Some(sc_catalog::CallingApp {
+            id: app.app.id.0,
+            url: sc_api::AppDirectory::own_origin(&links),
+            scheme,
+        }),
+        session: None,
+    }
 }
 
 /// The applications an application's API request can link to
@@ -2758,16 +3084,18 @@ pub(crate) async fn apply_session(
     {
         return Err(Box::new(refusal));
     }
+    // Read from the store for a sign-in rather than believed from this process,
+    // so a lifetime saved on another node applies here too.
+    let ttl = match &session {
+        SessionAction::Start(_) => state.apps.current_session_ttl().await,
+        _ => state.apps.session_ttl(),
+    };
     Ok(match session {
         SessionAction::Keep => SessionCookies {
             jar,
             stale: AppendHeaders(None),
         },
-        SessionAction::Start(user) => match state
-            .sessions
-            .login_for(user.clone(), state.apps.session_ttl())
-            .await
-        {
+        SessionAction::Start(user) => match state.sessions.login_for(user.clone(), ttl).await {
             Ok(token) => {
                 // The session the request arrived with is replaced, not joined:
                 // the cookie is about to name the new one, so leaving the old one
@@ -2778,13 +3106,19 @@ pub(crate) async fn apply_session(
                 if let Some(previous) = &session_token {
                     let _ = state.sessions.logout(previous).await;
                 }
+                // A guest who signs in or signs up in the same browser stops
+                // being a guest (TODO-payments P1.6): the guest session ends, its
+                // cookie goes, and the `login` event says which one it was, so
+                // the application's trigger can move the guest's rows to the
+                // account. Holding the cookie is what proves it is the same
+                // buyer; an email address would not.
+                let (jar, guest) = end_guest_session_at_sign_in(state, jar, &client).await;
                 // After the session exists, not before: an event that says
                 // someone logged in must not fire for a login that then failed.
-                fire_login(state, &user).await;
+                fire_login(state, &user, guest.as_deref()).await;
                 let mut cookie = session_cookie(state, token, domain.as_deref());
                 if client.native {
-                    let ttl = state.apps.session_ttl().num_seconds();
-                    cookie.set_max_age(time::Duration::seconds(ttl));
+                    cookie.set_max_age(time::Duration::seconds(ttl.num_seconds()));
                 }
                 cookies(jar.add(cookie))
             }
@@ -2821,7 +3155,61 @@ pub(crate) async fn apply_session(
             }
             cookies(jar.remove(session_cookie_removal(domain.as_deref())))
         }
+        // A guest session's cookie (TODO-payments P1.5): the application's own,
+        // so set on the host the request reached and never on the shared
+        // cookie domain, and **persistent** — `Max-Age` is the guest session's
+        // lifetime — so the basket survives closing the browser. `SameSite=
+        // Strict` and `HttpOnly`, as a signed-in session's is.
+        SessionAction::StartGuest {
+            token,
+            max_age_secs,
+        } => {
+            let mut cookie = build_cookie(GUEST_COOKIE, token, true, state.secure_cookies);
+            cookie.set_max_age(time::Duration::seconds(max_age_secs));
+            SessionCookies {
+                jar: jar.add(cookie),
+                stale: AppendHeaders(None),
+            }
+        }
     })
+}
+
+/// End the guest session a signing-in request carries, if it carries one for
+/// the application it is signing in to (TODO-payments P1.6): the jar without
+/// its cookie, and the public id it had — what the `login` event's payload
+/// names as `guest_session`.
+async fn end_guest_session_at_sign_in(
+    state: &AppState,
+    jar: CookieJar,
+    client: &SessionClient,
+) -> (CookieJar, Option<String>) {
+    let (Some(app), Some(catalog), Some(cookie)) = (
+        client.app.as_ref(),
+        state.apps.catalog(),
+        jar.get(GUEST_COOKIE).cloned(),
+    ) else {
+        return (jar, None);
+    };
+    let removal = || {
+        let mut gone = Cookie::build((GUEST_COOKIE, "")).path("/").build();
+        gone.make_removal();
+        gone
+    };
+    match sc_auth::guest_session(catalog, app.app.id.0, cookie.value()).await {
+        Ok(Some(guest)) => {
+            if let Err(e) = sc_auth::end_guest_session(catalog, cookie.value()).await {
+                log_failure("could not end the guest session at sign-in", &e);
+            }
+            (jar.remove(removal()), Some(guest.public_id))
+        }
+        // Lapsed, or another application's: nothing to hand over, and a cookie
+        // that names nothing is cleared rather than carried on.
+        Ok(None) => (jar.remove(removal()), None),
+        Err(e) => {
+            log_failure("guest session lookup failed at sign-in", &e);
+            (jar, None)
+        }
+    }
 }
 
 /// What [`apply_session`] leaves for the response: the jar, and the session
@@ -3110,7 +3498,7 @@ fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
 /// what anonymity costs depends on what is being asked for; `Err` is a session
 /// store that failed, which no caller can do anything about. The error is boxed
 /// because a `Response` is large and this is the rare path.
-async fn session_user(
+pub(crate) async fn session_user(
     state: &AppState,
     jar: &CookieJar,
 ) -> std::result::Result<Option<User>, Box<Response>> {
@@ -3196,7 +3584,7 @@ fn map_method(method: &str) -> Option<ApiMethod> {
 /// (bad configuration or app code the admin must fix — e.g. a failed build,
 /// carrying the bundler's diagnostics) is a client-fixable `422`, while a
 /// **System** error (a bug or infrastructure failure to report) is a `500`.
-fn error_status(err: &Error) -> StatusCode {
+pub(crate) fn error_status(err: &Error) -> StatusCode {
     match err.repr() {
         Repr::NotFound(_) => StatusCode::NOT_FOUND,
         Repr::Invalid(_) => StatusCode::BAD_REQUEST,
@@ -3370,8 +3758,8 @@ async fn error_out(
 ) -> Response {
     if let (Some(triggers), Some(catalog)) = (state.apps.triggers(), state.apps.catalog()) {
         let caller = sc_api::caller_context(user);
-        let event = sc_action::Event::error(err.kind(), err.to_string(), method, path)
-            .caller(caller.role, caller.user);
+        let event =
+            sc_action::Event::error(err.kind(), err.to_string(), method, path).caused_by(&caller);
         triggers.fire(catalog, &event).await;
     }
     error_response(err, audience)
@@ -3382,12 +3770,22 @@ async fn error_out(
 /// The user object is built exactly as every other caller's is
 /// ([`sc_api::caller_context`]), so `user.email` means the same thing in a login
 /// trigger's action as it does in an insert trigger's.
-async fn fire_login(state: &AppState, user: &User) {
+///
+/// `guest_session` is the public id of the guest session the sign-in ended
+/// (TODO-payments P1.6): the event's payload is `{ guest_session }`, which a
+/// trigger moving a guest's basket to the account matches on —
+/// `session_id === payload.guest_session`. A sign-in from a browser that was
+/// nobody's guest has no payload, as before, so `payload.guest_session` reads
+/// null.
+async fn fire_login(state: &AppState, user: &User, guest_session: Option<&str>) {
     let (Some(triggers), Some(catalog)) = (state.apps.triggers(), state.apps.catalog()) else {
         return;
     };
     let caller = sc_api::caller_context(Some(user));
-    let event = sc_action::Event::login(caller.role, caller.user.unwrap_or(Value::Null));
+    let mut event = sc_action::Event::login(caller.role, caller.user.unwrap_or(Value::Null));
+    if let Some(guest_session) = guest_session {
+        event = event.payload(serde_json::json!({ "guest_session": guest_session }));
+    }
     triggers.fire(catalog, &event).await;
 }
 

@@ -855,6 +855,42 @@ pub fn take_console(sink: &ConsoleSink) -> Vec<ConsoleLine> {
     }
 }
 
+/// What one run touched, as the host saw it: the tables its `db` calls named,
+/// and whether it did anything a second run would do again.
+///
+/// Collected for a caller that wants to **reuse the answer** — a server-rendered
+/// site's render cache (`sc_app::server_render`): a page that read `posts` is
+/// stale when `posts` is written, and a page that wrote a row or ran a trigger
+/// is not one an answer may stand in for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunTrace {
+    /// Every table a database call named, read or written.
+    pub tables: std::collections::BTreeSet<String>,
+    /// Whether the run wrote a row or ran another trigger.
+    pub side_effects: bool,
+}
+
+/// Where a run's [`RunTrace`] is collected, shared for [`ConsoleSink`]'s
+/// reason: it is filled as the calls happen.
+pub type TraceSink = Arc<std::sync::Mutex<RunTrace>>;
+
+/// A fresh, empty [`TraceSink`].
+pub fn trace_sink() -> TraceSink {
+    Arc::new(std::sync::Mutex::new(RunTrace::default()))
+}
+
+/// What a sink collected so far. A poisoned lock reads as a run with side
+/// effects, which no caller will reuse.
+pub fn read_trace(sink: &TraceSink) -> RunTrace {
+    match sink.lock() {
+        Ok(trace) => trace.clone(),
+        Err(_) => RunTrace {
+            side_effects: true,
+            ..RunTrace::default()
+        },
+    }
+}
+
 /// The most lines one run's sink keeps, and the longest any one of them is.
 ///
 /// A bound rather than none: a body that logs inside a loop over ten thousand
@@ -948,6 +984,9 @@ pub struct CodeCall<'a> {
     /// because a `ReferenceError` on the line an admin added to find out what
     /// their body was doing is the worst answer of the three.
     pub console: Option<ConsoleSink>,
+    /// Where this run's [`RunTrace`] goes, when somebody wants to know what it
+    /// touched — a render cache. `None` for every ordinary run.
+    pub trace: Option<TraceSink>,
     /// The wall clock allowed for this run, clamped to [`MAX_CODE_TIMEOUT`];
     /// `None` is [`DEFAULT_CODE_TIMEOUT`].
     pub timeout: Option<Duration>,
@@ -987,6 +1026,7 @@ impl Default for CodeCall<'_> {
             live: None,
             schema: None,
             console: None,
+            trace: None,
             timeout: None,
             max_calls: DEFAULT_MAX_HOST_CALLS,
             max_fetches: DEFAULT_MAX_FETCHES,
@@ -1454,6 +1494,16 @@ Object.defineProperty(globalThis, "__scMakeDb", {
         after = reply.cursor;
       }
     }
+    // A history request: the table and this query's authority, and nothing
+    // else of the chain — history is addressed by key, not by a where.
+    const historyPlan = (what, extra) =>
+      Object.assign({ op: "history", what: what, table: state.table, authority: state.authority }, extra);
+    const rowKey = (method, key) => {
+      if (typeof key !== "string" && typeof key !== "number") {
+        throw new Error(method + "() takes the row's primary key");
+      }
+      return key;
+    };
     return {
       where: (c) => derive({ where: state.where.concat([condition(c)]) }),
       select: (...cols) =>
@@ -1479,6 +1529,36 @@ Object.defineProperty(globalThis, "__scMakeDb", {
       avg: (f) => scalar("avg", f),
       min: (f) => scalar("min", f),
       max: (f) => scalar("max", f),
+
+      // Row history (§14.12): the table must have history on. A row's entries
+      // newest first, the rows deleted and not back, a row as it was, and the
+      // two ways back — each a write through the row layer, under this
+      // query's authority, in a `restore` changeset of its own.
+      history: (key) => send(historyPlan("history", { key: rowKey("history", key) })),
+      deleted: () => {
+        const p = historyPlan("deleted", {});
+        if (state.limit !== null) p.limit = state.limit;
+        if (state.offset !== null) p.offset = state.offset;
+        return send(p);
+      },
+      asOf: (key, when) => {
+        if (when instanceof Date) when = when.toISOString();
+        if (typeof when !== "string" && typeof when !== "number") {
+          throw new Error(
+            "asOf()'s second argument is when: a time, a date, or an entry's seq"
+          );
+        }
+        return send(historyPlan("as_of", { key: rowKey("asOf", key), as_of: when }));
+      },
+      restore: (key) => send(historyPlan("restore", { key: rowKey("restore", key) })),
+      revert: (key, version) => {
+        if (typeof version !== "number" || !Number.isInteger(version) || version < 1) {
+          throw new Error(
+            "revert()'s second argument is the version to go back to, from history()"
+          );
+        }
+        return send(historyPlan("revert", { key: rowKey("revert", key), version: version }));
+      },
 
       insert: (values) => send(plan("insert", { values: values })),
       update: (...args) => {
@@ -4253,6 +4333,8 @@ struct RunState {
     /// the other end — so what a failed body printed is already there when the
     /// failure comes back.
     console: Option<ConsoleSink>,
+    /// Where what this run touched is recorded ([`CodeCall::trace`]).
+    trace: Option<TraceSink>,
     /// Wall clock: when this run may make no further host calls.
     deadline: Instant,
     /// What the deadline was, for the message.
@@ -4816,6 +4898,11 @@ async fn trigger_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) 
             return refuse("this code body cannot run other triggers");
         };
         run.trigger_runs_left -= 1;
+        if let Some(trace) = &run.trace
+            && let Ok(mut trace) = trace.lock()
+        {
+            trace.side_effects = true;
+        }
         // Past this point the run has run another trigger, whose action may have
         // done anything at all: re-running this body could no longer be said to
         // repeat nothing.
@@ -5025,6 +5112,18 @@ async fn host_call(state: &Rc<RefCell<OpState>>, token: &str, request: &str) -> 
             && !run.tables_read.iter().any(|t| t == table)
         {
             run.tables_read.push(table.to_owned());
+        }
+        if let Some(trace) = &run.trace
+            && let Ok(mut trace) = trace.lock()
+        {
+            if let Some(table) = plan.get("table").and_then(Json::as_str) {
+                trace.tables.insert(table.to_owned());
+            }
+            let reads = matches!(
+                plan.get("op").and_then(Json::as_str),
+                Some("select" | "aggregate")
+            );
+            trace.side_effects |= !reads;
         }
         // Past this point the run has reached the database, so it is no longer
         // one that could be re-run without repeating whatever it did there.
@@ -5478,6 +5577,8 @@ struct CodeRun {
     /// Where this run's console lines are collected, when anyone is collecting
     /// them ([`CodeCall::console`]).
     console: Option<ConsoleSink>,
+    /// Where what this run touched is recorded ([`CodeCall::trace`]).
+    trace: Option<TraceSink>,
     /// Already defaulted and clamped, so the worker has no policy left to apply.
     timeout: Duration,
     max_calls: u32,
@@ -5884,6 +5985,7 @@ impl CodeRuntime {
                     live: call.live.cloned(),
                     schema: call.schema.cloned(),
                     console: call.console.clone(),
+                    trace: call.trace.clone(),
                     timeout,
                     max_calls: call.max_calls,
                     max_fetches: call.max_fetches,
@@ -6612,6 +6714,7 @@ fn start_run(
                 fetch: run.fetch.clone(),
                 files: run.files.clone(),
                 console: run.console.clone(),
+                trace: run.trace.clone(),
                 deadline: started + run.timeout,
                 timeout: run.timeout,
                 calls_left: run.max_calls,
@@ -9209,6 +9312,7 @@ mod tests {
             ratelimit_scope: "instance".to_owned(),
             schema: None,
             console: None,
+            trace: None,
             started: None,
         };
         for (name, value) in bindings {
@@ -11156,6 +11260,39 @@ mod tests {
         );
     }
 
+    /// A trace sink (a render cache's) gets every table the run's database
+    /// calls named, and whether it wrote — a read-only run is one an answer
+    /// may stand in for, and a run that wrote is not.
+    #[tokio::test]
+    async fn a_trace_records_the_tables_a_run_named_and_whether_it_wrote() {
+        let db = FakeHost::rows(json!([{ "id": 1 }]));
+        let rt = CodeRuntime::with_workers(1);
+        let trace = trace_sink();
+        let mut c = with_host(
+            "await db.posts.rows(); await db.authors.where({ id: 1 }).rows(); return 1;",
+            &*db,
+        );
+        c.trace = Some(Arc::clone(&trace));
+        rt.run(c).await.unwrap();
+        let read = read_trace(&trace);
+        assert_eq!(
+            read.tables.into_iter().collect::<Vec<_>>(),
+            ["authors", "posts"]
+        );
+        assert!(!read.side_effects);
+
+        let trace = trace_sink();
+        let mut c = with_host(
+            "await db.posts.rows(); await db.views.insert({ page: 1 }); return 1;",
+            &*db,
+        );
+        c.trace = Some(Arc::clone(&trace));
+        rt.run(c).await.unwrap();
+        let wrote = read_trace(&trace);
+        assert!(wrote.tables.contains("views"));
+        assert!(wrote.side_effects, "an insert is a side effect");
+    }
+
     #[tokio::test]
     async fn a_stream_handle_is_a_reply_carrying_the_tables_the_run_read() {
         // TODO F7: `return live.stream(...)` answers like `response(...)`,
@@ -12718,7 +12855,7 @@ mod tests {
         .await;
 
         let refusals = out.as_object().expect("an object of refusals");
-        assert!(refusals.len() > 40, "the refusal tier is the list: {out}");
+        assert!(refusals.len() > 30, "the refusal tier is the list: {out}");
         assert_eq!(
             out["implemented"],
             json!(true),
@@ -12739,10 +12876,10 @@ mod tests {
         let schema = out["Table.create"].as_str().unwrap_or_default();
         assert!(schema.contains("introspects the schema"), "{schema}");
         assert!(
-            out["table.get_history"]
+            out["table.compress_history"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("no row history"),
+                .contains("nothing to compress"),
             "{out}"
         );
         assert!(
@@ -12773,6 +12910,11 @@ mod tests {
             "table.deleteRows",
             "table.toggleBool",
             "table.run_trigger",
+            // Row history (TODO-history H6.1).
+            "table.get_history",
+            "table.restore_row_version",
+            "table.undo_row_changes",
+            "table.redo_row_changes",
         ] {
             assert!(
                 refusals.get(method).is_none(),

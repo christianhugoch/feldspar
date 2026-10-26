@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use sc_api::{ApiProvider, ApiRequest, Method, RestProvider, schema_edit};
 use sc_auth::{User, bootstrap, create_user};
-use sc_catalog::{Catalog, bootstrap_field_meta, bootstrap_sync, bootstrap_table_meta};
+use sc_catalog::{Catalog, bootstrap_change_log, bootstrap_field_meta, bootstrap_table_meta};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_error::{Error, Result};
@@ -152,7 +152,7 @@ async fn fixture_with(db: &TestDb, formula: Option<&str>) -> Result<Fixture> {
     bootstrap(&cat).await?;
     bootstrap_table_meta(&cat).await?;
     bootstrap_field_meta(&cat).await?;
-    bootstrap_sync(&cat).await?;
+    bootstrap_change_log(&cat).await?;
     cat.reload().await?;
 
     let synced = |read: u8, formula: Option<&str>| schema_edit::TableSettings {
@@ -282,7 +282,7 @@ async fn run_bridged(
     driver: &str,
     args: &[&str],
 ) -> Result<Json> {
-    let client_ts = sc_api::generate_app_client(ApiProvider::endpoints(&f.api), &[], &[]);
+    let client_ts = sc_api::generate_app_client(ApiProvider::endpoints(&f.api), &[], &[], &[]);
     let dir = std::env::temp_dir().join(format!("sc-api-sync-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("client.ts"), runnable(&client_ts)).unwrap();
@@ -355,7 +355,7 @@ async fn a_device_works_on_its_copy_offline_and_syncs_it() -> Result<()> {
     )
     .await?;
 
-    let client_ts = sc_api::generate_app_client(ApiProvider::endpoints(&f.api), &[], &[]);
+    let client_ts = sc_api::generate_app_client(ApiProvider::endpoints(&f.api), &[], &[], &[]);
     assert!(
         client_ts.contains("offline.table(\"notes\""),
         "a synced table is kept offline:\n{client_ts}"

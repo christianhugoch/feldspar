@@ -86,8 +86,15 @@ pub struct ModuleServices {
     /// The loaded set, replaced whole by [`reload`](ModuleServices::reload).
     loaded: RwLock<Arc<ModuleSet>>,
     /// The modules' background services (TODO-imap M5): stopped before every
-    /// reload, and started again over the set it loads.
+    /// reload, and started again over the set it loads — once
+    /// [`start_services`](ModuleServices::start_services) has said this process
+    /// runs them.
     supervisor: ServiceSupervisor,
+    /// Whether this process runs the services: set by `serve` alone, for the
+    /// scheduler's reason. A `build-app` or an `app triggers` loads the modules
+    /// to know the actions, and must not open a second IMAP connection beside
+    /// the server's and write the same rows.
+    run_services: std::sync::atomic::AtomicBool,
 }
 
 impl ModuleServices {
@@ -171,6 +178,7 @@ impl ModuleServices {
             host,
             loaded: RwLock::new(Arc::new(ModuleSet::empty())),
             supervisor,
+            run_services: std::sync::atomic::AtomicBool::new(false),
         });
         services.reload().await?;
         // The view runtime is the bundle's and not a stored module's, so it is
@@ -407,7 +415,9 @@ impl ModuleServices {
         // And the services, last: their tables exist and are in the catalog,
         // and the triggers on them are loaded, so the first row a service
         // writes fires what it should.
-        self.supervisor.start(&set).await;
+        if self.run_services.load(std::sync::atomic::Ordering::SeqCst) {
+            self.supervisor.start(&set).await;
+        }
         // One set from here up: the Modules tab, the endpoints and `module_json`
         // are written once and serve both languages (§8).
         match self.loaded.write() {
@@ -473,10 +483,71 @@ impl ModuleServices {
         }
     }
 
+    /// Start the loaded modules' services, and every reload's after it: what
+    /// `serve` calls once it is up. Every other command that installs the
+    /// modules leaves them stopped.
+    pub async fn start_services(&self) {
+        self.run_services
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.supervisor.start(&self.modules()).await;
+    }
+
     /// One module's services as they stand — what its card shows beside each
     /// (TODO-imap M5.2).
     pub fn service_statuses(&self, module: &str) -> Vec<ServiceStatus> {
         self.supervisor.statuses_of(module)
+    }
+
+    /// Run the webhook `name` of the module `segment` addresses
+    /// ([`sc_module::hook_segment`]) for `request` (TODO-payments P1.1).
+    ///
+    /// `Ok(None)` when no loaded module receives webhooks there — the route's
+    /// `404`. An `Err` is a failure to run one, which the route answers `500`.
+    pub async fn webhook(
+        &self,
+        segment: &str,
+        name: &str,
+        request: sc_module::WebhookRequest,
+    ) -> Result<Option<sc_module::WebhookResponse>> {
+        let set = self.modules();
+        let Some(loaded) = sc_module::webhook_module(&set, segment)? else {
+            return Ok(None);
+        };
+        let Some(declared) = loaded
+            .manifest
+            .as_ref()
+            .and_then(|m| m.webhooks.iter().find(|w| w.name == name))
+        else {
+            return Ok(None);
+        };
+        if !declared
+            .methods
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&request.method))
+        {
+            let allow = declared.methods.join(", ");
+            return Ok(Some(sc_module::WebhookResponse {
+                status: 405,
+                headers: vec![
+                    ("allow".to_owned(), allow.clone()),
+                    (
+                        "content-type".to_owned(),
+                        "text/plain; charset=utf-8".to_owned(),
+                    ),
+                ],
+                body: format!("this webhook answers {allow}").into_bytes(),
+            }));
+        }
+        sc_module::run_webhook(
+            &self.catalog,
+            &self.host,
+            Some(&self.dispatcher),
+            loaded,
+            name,
+            request,
+        )
+        .await
+        .map(Some)
     }
 
     /// The loaded set as it stands — what the Modules tab renders.

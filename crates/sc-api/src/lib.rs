@@ -39,6 +39,7 @@ pub mod convert;
 pub mod csv;
 pub mod filter;
 pub mod geo_import;
+pub mod history;
 // The administrative tool surface (§13.6): one implementation of the tools that
 // build an application's configuration half, shared by the built-in copilot
 // agent and the administration MCP server.
@@ -53,6 +54,7 @@ pub mod query_string;
 pub mod rows;
 pub mod schema_edit;
 pub mod throttle;
+pub mod undo;
 
 mod admin;
 mod analytics;
@@ -109,11 +111,11 @@ pub use rest::{
 };
 pub use schema::{StructField, TypeSchema, ValueType};
 pub use typescript::{
-    CLIENT_HELPER_FILE, StreamExport, StreamTopics, UploadExport, client_helper, client_property,
-    client_runtime, generate_app_client, generate_client, generate_client_with_streams,
-    has_offline_sync,
+    AgentExport, CLIENT_HELPER_FILE, StreamExport, StreamTopics, UploadExport, client_helper,
+    client_property, client_runtime, generate_app_client, generate_client,
+    generate_client_with_streams, has_offline_sync,
 };
-pub use user_rows::api_row;
+pub use user_rows::{ADMIN_ONLY_WRITE, api_row};
 
 #[cfg(test)]
 mod tests {

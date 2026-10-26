@@ -432,6 +432,75 @@ async fn an_invitation_hands_out_no_power_and_links_nowhere_else() -> sc_error::
     Ok(())
 }
 
+/// An invitation's `fields` are held to `admin_only_write` (security review
+/// #40): the account is written directly, not through the row layer, so a
+/// therapist cannot invite an address of their own into another clinic. An
+/// ordinary column is still theirs to set, and an admin sets either.
+#[tokio::test]
+async fn an_invitation_sets_no_admin_only_column_below_admin() -> sc_error::Result<()> {
+    let fx = setup().await?;
+    fx._db
+        .client()
+        .await?
+        .batch_execute("ALTER TABLE users ADD COLUMN clinic_id bigint, ADD COLUMN nickname text")
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    sc_catalog::bootstrap_field_meta(&fx.catalog).await?;
+    let mut clinic = sc_catalog::FieldMeta::new(sc_auth::USERS_TABLE, "clinic_id");
+    clinic
+        .attributes
+        .insert("admin_only_write".to_owned(), json!(true));
+    sc_catalog::save_field_meta(&fx.catalog, &clinic).await?;
+
+    let mut ther = Client::new(&fx.router, THERAPISTS).await;
+    assert_eq!(
+        ther.login("ther@example.com", "ther-pw").await,
+        StatusCode::OK
+    );
+    let invite = |email: &str, fields: Value| {
+        Some(json!({ "email": email, "role": ROLE_PATIENT, "fields": fields }))
+    };
+    let (status, body) = ther
+        .send(
+            "POST",
+            "/api/invite",
+            invite("mine@example.com", json!({ "clinic_id": 7 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        load_user_by_email(&fx.catalog, "mine@example.com")
+            .await?
+            .is_none(),
+        "no account is made"
+    );
+    assert!(fx.mailer.sent().is_empty());
+
+    let (status, body) = ther
+        .send(
+            "POST",
+            "/api/invite",
+            invite("pat@example.com", json!({ "nickname": "Pat" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let mut admin = Client::new(&fx.router, THERAPISTS).await;
+    assert_eq!(
+        admin.login("admin@example.com", "admin-pw").await,
+        StatusCode::OK
+    );
+    let (status, body) = admin
+        .send(
+            "POST",
+            "/api/invite",
+            invite("placed@example.com", json!({ "clinic_id": 7 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_forgotten_password_is_reset_by_emailed_link() -> sc_error::Result<()> {
     let fx = setup().await?;
@@ -494,6 +563,35 @@ async fn a_forgotten_password_is_reset_by_emailed_link() -> sc_error::Result<()>
         again.login("pat@example.com", "new-pw").await,
         StatusCode::OK
     );
+    Ok(())
+}
+
+/// A reset link is built from the host the request came in on, so a `Host`
+/// that routes to the app but reads as another site in a URL
+/// (`patients.example.com:@evil.com`) must be refused before any mail is sent.
+#[tokio::test]
+async fn a_reset_asked_for_on_a_forged_host_sends_nothing() -> sc_error::Result<()> {
+    let fx = setup().await?;
+    create_user(&fx.catalog, "pat@example.com", "old-pw", ROLE_PATIENT).await?;
+    let mut attacker = Client::new(&fx.router, PATIENTS).await;
+    for forged in [
+        "patients.example.com:@evil.com",
+        "patients.example.com:80@evil.com",
+        "patients.example.com/evil.com",
+        "patients.example.com:80:81",
+    ] {
+        attacker.host = forged.to_owned();
+        let (status, _) = attacker
+            .send(
+                "POST",
+                "/api/forgot-password",
+                Some(json!({ "email": "pat@example.com" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{forged}");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(fx.mailer.sent().is_empty(), "no link went anywhere");
     Ok(())
 }
 
@@ -566,15 +664,24 @@ async fn the_users_table_shows_no_hash_and_hands_out_no_power() -> sc_error::Res
     assert_eq!(status, StatusCode::FORBIDDEN);
     for victim in [other.id, fx.admin.id] {
         let (status, _) = client
+            .send("PUT", &path(victim), Some(json!({ "language": "fr" })))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = client.send("DELETE", &path(victim), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    // An account's email is an admin's to change, even a weaker one's — else
+    // a reset link for it would come to the caller (security review 2026-10
+    // #8). Refused whoever the row is, so it says nothing about who exists.
+    for victim in [pat.id, ther.id, other.id] {
+        let (status, _) = client
             .send(
                 "PUT",
                 &path(victim),
                 Some(json!({ "email": "mine@example.com" })),
             )
             .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, _) = client.send("DELETE", &path(victim), None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
     // Their own row: they may edit it, and keep — but not raise — their role.
     let (status, _) = client

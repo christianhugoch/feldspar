@@ -201,6 +201,12 @@ Save it and insert a row. The module's `run` is called with v1's argument object
 old_row, table, configuration, user, payload, mode, req }` — so plugin code written years ago
 sees exactly what it expects.
 
+It also gets what this version adds: `db`, the tables as a code body's `db` chain
+(`await db.my_table.where({ id: 3 }).first()`, at the trigger's authority unless a chain says
+`asUser()`); `app`, the application whose request ran it — `{ id, url, scheme }`, what a link
+back to the app is built on — or `null`; `session`, the caller's guest session `{ id }` or `null`;
+and `files` and `callerFiles` (Step 8).
+
 Nothing was restarted. Installing a module rebuilds the action set the trigger dispatcher runs
 from and revalidates every stored trigger against it, so a trigger you saved *before* installing
 the module (and which was refused as "unknown action") starts working the moment it is there.
@@ -541,8 +547,159 @@ run: async ({ payload, callerFiles }) => {
 }
 ```
 
+**The caller's consent.** An action that needs a token from an OAuth 2.0 provider in the
+caller's name — the mail module connecting an Outlook.com mailbox, which refuses passwords —
+asks the server with `oauth.begin`, also in its argument. The server runs the provider's consent
+page in the caller's browser and writes the tokens into a row of the module's own table; the
+action answers the address the application sends the browser to:
+
+```js
+run: async ({ payload, user, oauth }) => {
+  // …read the row as the caller first, to check it is theirs…
+  return oauth.begin({
+    authorization_url: "https://login.example.com/authorize",
+    token_url: "https://login.example.com/token",
+    client_id, client_secret, scope: "mail offline_access",
+    params: { login_hint: row.email },        // anything else the provider is told
+    return_to: payload.return_to || "/",      // a path in the application
+    store: {
+      table: "my_accounts", id: row.id,       // a table the module declares…
+      fields: { access_token: "access_token", refresh_token: "refresh_token", expires_at: "expires_at" },
+      set: { auth: "oauth2" },                // …and other fields it declares
+    },
+  }); // { url: "/_feldspar/oauth/consent/…", expires_in: 600 }
+}
+```
+
+The token fields must be `secret: true`. Only the user whose call began the flow can finish it,
+in the browser that started it; the browser comes back to `return_to`, with `oauth_error=…` in
+the query when something failed. The provider's redirect address is the server's one OAuth
+callback, `https://<admin host>/_feldspar/oauth/callback`. Renewing the token later is the
+module's own work, at the provider's token endpoint.
+
 **On a bundled card**, list the services in `feldspar-module.json` as `services: ["ticker"]`. The
 card then says the module runs in the background and writes to its own tables.
+
+## Step 9 — A module that receives webhooks
+
+Another service tells a module that something happened by calling a URL: a payment provider posts
+"payment succeeded", a mail provider posts "message bounced". Such a module exports
+**`webhooks`**:
+
+```js
+const crypto = require("crypto");
+
+module.exports = {
+  tables: [{ name: "pv_events", fields: [{ name: "event_id", type: "text" }, { name: "kind", type: "text" }] }],
+  webhooks: {
+    events: {
+      description: "Events from the provider",
+      handle: async (req, ctx) => {
+        // Check the signature over the bytes as they were sent, before trusting anything.
+        const secret = ctx.configuration.webhook_secret || "";
+        const expected = crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex");
+        if (req.headers["x-signature"] !== expected) return { status: 400, body: "bad signature" };
+        const event = req.json();
+        await ctx.db.pv_events.insert({ event_id: event.id, kind: event.type });
+        return { status: 200, body: { received: true } };
+      },
+    },
+  },
+};
+```
+
+It is served at **`POST /_feldspar/hooks/<module>/<name>`**, where `<module>` is the package's
+name without its npm scope: `@acme/provider` receives at `/_feldspar/hooks/provider/events`.
+Anything after the name arrives as `req.rest`, so `/_feldspar/hooks/provider/events/acct_1` gives
+`req.rest === "acct_1"`. The installed card shows the full URL on the admin host, with a copy
+button; that is the address to paste into the provider's settings. The route answers on an
+application's host too, as the sign-in routes do, which is what lets a webhook serve a page a
+buyer opens from the application.
+
+A webhook answers `POST` only, unless it says `methods: ["GET", "POST"]`; then a `GET` reaches it
+too, with `req.method` saying which. The payments module's test provider serves its checkout page
+this way.
+
+**What `req` has.** `req.rawBody` is a `Buffer` of the body **byte for byte** — a signature is
+computed over those bytes, and a body parsed and re-serialised would not verify. `req.text()` and
+`req.json()` read it. `req.headers` are lower-cased (cookies and credentials are removed),
+`req.query` is the query string and `req.method` is `POST`.
+
+**What it answers.** `{ status, body, headers }`. A string or a `Buffer` body is sent as it is;
+anything else is sent as JSON. A 2xx tells the provider to stop retrying. A handler that throws is
+a **500**, so the provider tries again later, and the failure is logged and raised as the `error`
+event.
+
+**What `ctx` has.** What a service's has, for the length of one request: `ctx.db` over the module's
+own tables (and nothing else), `ctx.files`, `ctx.runTrigger`, `ctx.log` and `ctx.configuration`.
+It runs as the module; a trigger fired by its write sees `{ module, webhook }` as its `user`.
+
+**What protects it.** There is no session and no CSRF check: the caller is another server, and the
+signature is the authentication. The server caps the body at 1 MiB and limits each address to 600
+requests a minute.
+
+**On a bundled card**, list the webhooks in `feldspar-module.json` as `webhooks: ["events"]`, and
+the card shows the URL each will be served at before it is installed.
+
+## Step 10 — Reading a table its settings name
+
+A service or a webhook reaches only its module's own tables (Step 8). Some modules need to read
+one of yours as well. The payments module's webhook, for one, has to look up which of your plans
+a subscription's price belongs to, in a plans table you made. A module says so with **`reads`**,
+a list of table names or a function of its settings returning one:
+
+```js
+module.exports = {
+  configuration_workflow: () => ({
+    steps: [{ name: "Plans", form: { fields: [{ name: "plans_table", label: "Plans table", type: "String" }] } }],
+  }),
+  reads: (configuration) => (configuration.plans_table ? [configuration.plans_table] : []),
+  webhooks: {
+    events: {
+      handle: async (req, ctx) => {
+        const plan = await ctx.db[ctx.configuration.plans_table].where({ stripe_price: "price_basic" }).first();
+        // …
+      },
+    },
+  },
+};
+```
+
+What `reads` answers is a request. **The server allows a table only when the module's saved
+settings name it**: when one of the values an admin typed into its settings form is that table's
+name. Module code cannot widen this itself. A `reads` that answers `users`, when nothing in the
+settings says `users`, puts an issue on the card and the read is refused. An allowed table is
+**read-only**: its services and webhooks may read it, and a write is refused by name. The card
+lists the tables under **Reads**. An action needs none of this, because it already runs with its
+trigger's authority.
+
+## Step 11 — Suggesting content-security sources
+
+An application's pages may load scripts, frames and API calls from their own origin only. A module
+whose provider has an embedded form — a payment form in an iframe, say — needs that provider's
+hosts allowed. It **suggests** them, and an admin switches the suggestion on per application:
+
+```js
+module.exports = {
+  csp: {
+    elements: {
+      description: "The provider's embedded payment form",
+      sources: {
+        "script-src": ["https://js.provider.example"],
+        "frame-src": ["https://js.provider.example"],
+        "connect-src": ["https://api.provider.example"],
+      },
+    },
+  },
+};
+```
+
+The suggestion is listed on the module's card and on every application's settings page, under
+**Sources suggested by modules**; installing the module allows nothing by itself. Once switched on,
+each directive gains the hosts beside what it already allows (`script-src 'self'
+https://js.provider.example`). Only `https://` and `wss://` hosts are accepted, in the directives
+that load or reach something; a keyword such as `'unsafe-inline'` is refused, with an issue on the
+card. `csp` can also be a function of the module's configuration.
 
 ## Developing a module against a running server
 
@@ -598,7 +755,8 @@ ordinary tables from then on, and yours to drop.
 
 ## What this is not, yet
 
-- **Only actions, functions, table providers, view patterns, tables and services.** Types, field
+- **Only actions, functions, table providers, view patterns, tables, services, webhooks, tables
+  read through its settings and content-security suggestions.** Types, field
   views and event types are named in the tab and not loaded. Only JavaScript modules have
   `files` (TODO-imap M6); a Python module cannot declare tables yet, so it has no file area.
 - **Not only JavaScript any more.** The Type dropdown now offers four pairs, because a module can

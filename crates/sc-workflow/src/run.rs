@@ -25,9 +25,12 @@
 //! [`Event`] is not `Serialize` — it is a live value passed down a call stack —
 //! so [`StoredEvent`] is its JSON shape, and the round trip is tested.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use sc_action::{Event, EventKind, ROLE_PUBLIC, Trigger, TriggerId};
 use sc_agent::{Run, RunId, RunKind, RunState};
+use sc_catalog::{Changeset, ChangesetSource};
 use sc_error::{Error, Result};
 use sc_types::Attrs;
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,12 @@ pub const ATTR_EVENT: &str = "event";
 /// The run attribute holding the chain of trigger names that led here — what
 /// [`Event::firing`] returned, including this trigger.
 pub const ATTR_CHAIN: &str = "chain";
+
+/// The run attribute holding the run's **changeset** (§14.12):
+/// `{"id": …, "cause": …}`. Minted when the run starts and kept here, so steps
+/// resumed days later still join it; `cause` is the changeset whose event
+/// started the run.
+pub const ATTR_CHANGESET: &str = "changeset";
 
 /// One event, in the shape a run row can hold it.
 ///
@@ -81,6 +90,13 @@ pub struct StoredEvent {
     /// The caller's fields, or `None` for an anonymous event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<Json>,
+    /// The application whose request raised it, `{ id, url, scheme }`
+    /// (TODO-payments P1.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<Json>,
+    /// The caller's guest session public id (TODO-payments P1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 fn public_role() -> u8 {
@@ -102,6 +118,8 @@ impl StoredEvent {
             payload: event.payload.clone(),
             role: event.role,
             user: event.user.clone(),
+            app: event.app.as_ref().map(sc_catalog::CallingApp::to_json),
+            session: event.session.clone(),
         }
     }
 
@@ -118,6 +136,11 @@ impl StoredEvent {
         event.payload = self.payload.clone();
         event.role = self.role;
         event.user = self.user.clone();
+        event.app = self
+            .app
+            .as_ref()
+            .and_then(sc_catalog::CallingApp::from_json);
+        event.session = self.session.clone();
         Ok(event)
     }
 }
@@ -165,7 +188,31 @@ pub fn new_run(
         ATTR_CHAIN.to_owned(),
         Json::Array(chain.into_iter().map(Json::String).collect()),
     );
+    let mut changeset = serde_json::Map::new();
+    changeset.insert("id".into(), Uuid::new_v4().to_string().into());
+    if let Some(cause) = &event.changeset {
+        changeset.insert("cause".into(), cause.id.to_string().into());
+    }
+    run.attributes
+        .insert(ATTR_CHANGESET.to_owned(), Json::Object(changeset));
     run
+}
+
+/// The run's changeset, which its steps' writes belong to. A run that has
+/// none recorded gets one for this pass.
+pub fn run_changeset(run: &Run) -> Arc<Changeset> {
+    let stored = run.attributes.get(ATTR_CHANGESET);
+    let uuid = |key: &str| {
+        stored
+            .and_then(|c| c.get(key))
+            .and_then(Json::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+    };
+    let changeset = match uuid("id") {
+        Some(id) => Changeset::with_id(id, ChangesetSource::Workflow),
+        None => Changeset::new(ChangesetSource::Workflow),
+    };
+    Arc::new(changeset.cause(uuid("cause")))
 }
 
 /// One line for a run list: what happened, and to what.
@@ -246,7 +293,7 @@ pub fn run_event(run: &Run) -> Result<Event> {
             run.id
         ))
     })?;
-    stored.to_event()
+    Ok(stored.to_event()?.in_changeset(Some(run_changeset(run))))
 }
 
 /// The chain of triggers that led to this run — the bound a step's own writes
@@ -366,6 +413,14 @@ mod tests {
                 40,
                 Some(json!({ "id": Uuid::nil().to_string(), "email": "a@b.c" })),
             )
+            .from_origin(sc_catalog::Origin {
+                app: Some(sc_catalog::CallingApp {
+                    id: Uuid::nil(),
+                    url: "https://shop.example.com".into(),
+                    scheme: Some("myshop".into()),
+                }),
+                session: Some("gs_1".into()),
+            })
     }
 
     #[test]
@@ -382,8 +437,40 @@ mod tests {
         assert_eq!(again.row, event.row);
         assert_eq!(again.old_row, event.old_row);
         assert_eq!(again.payload, event.payload);
+        // And where it came from (TODO-payments P1.3, P1.5).
+        assert_eq!(again.app, event.app);
+        assert_eq!(again.session, event.session);
         assert_eq!(again.role, event.role);
         assert_eq!(again.user, event.user);
+    }
+
+    #[test]
+    fn a_run_keeps_its_own_changeset_caused_by_the_events() {
+        let trigger = Trigger::with_body(
+            TriggerId::new(),
+            "approve",
+            EventKind::Insert,
+            sc_action::TriggerBody::Workflow,
+        )
+        .on("orders");
+        let cause = Arc::new(Changeset::new(ChangesetSource::Request));
+        let event = insert_event().in_changeset(Some(cause.clone()));
+        let workflow = crate::Workflow::empty(trigger.id);
+        let run = new_run(
+            &trigger,
+            1,
+            &event,
+            Vec::new(),
+            &WorkflowRun::new(&workflow),
+        );
+        let changeset = run_changeset(&run);
+        assert_ne!(changeset.id, cause.id);
+        assert_eq!(changeset.source, ChangesetSource::Workflow);
+        assert_eq!(changeset.cause, Some(cause.id));
+        // Every pass over the run, however much later, is in the same one.
+        let resumed = run_event(&run).unwrap();
+        assert_eq!(resumed.changeset.map(|c| c.id), Some(changeset.id));
+        assert_eq!(run_changeset(&run).id, changeset.id);
     }
 
     #[test]

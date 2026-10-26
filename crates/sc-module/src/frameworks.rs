@@ -601,6 +601,13 @@ fn build_template(build: &Json, spec: &[sc_types::FormField]) -> Result<BuildTem
             .filter(|c| !c.is_empty())
             .unwrap_or(sc_app::REACT_CLIENT_FILE)
             .to_owned(),
+        // A code body inside the output that the server runs per request: a
+        // fixed path, not a template, because it is the build's own layout.
+        server: build
+            .get("server")
+            .and_then(Json::as_str)
+            .map(sc_app::check_server_entry)
+            .transpose()?,
     })
 }
 

@@ -114,7 +114,8 @@ feldspar/
 │  │                              #    (`_fd_workspaces`), the demo data, plot specs and their
 │  │                              #    stats, tests, a fit's outputs drawn (above sc-model), and —
 │  │                              #    as the analytics milestones arrive — panels, map layers,
-│  │                              #    and the Analytics framework's policy (`app.rs`, §14.9)
+│  │                              #    the Analytics framework's policy (`app.rs`, §14.9), and
+│  │                              #    the Astro sites' A/B tests dashboard (`ab.rs`, §13.3)
 │  ├─ sc-stan/                    # 6. Bayesian models with Stan, beside sc-model (§14.2,
 │  │                              #    "Bayesian models"): CmdStan discovery (`--cmdstan`,
 │  │                              #    `$CMDSTAN`, `~/.cmdstan`) and `feldspar cmdstan install`;
@@ -1053,10 +1054,12 @@ pub struct User {
 - **OAuth2 server option**: Saltcorn can act as an identity provider (`sc-auth` exposes the
   authorization-code/PKCE endpoints when enabled).
 - **Session lifetime** (`session_ttl_hours`, Settings → Authentication, default 24, 1 to 8760).
-  Live: `AppMounts::session_ttl` is read where the router starts a session
-  (`SessionStore::login_for`), so the next sign-in after a save gets it — a password's, an
-  identity provider's, an admin handoff's — and a native client's cookie `Max-Age` matches it.
-  A session already started keeps the expiry it was given.
+  Live: every sign-in reads it from `_fd_config` (`AppMounts::current_session_ttl`) where
+  the router starts a session (`SessionStore::login_for`). So the next sign-in after a save
+  gets it on every node, including after a save made by another node, `feldspar config set` or
+  a restore. That covers a password's, an identity provider's and an admin handoff's, and a
+  native client's cookie `Max-Age` matches it. A session already started keeps the expiry it
+  was given.
 - **External identity providers (OAuth 2.0 clients)**, Settings → Authentication. A list of
   records under the internal key `oauth_providers`, each declared field by field
   (`sc_config::oauth_provider_spec`) so the tab's form is generic, its `client_secret`
@@ -1138,7 +1141,9 @@ together still fails the test). Null handling is specified once, by the translat
 reified path is normalised to meet it: `===`/`==` render as `IS NOT DISTINCT FROM` (JS's
 two-valued equality — `owner === user.id` on a null `owner` is *false*), ordered comparisons
 and arithmetic are null-guarded so JS's `null → 0` coercion cannot diverge from SQL, and
-`user.x` on an anonymous (null) user reads as null rather than throwing.
+`user.x` on an anonymous (null) user reads as null rather than throwing. `+` with a string literal
+on either side (`"Invoice " + number`, TODO-payments P2.4) is JavaScript's concatenation: SQL
+`||` over each side cast to text, a null side reading `null` as JavaScript writes it.
 
 **Fail closed, everywhere.** A stored formula that no longer validates at load time (a field
 was dropped, a dump restored) grants nothing and the table stays `min_role`-only, with the
@@ -1279,6 +1284,175 @@ uses is one every admin has to read and decide to delete. Those two are **built 
 deletable (without admin nobody can administer anything; without public an anonymous request has
 no role to be), and a role any user still holds cannot be deleted either — nothing cascades a
 user to a different role.
+
+### 7.4a Role grants and the effective role (`sc_auth::grants`, TODO-payments P3, design C2)
+
+`users.role` is the **base role** an admin sets. A **role grant** is a role a user holds for a
+while beside it: a subscription's, a trial's, a comp an admin gives by hand. Each is a row of
+**`role_grants`** — `(user_id → users, role → _fd_roles, source, source_ref, starts_at,
+expires_at, revoked_at, note, created_at)`, with `(source, source_ref)` jointly unique — and the
+role a user is served at, their **effective role**, is the most privileged of the base role and
+the grants in force (started, not ended, not revoked). A grant never lowers a role.
+
+- **Every way of loading a user serves the effective role**: `load_user`, `load_user_by_email`,
+  `authenticate` (the sign-in, so the `login` event's role), a session's cache miss, an API
+  token, the MCP admin host. Everything downstream reads `User::role` — `user.role` in
+  formulas, `Event.role`, the `sc.role` and `sc.user` settings a policy reads — so it is the
+  effective role there too, with no second code path. `load_base_user` (and `User::from_row`)
+  give the base role, which is what the user editor edits and what "the last enabled admin"
+  counts: a temporary admin is not one of the admins an installation cannot lose.
+- **Lapsing is a read, never a write.** Nothing runs at an expiry; the next read finds no grant
+  in force. A missed renewal ends access on time, never extends it. `effective_role` also
+  answers `changes_at`, the soonest a grant that could matter starts or ends, and a session
+  cache entry is believed no later than that — a grant that ends lapses at once, not up to the
+  60-second freshness TTL later. A grant made or revoked lands within the TTL, as a role change
+  does. A session started at sign-in is cached at the effective role read afresh, so a trial a
+  sign-up's trigger granted is served from the first request.
+- **One grant per source and reference.** `grant_role` upserts on it (a renewal extends the one
+  grant, and a revoked one comes back); `grant_role_once` inserts only if no grant with that key
+  has *ever* existed. Revoking keeps the row (`revoked_at`) for that reason.
+- **An ordinary table**, so an application reads it (a "your trial ends on …" banner, a daily
+  reminder trigger): created with `min_role_read`/`min_role_write` 1 and the ownership formula
+  `_read && user_id === user.id`, which are then the admin's. The schema editor never drops it
+  and its columns are protected, like `users`'. Deleting a user deletes their grants; deleting
+  a role is refused while a grant of it is in force, and clears its ended ones. A backup carries
+  the grants inside the Users choice (`users/role_grants.ndjson`), not as a table.
+- **Not there until something needs it** (§7.4c). A new installation, or one after Clear all,
+  has no `role_grants`: every read answers as if it were empty.
+- **Sources.** `admin` (the user page, a fresh uuid as the reference), `grant_role` (the action,
+  §10.1, with `<user id>:<key>` as the reference), or a module's package name (`ctx.roles`,
+  §15.1e) — a module sees and touches only its own.
+- **The admin user page** shows the base role beside the effective one, every grant, a form to
+  give one for a number of days (or until revoked), and Revoke (`listUserRoleGrants`,
+  `grantUserRole`, `revokeUserRoleGrant`). The public role (100) is never granted: it is
+  everybody's already.
+
+### 7.4b LLM credits (`sc_auth::credits`, TODO-payments P6, design C3)
+
+A user's **LLM credits** are what a metered agent's model calls are charged to (§11.2). The
+ledger has one spender — an agent run's model calls — and is deliberately not a general
+metering facility: an application that charges for something else keeps its own tables.
+
+- **Three ordinary tables.** **`credit_buckets`** — one per grant: `(user_id → users, amount,
+  remaining, kind, source, key, expires_at, note, created_at)`, `(source, key)` unique.
+  **`credit_entries`** — one per thing that happened: `kind` `grant`, `debit` or `low_balance`,
+  the signed `amount`, the `balance` after it, `(source, key)` unique, the `bucket` a grant made,
+  and for a debit the `run`, `agent`, `model`, `input_tokens`, `output_tokens` and `cost`.
+  **`credit_accounts`** — one per user who has had credits: their `debt` and
+  `low_balance_threshold`. Amounts are `numeric`, kept to six decimal places, and travel as
+  decimal strings to the admin client. All three are created with `min_role_read`/`write` 1
+  and `_read && user_id === user.id`, so a balance widget is an owner's REST read; never
+  dropped by the schema editor, columns protected, carried by a backup's Users choice
+  (`users/credit_*.ndjson`), and deleted with their user. Like `role_grants` they are not
+  there until something needs them (§7.4c): until then the balance is zero and the lists are
+  empty, and an agent that is not metered never reads them at all.
+- **The balance** is what is left in the unexpired buckets less the debt. An expiry is a read,
+  like a role grant's: nothing is written when a bucket lapses.
+- **`grant_credits`** repays debt first, then fills a new bucket with the rest. A grant whose
+  `(source, key)` exists does nothing and answers that bucket (`replayed`) — what makes a
+  re-delivered webhook harmless. Sources: `admin` (the user page) and a module's package name
+  (`ctx.credits`, §15.1e). `agent` is reserved for debits.
+- **Rollover** (TODO-payments P7.1). A grant may name an earlier bucket of its own source
+  (`CreditRollover { from_key, cap }`): in the same locked transaction that bucket is emptied and
+  `min(remaining, cap)` (all of it with no cap) is added to the new bucket, and an entry of kind
+  `rollover` records what that did to the balance. An expired earlier bucket still carries what it
+  held when it expired: nothing spends an expired bucket, and a renewal usually arrives just
+  after the period, and its allowance, has ended. A replayed grant carries nothing again.
+- **`debit_credits`** is called by the agent loop and nothing else: no code body, workflow,
+  action or module can spend credits. It takes from the soonest-expiring bucket first (never
+  expiring last), and what the buckets do not cover becomes debt: the call has already happened,
+  so a debit is never refused. A debit whose key (`<run>:<step>`) exists does nothing.
+- **One writer per user.** Every operation is one transaction that first locks the user's
+  `users` row `FOR UPDATE`; concurrent debits for one user take turns and never overdraw.
+- **The low-balance notice.** A debit that takes the balance from at or above the user's
+  threshold to below it writes a `low_balance` entry — once per fall, not per later call. The
+  threshold is set on the user page or by a module (`ctx.credits.setThreshold`).
+- **Events.** Each ledger write is raised as a table event after the transaction commits
+  (`Catalog::emit_write`), so an application's trigger on `credit_entries` fires (an auto
+  top-up on `low_balance`) and live reads of the buckets update. A debit's events carry the
+  run's user as the caller.
+- **The admin user page** ("LLM credits" in a user's menu) shows the balance and debt, every
+  bucket, the latest 50 entries, a form to grant credits for some days (or for good), and the
+  threshold (`getUserCredits`, `grantUserCredits`, `setUserCreditThreshold`).
+
+
+### 7.4c Core tables a module declares (`core_tables`)
+
+The role grants and the credits ledger are core's (written only by `sc_auth`), but most
+applications never use them, so a new installation lists `users` alone. A module that needs
+them names them in its plugin object, `core_tables: ["role_grants", "llm_credits"]`
+(`llm_credits` is the three ledger tables). The payments module does. `ModuleSet::load`
+creates them on every load (a no-op once they are there), so installing the module creates
+them; an unknown name is an issue on the module's card. They stay when the module is removed,
+because they hold what users were granted.
+
+Besides that, **the first write creates them**: an admin's grant by hand, the `grant_role`
+action, a module's `ctx.roles`/`ctx.credits`, a metered agent's debit, a restore whose backup
+holds their rows. Every read (`effective_role`, `credit_balance`, the lists, `find`/`load`, a
+revoke) treats a missing table as empty and creates nothing. A trigger on `credit_entries` can
+only be made once the ledger exists. **Clear all drops them** after the admin's tables,
+bypassing the schema editor's refusal, so the next module installed creates them again.
+
+### 7.5 Guest sessions, and where a request came from (TODO-payments P1.3, P1.5, P1.6)
+
+**The origin.** Two facts about a request matter far below the transport, past signatures that
+carry only the user: the **application** it came through (an event's `app` — its id, its base
+URL as this request reached it, and its native apps' URL scheme from the `url_scheme` attribute),
+and the caller's **guest session**. They travel as one `sc_catalog::Origin`. The router runs an
+application request inside it (`with_origin`, a task-local), and whatever builds a caller context
+reads it there — `ownership::caller_context_at`, a code body's table host, the row actions'
+authority — so `CallerContext` carries `app` and `session` explicitly from then on, onto the write,
+onto the event the write raises (`Event::caused_by`), and back into scope by the dispatcher while
+the trigger's action runs. A scheduled trigger, a service and a webhook run in no origin, and see
+none. A code body binds `app` (`{ id, url, scheme }` or null) and `session` (`{ id }` or null)
+beside `user`.
+
+**Guest sessions** (design C9) let a visitor who is not signed in own rows — a basket — as a
+signed-in user owns them by `user`.
+
+- **Off per application** until the admin switches `guest_sessions` on (its lifetime,
+  `guest_session_days`, defaults to 30). The REST provider then projects `POST
+  {mount}/guest-session`, `api.startGuestSession()`: started on request, never on a visit, so a
+  crawler makes no rows. Idempotent for a caller who has one; refused (409) for a signed-in
+  caller; throttled per address. Its auth is `Public`, not the public *role*, so it needs the CSRF
+  token — a cross-site page cannot plant a guest session.
+- **Two secrets.** `_fd_guest_sessions` keys on the SHA-256 of the cookie token, and stores a
+  separate random **public id** (`gs_…`) beside it. The public id is what a table stores and what
+  a formula sees as `session.id`; a dump or a REST read of `orders.session_id` is not a usable
+  cookie. The table is **logged**, unlike `_fd_sessions`: the guest session is the only record of
+  who owns a guest's rows.
+- **The cookie** (`sc_guest`) is the application's own: no `Domain` (never the shared cookie
+  domain), `SameSite=Strict`, `HttpOnly`, and **persistent** (`Max-Age` = the lifetime), so the
+  basket survives a reload and closing the browser. A cross-site return from a provider's
+  checkout therefore arrives without it; the success page loads the order through the API, whose
+  same-site calls carry it.
+- **Resolution.** For an application API request with no signed-in user, the transport looks the
+  cookie up (token and application, unexpired) and runs the provider inside an origin with that
+  session. A mutating request that failed the CSRF check is the anonymous caller §7.3 describes,
+  and gets no guest session either.
+- **`session` in formulas** is an ambient object always in scope, like `user`, with one declared
+  field, `id` (`session.token` is an error on save). Ownership formulas (runtime and RLS), default
+  expressions, `only_if` and action formulas see it; in an RLS policy `session.id` is
+  `NULLIF(current_setting('sc.session', true), '')`, and `set_caller_context` sets `sc.session`
+  beside `sc.role`/`sc.user`. A calculated field, a constraint and a dataset may not use it, for
+  `user`'s reason (`Analysis::uses_caller`). `user` stays null and the role stays public for a
+  guest, so `user && …` still means "signed in".
+- **Signing in from the same browser** (P1.6) ends the guest session — row deleted, cookie
+  cleared — and the `login` event's payload is `{ guest_session: <public id> }`, which the
+  application's own trigger uses to move the guest's rows to the account (`update_rows` where
+  `session_id !== null && session_id === payload.guest_session`). A login from a browser that was
+  nobody's guest has no payload, as before — and a field a payload does not have reads as null,
+  so the trigger's first half is what keeps it from matching every row with no session.
+- **The live socket** (P2.8) is resolved like a REST request: the upgrade's cookie names the
+  guest session (an upgrade is a GET, and a cross-site one is refused by its `Origin`), the
+  connection runs inside an origin carrying it, and the connection's `CallerCell` carries its
+  public id to the hub, whose `table_changes` verdicts run inside an origin of their own
+  (`sc_catalog::with_origin`) and share verdicts per (user, role, guest session). Each re-check
+  reads the guest session again; one that has lapsed or ended closes the socket as `signed_out`.
+- **Defaults on nullable fields** (P2.8). A table owned by *either* `user` or `session` defaults
+  both (`user && user.id`, `session && session.id`), and each gives nothing for the other kind of
+  caller, so a default expression is allowed on a nullable field: one that gives nothing leaves
+  it null (on a `NOT NULL` field that fails the insert, naming the field).
 
 ---
 
@@ -1891,14 +2065,28 @@ erDiagram
   }
   CHANGES["_fd_changes"] {
     int seq PK "identity; the log's order"
-    text table_name "the synced table, by name"
+    uuid changeset "the user action; UNIQUE (changeset, table_name, row_key)"
+    text table_name "the synced or history table, by name"
     text row_key "the primary key as text"
-    text op "insert | update | delete"
-    json fields "an update's changed columns; null otherwise"
-    int txid "the writing transaction, checked against pull watermarks"
-    uuid client_id "the uploading device; null for any other writer"
-    int mutation "the device's own number for the change"
+    text op "insert | update | delete, net of the changeset"
+    json old_values "update: changed columns before; delete: the whole row"
+    json new_values "update: changed columns after; insert: the whole row"
+    int txid "the LAST transaction that touched the entry, checked against pull watermarks"
     timestamp at
+  }
+  CHANGESETS["_fd_changesets"] {
+    uuid id PK "one user-level action"
+    timestamp at
+    uuid user_id "the originating caller; by value"
+    text session "derived from the login session; what an Undo action steps back through"
+    text source "request | import | workflow | undo | restore | sync | mcp | sql"
+    uuid application "by value"
+    text description
+    uuid cause "the changeset this one undid, or whose event started it"
+    text undo_table "an undo limited to one table; null for a whole changeset"
+    uuid client_id "the uploading device, for source sync"
+    int mutation "the device's own number for the change"
+    int txid "the first transaction"
   }
   SYNCCLIENTS["_fd_sync_clients"] {
     uuid id PK "the device"
@@ -1912,9 +2100,14 @@ erDiagram
   }
   SYNCKEYS["_fd_sync_keys"] {
     uuid client_id PK "the device"
-    int mutation PK "the change that created the row"
-    text table_name "by name"
-    text row_key "the real key the server made"
+    int mutation PK "the device's change that created the row"
+    text table_name
+    text row_key "the real key the server gave the row"
+    timestamp at
+  }
+  TXSETTINGS["_fd_tx_settings"] {
+    text name PK "SQLite only: a transaction-local setting, e.g. sc.changeset"
+    text value "deleted before its transaction commits"
   }
   BUILDHOSTS["_fd_build_hosts"] {
     uuid id PK
@@ -1976,10 +2169,14 @@ erDiagram
   APPS }o--o{ STREAMS : "streams[] -- by name"
   MODULES |o--o{ STREAMS : "provider -- by name, a stream provider the module supplies"
   TABLES ||--o{ CHANGES : "table_name -- by name, when attributes.sync is enabled"
-  SYNCCLIENTS |o--o{ CHANGES : "client_id -- by value, an uploaded change"
+  TABLES ||--o{ CHANGES : "table_name -- by name, when attributes.history is enabled"
+  CHANGESETS ||--o{ CHANGES : "changeset -- at most one entry per row"
+  CHANGESETS |o--o{ CHANGESETS : "cause -- undo, or what started a workflow run"
+  SYNCCLIENTS |o--o{ CHANGESETS : "client_id -- by value, an uploaded change"
+  SYNCCLIENTS ||--o{ SYNCKEYS : "client_id -- by value"
+  USERS |o--o{ CHANGESETS : "user_id -- by value"
   USERS ||--o{ SYNCCLIENTS : "user_id -- by value"
   APPS ||--o{ SYNCCLIENTS : "application -- by value"
-  SYNCCLIENTS ||--o{ SYNCKEYS : "client_id -- by value, a row created offline"
   APPS ||--o{ BUILDJOBS : "application_id -- by value"
   BUILDHOSTS |o--o{ BUILDJOBS : "build_host_id -- by value, once claimed"
 ```
@@ -2069,8 +2266,11 @@ ambient, and `row`/`old` are *out of scope* on an event that has no row (so nami
 run's `context` — §10.3) so an `only_if` and an action's settings cannot disagree about what is
 in scope.
 
-The eight built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
-`run_python_code` (§15.2), `send_email` and `publish` (§14.10), and they live in
+The ten built-ins are `insert_row`, `update_rows`, `delete_rows`, `fetch`, `run_js_code`,
+`run_python_code` (§15.2), `send_email`, `publish` (§14.10), `undo` (§14.12) and `grant_role`
+(§7.4a: a user formula, a role, a duration or an `expires_at` formula, a key formula that is per
+user, and `once`, which grants nothing if a grant with that key ever existed for the user — the
+card-less trial; never the admin role), and they live in
 **`sc-core-actions`, above the row layer**. That placement is the design's one real constraint on where an action may live: a
 trigger's write goes through `sc-api`'s `rows` module, so it is coerced, validated,
 `File`-field-checked and *observed* exactly like an API caller's write. A second write path would
@@ -3700,6 +3900,20 @@ its reason kept**, remaining stored, listed and editable, because editing it is 
   left overnight is not over budget. Only an explicit `context_budget` ends a run for now; the
   working-budget default arrives with compaction (Phase 4). `max_cost` is refused on save unless
   every model the agent may call has input and output prices.
+- **LLM credits** (TODO-payments P6.3, `sc_agent::meter`). An agent is **metered** when it sets
+  `credits_per_dollar` (credits per unit of `Usage::cost`) or `credits_per_1k_input` /
+  `credits_per_1k_output` (for a model with no prices; a call with a known cost is charged by
+  the dollar when both are set). A rate per dollar alone is refused on save unless every model
+  has input and output prices, as `max_cost` is; a call whose only unknown is a cache price is
+  charged at the input price. A metered run is charged to its caller (§7.4b): it refuses an
+  anonymous caller (the run fails, naming why), stops before a model call when the balance is
+  at or below zero — or, at the start of a drive, below `credits_min_balance` — as
+  `OverBudget { budget: credits }`, and debits after **every** model call: steps (`<run>:<step>`),
+  compaction summaries and a tool's own `Delegator::ask`. A delegated run is charged to the same
+  caller at its own rates, or its parent's when it has none. **A caller at the admin role is
+  never charged**: that keeps the admin's copilot (whose caller must be an admin) and a
+  trigger's `run_agent` (which carries the admin role and no user) free. The chat says "You are
+  out of LLM credits" for that conclusion.
 - **Parallel tool calls** are sent as `false` unless the agent's `parallel_tool_calls` attribute
   is set.
 
@@ -4324,10 +4538,15 @@ grants rather than replacing them: the applications area on with `allow_drop` of
 can write an SQL endpoint and cannot remove one.
 
 **A third area, `allow_modules`, is the exception to "on by default".** It offers the tagged
-`listModules` and `installModule` endpoints — so an agent writing a Python body can install the
-library it imports — and it is **off** unless a token or agent ticks it, because installing a
+`listModules`, `installModule` and `updateModule` endpoints — so an agent writing a Python body
+can install the library it imports, and change an installed module's settings (which reloads
+it; `updateModule` also needs `allow_edit`) — and it is **off** unless a token or agent ticks it, because installing a
 package runs a third party's code with the server's privileges and a Python one has no sandbox at
-all. No existing credential gains it by upgrading. **An MCP token is the exception to all of these
+all. No existing credential gains it by upgrading. **A fourth, `allow_history`,** is off unless
+ticked for the same kind of reason: its tools (`getRowHistory`, `listDeletedRows`, `getRowAsOf`,
+`listChangesets`, `getChangeset`, §14.12) read row data, which no other tool shows an agent, and
+its writes (`restoreRow`, `revertRow`, `undoChangeset`) also need the edit grant (undo the drop
+grant too). **An MCP token is the exception to all of these
 defaults:** a mint that leaves a flag out grants it (`sc_api::mcp::token_flags_from_submitted`) and
 the panel starts with every box ticked, because a token is minted by an admin, on purpose, for an
 agent they are handing the installation to; the stored `grants` is explicit, so the copilot's
@@ -4643,6 +4862,89 @@ front-ends, as in v1: a plain chat interface, and the
 staged **AppConstructor** (describe → clarify → research → requirements → plan → execute → user
 feedback → self-heal). For users who prefer an external coding agent, the copilot can emit a
 `SKILL.md` describing the app.
+
+### 11.7 Agents in an application's pages
+
+An application's React pages talk to agents in two ways. A **chat** is a multi-turn conversation
+that streams as it is generated and is kept, so the person can reopen and continue it. A
+**single prompt** is a call from a button whose point is usually what the agent's tools do; the
+page shows the answer in a toast, or ignores it. Both go through one mechanism.
+
+**An application exposes an agent**, as it exposes a trigger or a stream: `Application::agents`
+is an opt-in subset of `AgentExposure { name, chat, prompt, anonymous, tools, prompt_template }`,
+stored in the nullable `_fd_applications.agents` column. An agent the application does not name has
+no route, and a request for one is a 404. The routes sit beside the endpoint set under the first API
+mount, as the live socket and the upload slots do (`sc_app::agent_route`):
+
+| Route | |
+|---|---|
+| `POST {mount}/_agents/{name}/chat` | `{ message, run? }` → one turn, as `text/event-stream` |
+| `POST …/prompt` | `{ prompt }` or `{ input }` → `{ run, state, answer, conclusion, tools }`; `?stream=1` streams it |
+| `GET …/runs` | the caller's own conversations with it, without transcripts |
+| `GET / PATCH / DELETE …/runs/{id}` | one of them with its transcript; rename (`{ title }`); delete |
+
+**Who may use it.** The agent's own `min_role`, which is the one floor on who may talk to an agent
+wherever it is reached from, and the application's admission rules in front of it. Every tool runs
+as the caller (`RunCaller::user`), capped at the application's `max_role`, so ownership formulas and
+RLS apply to what the agent does exactly as to the page's own requests. People who are not signed
+in are refused unless the exposure says `anonymous`. That takes **two** opt-ins: the agent's
+`min_role` must be public (100), and the application must say so. The admin API and the MCP tool
+refuse an anonymous exposure of a non-public agent when it is saved (`check_exposed_agents`), and
+the MCP tool also requires `allow_access_changes`, as it does for a public trigger. An anonymous run
+is `RunCaller::anonymous()`: no user, the public role. It is never the system caller, which is admin.
+
+**Transport: SSE over `POST`, not the admin chat's WebSocket.** A turn is one message up and a
+stream down. As a request it passes through the application's session, CSRF check, admission and
+body limit with nothing new, and the client stops it by aborting the `fetch`. The events are the
+admin socket's (`text`, `reasoning`, `tool_call`, `tool_result`, `error`, `done`), with `run`
+first so a new conversation has its id at once. The turn runs in its own task and watches its
+channel. **When the response is dropped, the agent stops** and the run is written `aborted`, which
+is the admin socket's rule for a closed connection. A turn that keeps running for a client that
+has gone, and can be rejoined later, is left for when it is needed. It would need the turn detached
+from the request, plus the message bus to rejoin it from another node.
+
+**Whose a run is.** A run started here carries `attributes.app`, `attributes.app_mode` (`chat` |
+`prompt`) and `attributes.owner`. The owner is `user:<id>`, or for an anonymous caller a hash of
+the browser's cookie, as an upload's uploader is. Only the owner, in the same application and
+mode, sees a run through these routes. Anybody else gets the 404 a missing run gets. Prompt runs are
+kept for audit and are never listed as conversations. A turn may not start, and a run may not be
+renamed or deleted, while the run is `running` (409): the turn writes the row after every step and
+would undo the change. Deleting or renaming an agent that an application exposes is refused, naming
+the applications.
+
+**What the client sees.** `tools` is `none`, `names` (the default: which tool ran and whether it
+failed) or `full` (its arguments and result too). It applies to the streamed events and to the
+stored transcript alike. A transcript (`GET …/runs/{id}`) is projected from the loop's messages into
+the client's message shape: each user message, followed by one assistant message holding the
+agent's text and tool parts. A tool part is settled by its result. The system prompt, compaction
+summaries and the vendors' replay items stay on the server.
+
+**A prompt template** (`"Summarise order {{order}} for {{audience}}"`) makes `…/prompt` take
+`{ input: { order, audience } }` instead of free text. A missing key and an extra key are both
+refused. A button then sends its values, and nobody else gets a free-form line to the agent. The
+generated client types `input` from the placeholders.
+
+**The client is a toolkit, not a component.** This follows the shape of the AI SDK's `useChat`,
+assistant-ui's runtime and LangGraph's `useStream`: events per turn, a reducer from events to
+messages made of parts, a separate thread list, and abort through the request. The page draws
+everything itself.
+
+- The helper (`helper.ts`) has the types `AgentEvent`, `AgentMessage`, `AgentPart`, `AgentRun` and
+  `AgentAnswer`, the reducer `applyAgentEvent(messages, event)`, `userMessage(text)`, and
+  `agentApi`, which reads server-sent events out of a `fetch`.
+- The generated client has `api.agents["<name>"]`, typed to what the exposure opens: `chat` and
+  `runs.list/get/rename/delete`, and `prompt` and `promptStream`.
+- The React scaffold writes `src/useAgentChat.ts` once. It is a hook giving `messages`, `status`,
+  `error`, `run`, `send`, `stop` and `load`. It belongs to the developer, and is a starting point
+  rather than the API.
+
+Deliberately not built yet:
+
+- **Client-side tools and human approval of a tool call.** Both need a run that waits on the
+  browser. The event protocol leaves room for a `tool_call` the client answers.
+- **Rejoining a turn still in progress after a reload.**
+- **Model-generated titles, and attachments.**
+- **An adapter for the AI SDK's own `useChat` transport.**
 
 ---
 
@@ -5254,6 +5556,7 @@ pub struct Application {
     pub file_stores: Vec<FileStoreId>,
     pub triggers: Vec<TriggerRef>,       // the triggers it exposes, by name
     pub streams: Vec<StreamRef>,         // the streams it may observe, by name (§14.3)
+    pub agents: Vec<AgentExposure>,      // the agents its pages may talk to (§11.7)
     pub apis: Vec<ApiConfig>,            // any number, each on a sub-path, each with its own config
     pub static_dirs: Vec<StaticDir>,     // any number, each served at a sub-path
     pub csp: CspPolicy,                  // strict by default
@@ -5942,6 +6245,205 @@ follows.
 
 The registry is installed whole on every module change, beside the action registry and the
 table providers, so a framework that has just been uninstalled stops being offered.
+
+#### Server-rendered frameworks: Astro for websites
+
+Every framework above produces an SPA: a bundle that a browser runs, which then asks the API
+for data. That is the wrong shape for a **website** — a landing page for an app that lives on
+another subdomain, a blog, a news page, a page with a contact form. Such a site wants the
+content in the HTML the server sends (search engines rank what they can read; a phone on a slow
+network shows what has arrived), little or no JavaScript, and a short time to first byte.
+
+`plugins/astro` (`@feldspar/astro`, framework `astro`) supplies that, and it adds one thing to
+the framework seam: a **server entry**.
+
+**Astro's syntax, Saltcorn's server.** Pages are `.astro` files — the frontmatter fence, the
+JSX-like template, `src/pages` routing, scoped `<style>`s — compiled by `@astrojs/compiler`, the
+compiler Astro itself uses. Astro's *runtime* is not used: the build bundles every page with
+esbuild into **one JavaScript code body**, `dist/_server/entry.js`, against a small runtime of
+its own (`plugins/astro/files/server.mjs`) that implements the ~20 functions the compiler's
+output calls. Of the syntaxes Astro accepts, only `.astro` itself (and `.ts`/`.js` endpoints)
+is supported; UI-framework components and `client:*` islands, Markdown/MDX pages, content
+collections, view transitions and integrations are refused **by name** at render time, never
+silently dropped.
+
+**The frontmatter is a code action's body.** The entry runs through
+`TriggerDispatcher::run_code` on `run_js_code` — the path a JavaScript custom query takes —
+so `db`, `fetch`, `fs`, `trigger`, `Table`, `user` and `lib` are bound for every page, with the
+same bounds and the same admin authority (narrowed with `.asUser()`). This was the requirement
+that decided the design: running real Astro in Node at build time would have needed a second
+data API, and running it at request time would have needed Node. Because the whole site is the
+body of one function, every component's frontmatter and every `getStaticPaths` closes over the
+same run parameters; the body is compiled once per isolate and cached by content. The one
+binding added is `request` (method, path, query, parsed form/JSON body, a few headers, origin,
+locale, CSRF token), and the body answers `{ status, headers, body }`.
+
+**The seam.** A declared framework's `build` may name `server: "_server/entry.js"`, a path
+inside its output directory (`BuildTemplate::server` → `BuildSpec::server_entry`, checked by
+`sc_app::check_server_entry`). Every mount path — build, boot, reload, agent preview — goes
+through `sc_app::mount_code_framework`, which gives such a build a
+`server_render::ServerRendered` instead of a `CodeFramework`:
+
+1. A `GET` that names a file the build wrote (`about` → `about/index.html` too) is served from
+   the bundle: `_astro/*` (content-hashed) as `immutable`, the rest with an ETag and
+   `must-revalidate`. `_server/` is removed from the bundle and never served.
+2. Anything else runs the entry, which routes, renders, and renders `404.astro` when nothing
+   matches. There is no SPA fallback.
+3. A caller the application does not admit gets its files and a 403 for rendered pages.
+4. A rendered page with no `Cache-Control` of its own is `private, no-cache`: it may carry the
+   visitor's CSRF token.
+
+**Prerendering is opt-in, per page** (`export const prerender = true`, Astro's spelling).
+After the bundler, `build_application` asks the entry for the list (`mode: "prerender-list"`:
+static routes, and each dynamic route's `getStaticPaths()`, which may read `db`), renders each
+through the same body and writes it into `dist/` (`server_render::prerender`). So a prerendered
+page and a server-rendered one cannot disagree — they are the same code — and a build with no
+dispatcher (the CLI's) simply skips the step: those pages are then rendered per request, which
+is slower and otherwise identical. Prerendering at *build* time means a prerendered page shows
+the data as it was at the last build; a page showing live data leaves `prerender` off.
+
+Why opt-in rather than Astro's default of "everything static": the use case is mostly-static
+sites with a few live pages, and a page silently frozen at build time is a worse failure (a blog
+that never shows the new post) than a page rendered per request that could have been a file (a
+few milliseconds). The scaffold marks its static pages.
+
+**What a website needs, and gets:** one hashed stylesheet for the site (imported CSS first, then
+each component's scoped styles); each processed `<script>` bundled to a hashed file, so the CSP
+needs no `'unsafe-inline'` for scripts (styles are widened: a `style` attribute is how landing
+pages are written, and cannot run anything); a generated `/sitemap.xml` (static routes plus every
+`getStaticPaths()`, which a server-rendered `[slug].astro` may export just for this) and
+`/robots.txt`, unless the site has its own; canonical/Open Graph tags in the scaffolded layout,
+built from the framework's `site` setting (or the request's origin); forms that post back to
+their page with `<Csrf />` from `feldspar:components` and redirect after the write.
+
+**The render cache** (`server_render::cache`). A rendered page is kept, keyed by origin, path,
+query and locale, with the tables its render read, and dropped when one of them is written. The
+read set is the host's, not the page's: `TriggerDispatcher::run_code_traced` hands the run a
+`sc_expr::TraceSink`, and the isolate records every table a `db` plan names (and whether the
+run wrote a row or ran a trigger) as the calls happen. The set is closed over keys — a table a
+read table reaches through a key field, and a table with a key into a read table, since a
+Ⱶ-path or a child aggregation reads those. Writes arrive on the catalog's emit seam through one
+process-wide listener (`render_cache`) that holds each site's cache weakly, so a remount needs
+no unregistering. What is kept is narrow on purpose: an **anonymous `GET`** only, an answer the
+runtime marks shareable (it read no cookie, no request header, no CSRF token, and did not say
+`no-store` or `private`), from a run with no side effects, a 200 or 404, at most ten minutes
+old (a `fetch` or the clock is not a table), 1000 pages a site. A render that overlapped a write
+is not stored. Writes outside the row layer — raw SQL, another process — are not seen; the ten
+minutes bound that.
+
+**Refreshable prerendered pages.** `export const refresh = true` beside `prerender = true` puts
+the page in `_server/prerendered.json`. The mount treats each such page as stale (a boot cannot
+know what was written since the build), renders it on its next request exactly as the build did
+— no user, no cookies — keeps that render in memory with its read set, and serves it as a file
+with an ETag until one of those tables is written. Rendering on the next request rather than at
+the write keeps the writer's request free of a page render, and a site nobody visits costs
+nothing.
+
+**Cookies** reach the body as `request.cookies` (`AppRequest::cookies`): every cookie but the
+server's own (`sc_*` and the shared session cookie), which are credentials a page must not be
+able to echo. Reading one makes the page unshareable.
+
+**`500.astro`.** A render that fails with anything but a deliberate `httpError` is rendered
+again in `mode: "error"`, which answers the site's 500 page with `Astro.props.error`. Because the
+router then sees a success, the framework raises the `error` event itself, with the same
+payload `error_out` would have given it; with no 500 page, or one that fails too, the original
+error goes to the router as before, which raises it once.
+
+**Images** (`server_render::images`). The build reads an imported image's size from its header,
+so the import is Astro's `{ src, width, height, format }`. `<Image>` from `feldspar:components`
+computes the box (never larger than the image) and points at `/_image?src=/_astro/…&w=…`, which
+the framework answers in Rust with the `image` crate: decoded with limits, resized (cropped to
+fill when both sides are given), encoded as PNG, JPEG or (lossless) WebP, and kept — 32 sizes of
+one image and 64 MB a site at most. Only a file under `/_astro/` can be resized: the build put it
+there and its name is its content hash, so a variant is cached `immutable`, and nobody can point
+the resizer anywhere else. Resizing at request time rather than build time is what lets a
+server-rendered page choose a size from data.
+
+**The dev loop.** `buildApplication?quick=true` (`sc_app::build_application_quick`) is the
+bundler alone: no install step, no regenerated client, no prerendering (those pages render per
+request until the next full build); with no dependencies installed yet it is a full build. The
+IDE's **Build on save** switch runs it for the application whose source holds the saved file,
+once per burst of saves and never two at a time.
+
+##### A/B optimisation of landing pages
+
+A pair of components and a goal marker from `feldspar:components` (TODO-astro W3):
+
+```astro
+---
+import { Optimise, Variant, Goal } from "feldspar:components";
+---
+<h1>
+  <Optimise name="hero-headline">
+    <Variant>The best tool for the job</Variant>
+    <Variant name="speed">Be done in no time!</Variant>
+  </Optimise>
+</h1>
+...
+<Goal name="signup"><a class="button" href="https://app.example.com/signup">Sign up</a></Goal>
+```
+
+- **Choosing a variant is a server-side render decision**, which is why this framework is the
+  right place for it: the visitor's HTML contains only the chosen variant, so there is no flash
+  of the control and no client-side testing script. Each `<Variant>` registers itself with the
+  enclosing `<Optimise>` while the slot's template is evaluated — synchronously, through a stack
+  on the per-request `result` — and answers a promise of its content; `<Optimise>` decides and
+  resolves them, so only the chosen variant's slot is ever rendered. A `<Variant>` inside another
+  component inside the `<Optimise>` is refused by name. One experiment twice on a page shows one
+  arm (the choice is kept on the page context). Unnamed variants are `control` (the first) and
+  `variant-<n>`.
+- **The visitor id** is the server's: `sc_visitor`, a random 32-hex id the router reads
+  (`security::visitor_id`, which ignores a value of any other shape) or mints per request, and
+  hands over as `AppRequest::visitor` (`request.visitor`). It is not among `request.cookies`. A
+  framework that used it says so (`AppResponse::keeps_visitor`, from the entry's `visitor: true`),
+  and only then does the router set a minted one — `HttpOnly`, host-only, a year, and
+  `SameSite=Lax`, because the visitor who arrives from a search result is the one to recognise.
+  So a site that runs no experiment sets no cookie. A page that read the id is the visitor's
+  own: the render cache never keeps it.
+- **Assignment** is `hash(visitor, experiment)` (SHA-256 through the isolate's `crypto.subtle`),
+  which seeds a small PRNG. On a visitor's first view of an experiment the arm is chosen from it
+  and an **exposure** row is inserted; every later view reads that row and shows the same arm,
+  however the allocation has moved since. A concurrent second insert loses to the table's unique
+  constraint and shows what the first chose. That is one read per render of an experiment, and
+  one write per new visitor, on the call budget every page already has.
+- **Allocation**: a fixed split — even, or `weights={[…]}` (or `{ name: weight }`) — is the
+  default; `allocate="thompson"` is Thompson sampling, a beta–binomial bandit: one
+  Beta(1 + conversions, 1 + exposures − conversions) draw per arm from the grouped counts
+  (`groupBy("variant").aggregate({ n: "count()", won: "sum(converted)" })`), and the largest
+  wins. The draws come from the visitor's seeded PRNG, so the same visitor gets the same choice
+  from the same counts. `goal="signup"` counts only that goal's conversions; without it, any
+  goal (the exposure's `converted` flag). The counts are read only for a new visitor, so a
+  returning visitor's render does not pay for them.
+- **The tables** are the module's own (`tables` in `plugins/astro/index.js`, created when the
+  module loads), kept per site (`request.site`, the application's name) so several sites share
+  them, and readable by the admin only:
+  - `astro_exposures(site, experiment, variant, visitor, path, converted, created_at)`, unique by
+    `(site, experiment, visitor)`;
+  - `astro_conversions(site, goal, experiment, variant, visitor, path, created_at)`, unique by
+    `(site, experiment, goal, visitor)` — one row per goal and experiment the visitor was
+    exposed to, or one with no experiment for a visitor who saw none; reaching a goal also sets
+    the exposures' `converted` to 1.
+- **Goals.** `<Goal name>` rewrites each `<a href>` inside it to
+  `/_goal/<name>?to=…&s=<signature>` (with `rel="nofollow"`), which the runtime answers itself
+  before routing: it records the conversion and redirects. The signature is SHA-256 over a
+  random secret the build writes into the entry (which is never served), the goal and the
+  target, so `/_goal/` is not an open redirect. A path on the site needs no signature; an
+  unsigned web address — a link from a page built before the last build, or a stranger's — is
+  neither counted nor followed, but shown as a link to click. A form that posts back calls
+  `goal("signup")` from its frontmatter; it reads this request from module-level state, which is
+  per request because the body (and so the bundled runtime) runs afresh for each one.
+- **Prerendering and variants**: a page with an `<Optimise>` cannot be one static file, and the
+  prerender step (and a refreshable page's re-render) refuses it with a sentence naming the
+  page. One file per arm, chosen in Rust without running the body, is left for later: it would
+  need the assignment (and its exposure row) in Rust too.
+- **SEO**: crawlers (by `user-agent`) always get the first variant and are never counted, at
+  render or at `/_goal/`, so a test does not show search engines alternating content.
+- **Reporting** is an Analytics dashboard (`sc_analytics::ab::ensure_ab_workspace`), made after
+  the first full build of an `astro` application when the two tables exist: two datasets
+  filtered to the site (`A/B exposures: <site>`, `A/B conversions: <site>`) and a dashboard
+  `A/B tests: <site>` with a sentence on reading it, visitors and mean `converted` by experiment
+  and variant, and conversions by goal. Made once and found by name afterwards, so the admin's
+  changes stand; a failure is logged and does not fail the build. No new admin screen.
 
 #### Saltcorn UI: v1's views, hosted rather than reimplemented
 
@@ -10999,25 +11501,32 @@ keep working, so sync adds nothing to a user table. What it needs is:
 
 - **The table's setting:** `_fd_tables.attributes.sync` (`enabled`). It is sparse, so it is an
   attribute.
-- **One change-log for every table, `_fd_changes`:** `seq`, `table_name`, `row_key` (the primary
-  key as text), `op` (insert, update, delete), `fields` (the columns an update changed), `txid`,
-  and `client_id` and `mutation` for a change a device uploaded. A delete is an entry in the
-  log, so no table needs a "deleted" flag.
+- **One change-log for every table, `_fd_changes`, shared with row history (§14.12):** `seq`,
+  `table_name`, `row_key` (the primary key as text), `op` (insert, update, delete), the
+  `changeset` it belongs to, `old_values`/`new_values` (the changed columns; for an update,
+  the columns it changed are the keys of `new_values`) and `txid`. A change a device uploaded
+  belongs to a changeset that names the device and its change number (`_fd_changesets.client_id`,
+  `mutation`). A delete is an entry in the log, so no table needs a "deleted" flag.
 - **One row per device, `_fd_sync_clients`:** the user, the application, the watermark of its
   last pull, and the number of the last change it uploaded that the server applied.
 
 **Changes are recorded by database triggers**, not by the row layer: one `AFTER INSERT OR UPDATE
-OR DELETE` row trigger per synced table, all calling one function with the primary-key column as
-its argument. A trigger writes the log entry in the same transaction as the change, and also
+OR DELETE` row trigger (`_fd_changes`) per table that has sync **or** history switched on, all
+calling one function with the primary-key column as its argument. A trigger writes the log entry in the same transaction as the change, and also
 catches writes made outside Feldspar. An update that changes nothing records nothing; a change
 of primary key is recorded as a delete and an insert. The function runs with its owner's rights
 and a fixed `search_path`, so a writer needs no rights on the change-log and cannot forge or
-redirect entries. A device's upload sets who it is in
-transaction-local settings (`sc.sync_client`, `sc.sync_mutation`), the way the caller is
-passed for row-level security, so its own changes come back marked as its own. Switching sync on
-needs a one-column primary key in Saltcorn's own Postgres database; on SQLite it is refused for
-now, because a SQLite trigger cannot read a row generically and would have to be regenerated with
-every schema change.
+redirect entries. A device's upload opens one changeset per change (`source = 'sync'`, with
+the device and its change number), passed in the transaction-local `sc.changeset` the way the
+caller is passed for row-level security. The writes of the triggers that change fires carry the
+same changeset, in their own transactions too, so they are marked as the device's as well. Writes
+to one row within one changeset are **merged into one entry** (§14.12). The merge moves the
+entry's `txid` forward to the transaction doing it, and an entry is only removed when everything
+merged into it happened in that same transaction, so a pull taken between two transactions of one
+changeset never misses the second. Switching sync on
+needs a one-column primary key in Saltcorn's own database. On SQLite a trigger cannot read a row
+generically, so each table's triggers are generated from its columns and regenerated with every
+schema change (§14.12, "As built (H6)").
 
 **Pulls are cut at a watermark, not at a time or a count.** A number or timestamp is taken
 before a transaction commits, so a transaction that started earlier can become visible after a
@@ -11096,7 +11605,380 @@ pages and screens show "…" for it.
 Filtering by more than the access rules (only recent rows, say) is left for later.
 
 **Cleanup:** old entries superseded by a later entry for the same row are removed after a
-retention period. A device whose watermark is older than what is kept reloads its tables.
+retention period, by the one cleanup job sync shares with row history: an entry is removed only
+once history is done with it too (§14.12). A device whose watermark is older than what is kept
+reloads its tables.
+
+### 14.12 Row history (planned, `TODO-history.md`)
+
+A table may keep its **history**: for every insert, update and delete, what the row was before,
+who changed it and when. This serves three purposes: **undo** (take back what one user action
+did), **audit** (who changed which field) and **restore** (get a deleted row back, or put a
+row back as it was). The survey of how other systems do it, and the reasons for each choice
+below, are in [ROW_HISTORY.md](ROW_HISTORY.md).
+
+Saltcorn 1 had a *versioned* switch that created a `{table}__history` shadow table, and the row
+layer wrote a full copy into it on every write. That design had four problems, and each one
+explains a decision here:
+
+- **One save gave several versions.** A stored calculated field's recomputation and a
+  trigger's follow-up write each added a version. Here, writes are grouped into
+  **changesets**, with **one entry per row per changeset**.
+- **The shadow table had to follow every schema edit.** Here there is no shadow table. Rows
+  are stored as JSON in one log.
+- **Raw SQL and bulk writes were missed.** Here capture is done by a database trigger.
+- **There was nothing to undo a multi-table action as one unit.** Here the changeset is that
+  unit.
+
+**History is off by default** and is switched on per table: `_fd_tables.attributes.history`,
+`{ "enabled": true, "keep_days": 365 }` (no `keep_days` means keep forever). The setting is
+sparse, so it is an attribute.
+
+#### One change log, shared with offline sync
+
+History and sync (§14.11) record the same thing, a change to a row, so they share **one log
+(`_fd_changes`), one trigger function, one trigger per table and one cleanup job**. The trigger
+(`_fd_changes`) exists while **either** setting is on, and is dropped only when both are off.
+What differs is who reads the log and how long they keep it:
+
+| | Sync | History |
+|---|---|---|
+| Reads | the keys changed between two watermarks | the values, per row and per changeset |
+| Keeps an entry | until superseded and past sync's retention | for `keep_days` |
+| Only theirs | `_fd_sync_clients`, watermarks, pull and push | the read API, restore, undo |
+
+The switch-on checks are one function, `change_log_key()`: the table is in Saltcorn's own
+Postgres database, is not a system table, is not served by a provider, and has a one-column
+primary key. An error names the feature that asked. The capability is `change_triggers`, which
+both backends have: SQLite's per-table triggers are H6 (and sync's S1.4).
+
+#### Storage
+
+`_fd_changes`, one entry per row per changeset:
+
+- `seq`: an identity column, the log's order.
+- `changeset`: the user action the entry belongs to.
+- `table_name`, `row_key`: which row. The key is stored as text.
+- `op`: `i`, `u` or `d`, the **net** operation of the changeset on that row.
+- `old_values`: for an update, the changed columns' values before; for a delete, the whole row.
+- `new_values`: for an update, the changed columns' values after; for an insert, the whole row.
+- `txid`: the **last** transaction that touched the entry, which is what a pull reads.
+- `at`: when it was last touched.
+
+The key `UNIQUE (changeset, table_name, row_key)` is what collapses repeated writes. Sync's
+indexes `(txid, seq)` and `(table_name, row_key, txid)` serve history's per-row reads too.
+
+`_fd_changesets`, one row per user-level action:
+
+- `id`, `at`, `txid` (the first transaction).
+- `user_id`: the **originating** caller. A trigger action that runs with admin authority still
+  records the user who caused it, because that is the answer to "who changed this?".
+- `session`: a key **derived** from the login session's token hash (a hash of it, never the
+  hash itself, which is `_fd_sessions`' primary key). For a bearer-token caller (§13.6) it is
+  derived from the token's id. It is null for anonymous callers and for writes with no
+  Feldspar context.
+- `source`: `request`, `import`, `workflow`, `undo`, `restore`, `sync`, `mcp` or `sql`.
+- `application`, `description` (an optional reason).
+- `cause`: for an undo, the changeset it undid; for a workflow run, the changeset whose event
+  started it.
+- `undo_table`: for an undo limited to one table, that table; null for a whole-changeset undo.
+- `client_id`, `mutation`: for a sync upload, the device and its own change number.
+
+A row's version number is not stored. "Version 7" is the entry's position among the row's
+entries in `seq` order, computed when read.
+
+#### The changeset travels with the caller
+
+A changeset is **not a transaction**. A trigger's action commits *after* the write that fired
+it, in its own transaction (§10.2), so grouping by `txid` would separate the user's edit from
+the denormalising write its trigger made. Instead, `CallerContext` carries `changeset` next to
+the trigger `chain` it already carries, and `set_caller_context` sets it as the
+transaction-local `sc.changeset`, beside `sc.role` and `sc.user`. `Event` carries it too, so a
+trigger's action passes it to the writes it makes.
+
+`sc.changeset` holds a JSON object: the changeset's id, `source`, `application`, `cause` and
+the rest of its row, and the writer's `user_id` (with `session` only when there is a user). The
+trigger needs all of it, because it writes the `_fd_changesets` row. Most code never handles a
+changeset: one is **ambient** for the task that runs the action (`sc_catalog::changeset::scope`),
+and `CallerContext::new` picks it up. The server's request middleware sets one for each request,
+and so do a CSV import, an MCP tool call, a workflow step (from the run) and a trigger's action
+(from the event). A write to a change-logged table always runs in a caller-context transaction,
+so the GUCs reach the trigger.
+
+- **A request** mints one changeset. Its `_fd_changesets` row is written by the first
+  recorded entry, so a request that changes nothing leaves nothing behind.
+- **A trigger** fired by a write gets the event's changeset. **A stored calculated field**
+  (§6.2, when it exists) is recomputed under the writer's context. Both merge into the user's
+  entries.
+- **A workflow run** gets its own changeset when it starts, kept on `_fd_runs`, so steps resumed
+  days later still join it. Its `cause` is the changeset whose event started the run.
+- **A CSV import, an MCP tool call, an undo, a restore**: one changeset each. **A sync upload**:
+  one per device change, because each change is its own transaction and is accepted or refused
+  on its own (§14.11).
+- **A write with no Feldspar context** (`psql`, another program): the trigger function mints a
+  changeset on the transaction's first write and `set_config`s it transaction-locally, so the
+  rest of that transaction joins it, with `source = 'sql'`.
+
+`sc.change_log = 'off'` skips recording. Only a backup restore sets it: the log is backed up and
+restored as itself, and devices notice a restore by the database identity (S2.7).
+
+#### The trigger function, and the merge
+
+`_fd_record_change` is `SECURITY DEFINER` with a pinned `search_path` and is `CREATE OR
+REPLACE`d at every boot, as it is now. For each row:
+
+1. **The diff.** For an update, the diff is the columns that are `IS DISTINCT FROM` their old
+   value. An update that changes nothing records nothing. A change of primary key is a delete
+   plus an insert. These are sync's existing rules, and the same rules for both features,
+   which is why there is no per-table list of excluded columns: sync must see every change.
+2. **The changeset.** It is `sc.changeset`, or a new one (see above). Its row is inserted with
+   `ON CONFLICT DO NOTHING`, and a transaction-local flag skips that after the first entry.
+3. **The upsert** on `(changeset, table_name, row_key)`, merged with the existing entry:
+   - `old_values = new.old_values || existing.old_values`: the earlier value of each column wins.
+   - `new_values = existing.new_values || new.new_values`: the later value wins.
+   - **The net op**:
+     - `i`+`u` is `i` (the update is folded into the inserted row).
+     - `u`+`u` is `u`.
+     - `u`+`d` is `d`, with the whole original row rebuilt as the deleted row overlaid with the
+       stored old values.
+     - `d`+`i` is `u`.
+     - `i`+`d` is nothing.
+   - Columns whose old and new values are equal are dropped. An update left with no columns,
+     or an insert followed by a delete, is **removed only if every write merged into it was in
+     the current transaction**. The check is that the changeset's row was created in this
+     transaction. That is a little stricter than needed: an entry made and emptied in the second
+     transaction of a changeset is kept, empty. Otherwise it is kept with no values. An emptied
+     insert keeps the op `i` with no values, and a later write to the row starts it afresh. A device may already have
+     pulled the intermediate state, so the pull must still see the key. History readers skip
+     entries with no values.
+   - `txid = txid_current()`. Moving it forward makes the next pull see the entry again.
+
+Merging works across transactions (the after-commit trigger transaction upserts onto an entry
+already committed), and the unique index serialises two writers in one changeset. The trigger
+is `AFTER … FOR EACH ROW`. If bulk updates turn out to be too slow, a statement-level trigger
+with transition tables can do the same merge as one `INSERT … SELECT … ON CONFLICT`, behind the
+same storage.
+
+#### Reading
+
+All reads go through the row layer's access rules. **By default only the admin** may read a
+table's history. `history.min_role` opens it further, and then each row is checked too: a user
+sees the history of a row they may read now, and a deleted row's history if the read rule
+grants it when evaluated (reified, as for an `only_if`) against the deleted row. Secret fields
+(§6.2) stay as envelopes in the log and are always shown as the sentinel.
+
+- `GET {table}/{key}/history`: the row's entries, newest first, each with its changeset's user,
+  time, source and description, and the field-level old and new values.
+- `GET {table}/deleted`: rows whose last entry is a delete and whose key does not exist now,
+  with their deleted image.
+- `GET {table}/{key}?as_of=<time | seq>`: the row rebuilt by starting from the current row
+  (or the deleted image) and applying the `old_values` of later entries, newest first.
+- `GET /changesets?user=&table=&source=&since=` and `GET /changesets/{id}`: what one action did,
+  across tables.
+
+**As built (H2).** The rule lives in one place, `sc_api::history::HistoryReader`, over the log
+queries in `sc_catalog::history`. The admin API paths are `GET /api/tables/{table}/rows/{key}/history`,
+`/api/tables/{table}/deleted`, `/api/tables/{table}/rows/{key}?as_of=` and
+`/api/changesets[/{id}]`. They are **admin-only routes**, like the admin API's row CRUD: a table
+whose history is opened to role 80 is opened for the surfaces an application's users reach (the
+code API's `Table` history methods, H6), and the admin API is not one of them. A table must have
+history on to be read, and changesets show only entries of tables that have it on. Changesets
+span tables, so listing and reading them is always the admin's. Below the admin, a reader sees
+who made a change by user id, not by email. `as_of` takes a time, a date or an entry's `seq`
+(meaning just after it), and answers `{ row, removed }`, with values of dropped columns under
+`removed`. A history entry lists its `changes` field by field, each marked `removed` when the
+column is gone. The MCP tools are these five endpoints, in their own area `allow_history`, which
+is off unless granted (as `allow_modules` is): history is row data, and the schema tools are
+deliberately not.
+
+These are also admin screens: a History tab in the row editor, a Deleted tab on the table with
+Restore, and a changeset browser with Undo. They are MCP tools too, and in code bodies the v1
+`Table` history methods and `db.<table>`'s history terminals (§10.1, "As built (H6)").
+
+#### Restore and undo
+
+Restore and undo are **ordinary writes through the row layer**, as the caller. Write rules,
+ownership, validation and triggers apply, so an undo grants nothing the caller could not do by
+hand. Each runs in **one transaction** under a new changeset (`source = 'undo' | 'restore'`,
+`cause` = what it reverses), and is recorded like any other change. An undo can therefore be
+undone.
+
+- **Restore a deleted row** inserts its deleted image. Columns that no longer exist are dropped
+  and reported. A reference to a row that is gone refuses the restore with the reason.
+- **Revert a row to a version** is one update, setting each column to its value as of that
+  version.
+- **Undo a changeset** applies each entry's inverse: an insert becomes a delete, a delete an
+  insert, and an update sets `old_values`. Deletes go children first and inserts parents first,
+  by foreign-key depth.
+- **The conflict check.** Each entry's columns must still hold its `new_values`. If someone has
+  changed them since, the undo is refused, naming the rows and fields. An admin's undo may pass
+  `force` to overwrite them anyway. This is the same question sync's field-wise merge (S3.3)
+  asks: has this changed on the server since?
+- **Effects outside the database** (an email a trigger sent) are not undone. Triggers fire on
+  the undo's writes as on any other write, and the admin screens say so.
+
+An entry counts as **undone** when an undo changeset has the entry's changeset as its `cause`,
+and its `undo_table` is null or names the entry's table.
+
+**As built (H3).** `sc_api::undo::Reverser` does all three, writing through `write_as` (the REST
+API's create, update and delete rules) on a `SharedTx` over the primary database, inside a
+changeset whose `session` and `application` are the ambient (calling) one's, so the Undo action
+can find it. The admin API routes are `POST /api/tables/{table}/deleted/{key}/restore`,
+`POST /api/tables/{table}/rows/{key}/revert` (`{ version }`, the number from the row's history)
+and `POST /api/changesets/{id}/undo` (`{ table?, force? }`), admin-only like the reads, and MCP
+tools in the `allow_history` area (restore and revert need the edit grant, undo edit and drop).
+Details the text above leaves open:
+
+- A restore's `cause` is the delete's changeset; a revert's is the row's latest entry's. Restore
+  and revert need the history to be readable by the caller (they show what the row was).
+  Revert refuses a version that is the row's deletion, and one the row is already at; a row
+  deleted since is inserted.
+- An undo answers `{ undone, changeset, entries, dropped, conflicts }`. **A refusal is an answer,
+  not an error**: `undone: false` and the conflicts (`table`, `key`, `field`, `expected`,
+  `actual`, `reason`; `field` is null when the row is gone, or back), so the screen and an agent
+  can show them and offer `force`. Below the admin, an undo is only of the caller's own
+  changesets, and `force` is refused.
+- Order: rows put back first (parents first by foreign-key depth), then updates, then rows
+  removed (children first); within each, the latest entry first. A self-reference or a cycle
+  counts as no reference.
+- `force` overwrites changed fields and a row that has come back; a row that has been deleted
+  since cannot be updated or deleted, and is passed over.
+- Every written row's key fields are checked first, inside the transaction (so a parent put
+  back earlier in the same undo counts). A dangling one refuses the whole write with
+  "`tasks.project` refers to row 7 of `projects`, which no longer exists; restore that row
+  first".
+- Calculated and document columns are not written back; dropped columns are left out and
+  reported as `dropped`.
+
+#### The Undo action
+
+`undo` is a core action (`sc-core-actions`), so an application's button, a view's action or a
+trigger can call it. It steps back through **the caller's own session**:
+
+- **No `table` configured**: undo the most recent changeset of this session that still has
+  entries not undone, and is neither an undo nor the changeset of the request running the
+  action. Running it again steps back one action further, like an editor's undo stack.
+- **`table` configured** (it must have history on, checked when the trigger is saved): undo
+  only that table's entries, from the most recent changeset of this session that has entries in
+  that table not yet undone. The undo changeset records `undo_table`. A later unconfigured undo
+  of the same changeset reverses only its remaining entries.
+
+The undo is refused with a sentence when there is nothing to undo, when the caller has no
+session (anonymous callers have none), or when the conflict check fails. It does not use
+`force`. Changesets from other sessions, including the same user's other devices, are never
+picked. Redo is not a separate mechanism: it would be an undo of the session's last undo, and
+is left for later.
+
+**As built (H4).** `sc_core_actions::Undo` finds its changeset with
+`sc_catalog::history::session_undo_target` (the event's changeset gives the session and the id
+of the running request, which is skipped), then calls H3's `Reverser::undo_changeset` as the
+event's caller, without `force`. The undo changeset inherits the session from the ambient
+(request) changeset, so the next press skips it as an undo. "Most recent" is by the
+changeset's `at`, then `txid`; `_fd_changesets (session, at)` is indexed for it. A refusal is an
+`invalid` error carrying the sentence (an exposed trigger answers it as the request's error).
+On success the result is `{ undid, changeset, entries }`. The action has no required setting,
+the one built-in without one. It reaches applications as any action does: a trigger with it,
+exposed by the application, is an API endpoint and a Saltcorn UI button.
+
+#### Files
+
+A `File` field whose file is removed with its row (`files_removed_on_delete`) keeps the file
+while history may still restore it. On a table with history on, a delete **does not remove the
+file**. The cleanup job removes it once the delete entry has expired, unless some row or a
+remaining entry still references the path. This is the same check as `still_referenced`, plus
+the log.
+
+#### Schema edits and retention
+
+- **Add a column**: nothing to do.
+- **Drop a column**: old entries keep the key. Readers show it as a removed field, and a
+  restore skips it.
+- **Rename a column**: the same schema batch rewrites the JSON keys of that table's entries,
+  in the `schema_edit.rs` hook that sync's S2.8 also needs.
+- **Change a type**: values are kept as they were. A restore casts, and a value that will not
+  cast is reported.
+- **Drop a table**: its entries are deleted, and the drop dialog says so. A later table with the
+  same name must not inherit them.
+
+**One cleanup job** on the periodic scheduler (§10.2) serves both features. An entry is
+removed once **both** are done with it:
+
+- *Sync* is done with it when the table is not synced, or when the entry is superseded and
+  past sync's retention.
+- *History* is done with it when the table has no history, or when the entry is older than
+  `keep_days`.
+
+After that, the job removes the files whose delete entries expired, and then changesets with
+no entries left.
+
+**As built (H5).** History's `keep_days` is a table setting (`history_keep_days` in `PATCH`
+table settings, the admin table screen and MCP `alter_table`; 0 or absent keeps forever).
+`rows.rs` keeps every `remove_file` file while the table has history on. The job is
+`sc_catalog::retention::clean_change_log(catalog, now)`, run hourly by the server
+(`change_log_cleanup.rs`), and answers what it removed. Sync's retention is
+`SYNC_KEEP_DAYS` (30). Entries of tables that are no longer in the catalog go whatever their
+age. A file is removed only when no row of the table (read as the admin, so row-level security
+hides none) and no remaining entry of the table names its path. An empty changeset goes a day
+after its `at`, so a write joining it is not raced. `_fd_sync_keys` gained `at`, and pairs older
+than sync's retention go too. A device whose last pull is older than sync's retention gets
+whole tables (`reset`) on its next pull.
+
+A rename is the `name` setting of `alter_field` (MCP `rename_to`, `name` on the admin API's
+`updateField`): `RENAME COLUMN` on both backends, the overlay row follows, and the batch's
+`change_log_edits` (the hook sync's S2.8 shares) rewrite the key in the table's `old_values` and
+`new_values`. It is refused while a calculated field, a constraint, the ownership formula,
+another table's key or a module's declaration names the field. Renaming the key column re-creates
+the trigger. A dropped table's entries and sync key pairs are deleted in the drop's batch, and
+the drop confirmation says the row history goes too. Known gap: a row inserted and deleted in
+one transaction of a history table leaves no delete entry, so its file is never removed.
+
+**As built (H6).** *Code bodies.* `db`'s host takes `op: "history"` requests
+(`sc_api::code_host::history`) beside `models`, at the plan's authority: the admin's by default,
+the caller's or a named user's when the body says so, through H2's `HistoryReader` and H3's
+`Reverser`, so the role from `history.min_role`, the row's read rule and the write rules are the
+admin API's. `what` is `history`, `deleted`, `as_of`, `restore` or `revert`, which are
+`db.<table>.history(key)`, `.deleted()` (paged by `.limit()`/`.offset()`), `.asOf(key, when)`
+(`as_of` in Python), `.restore(key)` and `.revert(key, version)` in both languages; and
+`versions`, `restore_version`, `undo_row` and `redo_row`, which are v1's `table.get_history(id)`,
+`restore_row_version`, `undo_row_changes` and `redo_row_changes`. `get_history` rebuilds each
+version from the row now and the log (oldest first, the whole row after each version, with v1's
+`_version`, `_time` and `_userid` and also `_deleted`, `_op`, `_changeset` and `_source`), and
+requires the id, because v1's every-row answer has no cheap counterpart. v1's
+`_restore_of_version` is inferred: the version a restore went back to is the latest earlier
+version, not itself a restore, whose row it equals; undo goes to the version before it, redo to
+the next one that is not a restore, and nothing to step to does nothing, as in v1. A restore to
+the version the row is already at writes nothing (`Reverser::revert_row_if_changed`).
+`insert_history_row` and `compress_history` stay refused. A restore is refused inside a workflow
+step's transaction, which it would wait on. `write_as`'s write floor is now met by the role of the
+context the write runs under as well as the user's, which is what lets a code body restore with
+the admin's authority on behalf of a lower or absent caller.
+
+*SQLite* (`sc_catalog::change_log_sqlite`). The design's "connection-local temp table" cannot
+work: a trigger in the main schema cannot read the `temp` schema. Transaction-local settings are
+rows of a main-schema table, `_fd_tx_settings` (`sc_db::TX_SETTINGS_TABLE`), written by
+`SqliteTransaction::set_local` and deleted before the transaction commits. SQLite allows one
+writer at a time, so nobody else ever sees them, and a rollback takes them with it. A read-only
+transaction, or a database without the table, keeps none. Each recorded table has three triggers,
+`_fd_changes_{table}_ins`, `_upd` and `_del`, generated from its columns, that turn the row into
+JSON (booleans as JSON booleans, valid JSON in a JSON column as JSON, a blob as `\x` and its hex,
+everything else as stored) and insert it into the view `_fd_record_change`. That view's
+`INSTEAD OF INSERT` trigger is the merge, written once and recreated at every boot: it mints a
+`sql` changeset when none is set, writes the changeset's row once with a `:new`/`:old` marker,
+upserts the entry with Postgres's merge rules, drops unchanged columns, removes an emptied entry
+only when its changeset began in this transaction, and moves the entry's `seq` past every number
+given out. `_fd_changes.seq` is `AUTOINCREMENT` there, so a removed entry's number is never
+reused, and `txid` holds the `seq` the write was given. A write from another program has no
+settings and gets a changeset **per row**, removed from the settings at once, because nothing
+tells a trigger where another program's transaction ends. Schema changes keep the triggers in
+`Catalog::apply_schema_batch_in` (and `create_field`/`drop_field`): before a change to a table
+that has them they are dropped (SQLite refuses to drop a column a trigger names, and a rebuild
+would recreate them from their old text), and after it they are generated again from
+`pragma_table_info`. `schema_edit`'s switch generates them from the projected table. The readers,
+the cleanup job and the rename rewrite have SQLite spellings (`json_each`, `json_group_array`,
+`json_set`/`json_remove`, `CAST(… AS TEXT)`, `DELETE … RETURNING` instead of a data-modifying
+CTE, numbered placeholders), and sync's watermark on SQLite is the last `seq` (`n:n:`), with the
+changed keys those of entries after it. `SqliteTransaction` now also turns `query_only` off when a
+read-only transaction commits, which it had left on the pooled connection.
 
 ## 15. Code adapters and polyglot plugins (`sc-module`, `sc-python`)
 
@@ -11325,7 +12207,9 @@ has a sandbox:
   argument, so a module's worker is given exactly what an admin granted it and nothing else:
   four allow-lists on `_fd_modules.permissions` — `net`, `read`, `write`, `env` — where **every
   empty list means nothing, never everything**, and a module installed with nothing declared
-  gets the closed set. A container belongs to an isolate and there is no fence inside one, so
+  gets the closed set. A fifth entry, `roles`, is not the worker's at all: the most privileged
+  role the module may grant users (§15.1e), checked by the server when the module asks, and
+  left out of the set the pool pins by (`ModulePermissions::sandbox`). A container belongs to an isolate and there is no fence inside one, so
   the pool pins **by permission set**: two modules share a worker only when they may reach the
   same things, and editing a module's permissions moves it to a worker that grants what it now
   has, losing its sockets as a restart would. A denial is rewritten into the module's name, what
@@ -11607,6 +12491,23 @@ for the caller's own download, and a refusal is the same refusal. It is read-onl
 writes nowhere but its own areas. The mail module's `mail_send` attaches an application file this
 way, so a user cannot mail themselves a file they could not have downloaded.
 
+**A consent flow (TODO-imap M10.3).** An action also gets **`oauth.begin(request)`**, a seventh
+ask surface, `oauth` (`CallHosts::oauth`, `sc_module::consent`), which only an action carries: it
+asks for the **caller's** consent at an OAuth 2.0 provider, for tokens the module keeps in its own
+row. The request names the provider's addresses, client, scopes and extra parameters, a
+`return_to` path, and `store: { table, id, fields: { access_token, refresh_token, expires_at },
+set }`. It is checked before anything is kept: the caller is a signed-in user, the addresses are
+`https` (or loopback), `params` does not set the request's own parameters, and the table is one
+the module declared, the token fields its declared **Secret** fields and `set` its declared fields.
+The answer is `{ url: "/_feldspar/oauth/consent/<id>" }`, which the application sends the browser
+to. The server then runs the browser's half on `sc_server::oauth`'s routes: the consent route
+refuses any session but the caller's, sets the binding cookie and redirects with PKCE; the
+shared callback (on the admin UI's host) exchanges the code; the completion, in the browser that
+started, writes the tokens through the row layer (sealed, and heard by the module's service as a
+change that is not its own) and leaves for `return_to`, with `oauth_error=…` on a failure. The
+module never sees the code, and the application never sees a token. Renewing a token is the
+module's own business, with its own `fetch`.
+
 **The vocabulary** is four functions, store-relative paths throughout:
 `write(store, path, data, { contentType, filename }) → path`, `read(store, path, { encoding }) →
 Buffer | string`, `remove(store, path) → bool`, `stat(store, path) → {size, …} | null`. The
@@ -11629,6 +12530,225 @@ reads one back inside the worker's 256 MB heap. `read` reads in 4 MB pieces by `
 guessing from the path (a descriptor's own type still wins). `filename` is the existing
 `FILENAME_ATTRIBUTE`. Both are set by `ModuleFiles` after the `write` or the final `rename`.
 
+### 15.1e Module webhooks and content-security suggestions (TODO-payments P1.1, P1.2, P1.4)
+
+**Webhooks** (design C1). A module exports `webhooks: { name: { description, handle } }` (or a
+bare function, or a function of its configuration). The server serves each at `POST
+/_feldspar/hooks/<module>/<name>[/<rest>]` — and `GET` too where the webhook declares `methods:
+["GET", "POST"]` (anything else is a 405) — where `<module>` is the package name without its npm
+scope (`sc_module::hook_segment`); two modules that would share a segment are an error naming
+both. The URL to register is the admin host's, which the card shows — one stable URL, as the
+OAuth callback is — but the route answers on **every** host, as the OAuth routes do: a test
+provider's checkout page (TODO-payments P2.2) is a webhook a buyer opens on the shop's own host.
+The request reaches the module as one `webhook_call` on its worker: `req.rawBody` is a `Buffer` of
+the bytes as sent (base64 across the seam), `req.headers` are lower-cased with cookies and
+credentials withheld, `req.rest` is the path after the name. `ctx` is a service's for one call —
+`db` through the same `ScopedTables` (the module's declared tables only, no SQL, no `asUser`),
+`files`, `runTrigger`, `log`, `configuration` — at the admin role with `{ module, webhook }` as the
+writes' user, bounded like an action (wall clock and ask budget). The answer `{ status, body,
+headers }` is sent as it is; a throw is a 500 (so the provider retries), logged and raised as the
+`error` event. No session, no CSRF (the CSRF middleware treats the prefix as open to the public:
+the route reads no cookie), a 1 MiB body cap on the route, and a per-IP rate limit (600/min). The
+installed card lists each webhook's path, the admin UI prefixes its own origin and offers a copy
+button; a bundled manifest's `webhooks: [names]` puts them on the catalog card before the install.
+
+**Content-security suggestions** (design C6). A module exports `csp: { name: { description,
+sources: { directive: [hosts] } } }`. `sc_module::csp` accepts only `https://`/`wss://` host
+sources in the directives that load or reach something (`script-src`, `frame-src`,
+`connect-src`, …) — no keyword, no bare scheme, no `*`, no `default-src` or `frame-ancestors` —
+and reports anything else as an issue on the card. Nothing is allowed by installing: an
+application lists the suggestions it allows by key (`<module>:<name>`) in its `csp_sources`
+attribute, switched on from its settings page, and `AppMounts::app_csp` merges each enabled one
+when the policy is served (`CspPolicy::with_sources`: added to what the directive allows now, or
+to `default-src`'s list when the policy does not state the directive, so the application's own
+`'self'` is kept). A key whose module has been uninstalled adds nothing.
+
+**Role grants** (TODO-payments P3.3, design C4). `ctx.roles` in a service and a webhook, and
+`roles` on an action's argument, speak the `roles` ask surface (`sc_module::roles::ModuleRoles`):
+`grant({ user, role, ref, expires_at, starts_at, note })` upserts the module's grant `ref` (its
+own name for the thing that grants, a subscription), `revoke(ref)` and `get(ref)`. The grant's
+`source` is the module's package name, so a module reaches only its own. Granting is a
+permission an admin gives, like a host: the `roles` entry of the module's permissions is the
+most privileged role it may grant (`70` allows 70 to 99), set on the Modules tab ("Roles it may
+grant") or requested by a bundled manifest and granted by the install. A role above it, any role
+when there is none, and the admin role always are refused by name.
+
+**LLM credits** (TODO-payments P6.4, design C4). `ctx.credits` in a service and a webhook, and
+`credits` on an action's argument, speak the `credits` ask surface
+(`sc_module::credits::ModuleCredits`): `grant({ user, amount, key, expires_at, kind, note,
+rollover })` grants a bucket under the module's package name, once per `key`, `rollover: { from,
+cap }` carrying over what is left of the module's earlier grant `from` (P7.1); `balance(user)`; and
+`setThreshold(user, amount | null)`. There is **no debit** (§7.4b). Unlike roles, granting
+credits needs no permission: a role is a privilege, while credits only pay for model calls
+through agents the admin configured.
+
+**Tables a module reads because its settings name them** (TODO-payments P4.1). A service's and
+a webhook's `ctx.db` reach only the module's declared tables (`ScopedTables`). A module whose
+webhook must read one of the application's tables — the payments module's plan binding names a
+`plans` table, and the webhook looks up which plan a subscription's price is — exports `reads`, a
+list of table names or a function of its configuration. The worker reports it in the manifest;
+`sc_module::reads::admitted` keeps only the names that are **values in the module's stored
+configuration** (anything else is an issue on the card), so module code cannot widen its own
+reach and the admin who typed the name into the settings form is the one who granted it. The
+admitted names join `ScopedTables` as `TableScope::reads`: a `select` or `aggregate` on one (and a
+Ⱶ-path through one, on a read) is admitted; a write is refused by name. The card lists them as
+`reads`. An action needs none of this: it already runs at its trigger's authority.
+
+**A module action's argument** (TODO-payments P2.1) carries, beside v1's object, what a code body
+has of its event: `app` (`{ id, url, scheme }` of the application whose request ran it, or null),
+`session` (`{ id }` of the caller's guest session, or null), and `db` — the same fluent chain a
+service's and a webhook's `ctx.db` are, over the action's own surfaces, so at the trigger's
+authority unless a chain says `asUser()`. A module's code then reads its own tables one way from
+an action, a service and a webhook.
+
+### 15.1f The payments module (`plugins/payments`, TODO-payments P2)
+
+The design is TODO-payments.md's Part I; what follows is how P2 built it, and where it differs.
+
+**Processing is shared, and idempotent rather than transactional.** A verified delivery
+(`adapter.verifyWebhook` → `[{ id, type, ref, raw }]`) and a sweep (`adapter.listEvents`, the
+same shape) go through one function, `processing.js`'s `processEvents`: the adapter maps the
+provider's type to the module's kinds (`kinds(event)`; none is `other`), the object the event is
+about is **fetched** from the provider (§3.6 — the event says what changed, never what things
+are), the mirror row is upserted by `(account, provider_ref)`, and one `pay_events` row is
+inserted per kind unless `(account, event_id, kind)` is there. The module's `db` has no
+transaction, so nothing spans the steps; each is an upsert or an insert-if-absent, a unique
+violation from a concurrent delivery is read back as "already done", and a failure throws — the
+webhook's 500, which the provider retries and the retry finishes. An application trigger
+therefore fires once per event row, however the deliveries arrive. Events the adapter does not
+map are logged as `other` with the raw event, their object mirrored when it can be fetched.
+
+**Which application row a provider object was for** comes from, in order: its own mirror row as
+`pay_checkout` wrote it; the checkout it belongs to (a payment inherits its checkout's
+`ref_table`, `ref_key`, `user_id`, `email` and `effects`); and the provider's metadata, which the
+module sets on the checkout and its payment (`sc_ref_table`, `sc_ref_key`, `sc_user_id`) for a
+provider such as Stripe that does not link the two. `ref_key` is a **JSON** field holding the key
+as the row has it — a number for an integer key, a string for text or a UUID — and metadata keeps
+it JSON-encoded, because metadata is text. A row action's event bindings read a JSON column's
+scalar as that scalar (`rows_scope::typed_value`), so `id === row.ref_key` translates to a
+comparison with an integer, or with text the driver reads as a UUID — the same answer the
+reified evaluator gives.
+
+**The checkout's amounts are the `db` chain's formula projections.** `pay_checkout` reads the
+source row as the caller (`db.asUser()[table].get(key)`, which carries a guest's session) and
+then evaluates its configured formulas server-side with `select({ alias: formula })` at the
+trigger's authority — on the row for one line, on the child rows for many — so `productⱵprice` is
+a translated correlated subselect and the module has no formula engine of its own. The checkout
+configuration is v1 `configFields`, which the trigger form renders.
+
+**Stripe over `fetch`, not the `stripe` package** (a deviation from §3.5, which put the SDK in
+`pay_provider_code`'s scope). The REST API is form-encoded requests to one host, the package would
+be downloaded by every installation, and an adapter whose transport is one function is tested
+against recorded responses by replacing it. `client(account)` is an authenticated
+`get/post/del/request` over any endpoint, which is what `pay_provider_code` gets as `stripe` and
+what `pay_api` calls.
+
+**`pay_api` reads accounts the service keeps.** A module function is called with nobody's
+authority and no `db` (§15.1), so it cannot read `pay_accounts`. The `reconcile` service — which
+the module needs anyway — loads the accounts at start and again on every change to the table
+(`ctx.onTableChange`), into module memory on the module's worker, where its functions run. The
+sweep itself lists the provider's **events** since the last sweep (`synced_at`, less an hour's
+overlap; the first reaches back 30 days, Stripe's retention) and processes them as deliveries, so
+one already delivered is a duplicate and does nothing.
+
+**The test provider** is an adapter like the others, with its state in the worker's memory. Its
+checkout page is the module's `fake` webhook (GET and POST, served on the application's host,
+its own CSP with no script); paying delivers signed events in-process into the same `events`
+handler a provider's request reaches; an account with `settings.webhooks: "hold"` records them
+undelivered, for a test (or an admin) to `resend` in any order, as often as it likes.
+
+
+**Subscriptions (P4).** The plan binding is the module's own settings (`configuration_workflow`:
+plans table, price field — one for every account, or `account=field` pairs — role field, grace
+days), read by `plans.js`. The module's actions are a function of those settings (v1's
+`withCfg`), and the webhook and the service have them as `ctx.configuration`; the plans table is
+read through `reads` (above). Processing applies the grant after the mirror is upserted, from the
+subscription's **fetched** state: `trialing`/`active` grant the plan's role to the trial's or
+period's end plus grace (exactly to that end when it is canceled at the period's end),
+`past_due` leaves the grant alone, anything else revokes it — one grant per subscription,
+`ctx.roles.grant` upserted under `<account>:<subscription id>`. A price that is no plan's, a role
+above the module's ceiling (the manifest asks for 50; the install grants it) or a subscription
+with no user writes the reason on the mirror row's `issue` and logs it rather than failing the
+delivery, which a retry could not fix. The sweep, after the provider's event log, reads every
+live subscription in the mirror again and applies its grant, so a fixed binding or ceiling takes
+effect at the next sweep or `pay_sync`. A `pay_checkout` *grant a role* effect is applied the same
+way, per payment, from the payment's own time, and revoked when the payment is fully refunded.
+The mirror also gains a `customer` row per provider customer with its user, which is how
+`pay_portal` finds the caller's account and a second checkout reuses the same customer.
+
+An adapter's `kinds(event)` may answer `null`: an event the module understands that says nothing
+an application reacts to (Stripe's invoice for a subscription's first period), whose object is
+synced and nothing logged. Stripe maps `customer.subscription.updated` by its
+`previous_attributes` (past due, set to cancel, or changed) and a renewal is `invoice.paid` with
+`billing_reason: subscription_cycle`; `current_period_end` is read from the subscription or, since
+API version 2025-03-31, from its item. The fake provider grew customers, subscriptions, a portal
+page (plan change, cancel) and a **test clock** on it (renew, renew with a declined card, retry),
+so trials, renewals and failed renewals run in a test in milliseconds; Stripe's own test clocks
+drive the live test.
+
+Sign-up does not insert a `users` row through the row layer, so no table trigger sees it; a
+card-less trial is a `grant_role` trigger on the `login` event (sign-up signs the account in)
+with `once`.
+
+**The second adapter: Polar (P5).** `adapters/polar.js` speaks Polar's JSON API over `fetch` to
+`api.polar.sh`, or `sandbox-api.polar.sh` in test mode, pinned with `Polar-Version` (2026-10 unless
+the account says otherwise). Polar is a merchant of record, `merchant_of_record: "always"` and no
+`physical_goods`; `prepareCheckout` treats any tax setting on such an account as
+`merchant_of_record`. Fitting it showed what was Stripe's shape rather than the module's, and each
+was changed here rather than worked around:
+
+- *A checkout has lines.* A Polar checkout sells one product. A one-off checkout charges the
+  account's **one-off product** (a setting) at an ad-hoc price, the lines' total; the lines stay
+  on the mirror row as charged.
+- *A plan is a price.* On Polar it is a product: `price_ref` is "the provider's price or product",
+  and the binding's per-account field (`polar=polar_product`) says which.
+- *Proration in Stripe's words.* `pay_change_subscription` takes the module's own `prorate`,
+  `invoice` and `none`; each adapter translates, and Polar refuses `none` by name.
+- *An event says what changed.* Polar's events carry the object, never `previous_attributes`.
+  `adapter.kinds(event, { previous })` now gets the event's object's mirror row as it was before
+  the event (processing reads it first), and Polar tells a plan change on its catch-all
+  `subscription.updated` by comparing products, ignoring an event older than the mirror. A retry
+  of a delivery that failed after its mirror was written no longer sees the change, so it logs no
+  `subscription.changed`; the grant moves all the same.
+- *One delivery, one object.* A paid renewal is an **order** (`billing_reason:
+  subscription_cycle`). `verifyWebhook` answers two events under the delivery's one id, the
+  payment and the subscription's renewal, each with its own object and kinds; the dedupe key
+  `(account, event_id, kind)` already kept them apart.
+- *One delivery per happening.* Polar may say a checkout succeeded in more than one
+  `checkout.updated`; that event is given the id `<checkout>:succeeded`, so it is logged once.
+- *Idempotency keys.* Polar has none. A refund and a saved-card charge carry the module's key in
+  their metadata, and the adapter looks for one made with it before making another.
+- *Amounts.* `amount` is what the buyer paid (`total_amount`, tax included), as on Stripe. Polar
+  refunds a pre-tax amount, so a refund of an amount is converted in proportion (exactly when
+  there was no tax).
+- *An event log.* Polar's sweep reads the webhook endpoint's deliveries (its id is an account
+  setting) and processes the events never delivered.
+
+Webhooks are Standard Webhooks (`webhook-id`, `-timestamp`, `-signature`). Secrets made before 8
+September 2026 are used as their UTF-8 bytes, later ones as the standard's base64 key after
+`whsec_`; both are tried. **Saved cards (P5.3):** Polar's off-session charges (in preview, for
+organisations on a paid plan) are a draft order for the customer, finalized against their default
+payment method. `chargeSavedMethod` answers `{ status: "paid" }`, or `{ status:
+"requires_checkout", reason }` on Polar's 402 (declined, no card, authentication needed), and
+refuses by name when the organisation cannot charge off-session.
+
+Two Stripe bugs came out of running the same scenarios on it. A PaymentIntent does not name its
+Checkout Session, so a one-off payment never inherited the session's effects: processing now
+passes a checkout's row, user and effects to the payment it names, when that payment does not name
+its checkout, whichever event arrives first. And since the period moved onto the subscription
+item, a renewal's `customer.subscription.updated` has `items` in its `previous_attributes`, so it
+was logged as `subscription.changed`. Now an update is a change only when the item's price or
+quantity differs, or a cancellation is undone; other updates are `null`.
+
+**One suite, every provider (P5.2).** `test/shared.test.mjs` holds the shop's and the
+subscriptions' scenarios once and runs them against each provider through a **driver**
+(`test/providers/`). The fake is driven through its own hooks. Stripe and Polar are **simulations
+of their APIs**, in their documented shapes, put in the adapter's `transport`: they play the buyer,
+the test clock and the portal, and send their own signed events after the request that caused them
+has been answered. Where a provider differs in a way the module shows, the driver says so by a flag
+(`renewalPaymentsKnowTheirRow`: a Stripe renewal's PaymentIntent names no subscription). The fake-only copies of
+those scenarios were removed. An adapter added later is a driver and a simulation, run through the
+same suite.
 ### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
 
 The second adapter. It is small for a reason that is structural rather than lucky: the JavaScript

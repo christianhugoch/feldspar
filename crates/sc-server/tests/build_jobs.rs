@@ -67,6 +67,7 @@ fn remote_framework() -> FrameworkDecl {
             install: None,
             runtime: Some(template("{{ project }}/src/feldspar")),
             client_file: "client.ts".to_owned(),
+            server: None,
         },
         csp: None,
         builder_prompt: None,

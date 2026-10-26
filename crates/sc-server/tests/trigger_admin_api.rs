@@ -809,12 +809,15 @@ async fn the_actions_describe_their_own_settings() -> sc_error::Result<()> {
             // registry and the fits assembled first. There is no
             // `predict_row` and no `write_posterior` (milestone 31 §1).
             "fit_model",
+            // A role for a while (TODO-payments P3.4): trials, comps.
+            "grant_role",
             "insert_row",
             "publish",
             "run_agent",
             "run_js_code",
             "run_python_code",
             "send_email",
+            "undo",
             "update_rows"
         ]
     );

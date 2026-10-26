@@ -32,13 +32,13 @@ use sc_query::{
 };
 use uuid::Uuid;
 
-use crate::lookup::load_user;
+use crate::lookup::load_base_user;
 use crate::password::hash_password;
 use crate::roles::load_role;
 use crate::user::User;
 use crate::users::{
-    COL_DISABLED, COL_EMAIL, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE, ROLE_ADMIN,
-    USERS_TABLE, is_system_user_column, role_in_range,
+    COL_DISABLED, COL_EMAIL, COL_EMAIL_VERIFIED, COL_ID, COL_LANGUAGE, COL_PASSWORD_HASH, COL_ROLE,
+    ROLE_ADMIN, USERS_TABLE, is_system_user_column, role_in_range,
 };
 
 /// The changes an admin is making to a user. Every field is optional: what is
@@ -113,7 +113,7 @@ pub async fn update_user(catalog: &Catalog, id: Uuid, update: UserUpdate) -> Res
     }
 
     if assignments.is_empty() {
-        return load_user(catalog, id)
+        return load_base_user(catalog, id)
             .await?
             .ok_or_else(|| no_such_user(id));
     }
@@ -163,6 +163,44 @@ pub async fn set_user_password(catalog: &Catalog, id: Uuid, password: &str) -> R
     .await
 }
 
+/// Record that the holder of `id`'s address has proven it — by redeeming a
+/// link sent there, or by an identity provider vouching for it.
+pub(crate) async fn mark_email_proven(catalog: &Catalog, id: Uuid) -> Result<User> {
+    write(
+        catalog,
+        id,
+        vec![Assignment::new(COL_EMAIL_VERIFIED, Expr::lit(true))],
+    )
+    .await
+}
+
+/// Hand an account whose address was never proven
+/// ([`User::email_unproven`]) to somebody who has just proven it — an
+/// identity provider's sign-in for that address (security review #41).
+///
+/// Whoever signed up for the address may not hold it, so what they could use
+/// to come back goes first: the password they chose, any reset link, and every
+/// session. The address is then proven. An account whose address is not
+/// unproven is returned as it is.
+pub async fn claim_unproven_account(catalog: &Catalog, user: User) -> Result<User> {
+    if !user.email_unproven() {
+        return Ok(user);
+    }
+    let id = user.id;
+    let claimed = write(
+        catalog,
+        id,
+        vec![
+            Assignment::new(COL_PASSWORD_HASH, Expr::Lit(Value::Null)),
+            Assignment::new(COL_EMAIL_VERIFIED, Expr::lit(true)),
+        ],
+    )
+    .await?;
+    crate::password_tokens::delete_password_tokens_for_user(catalog, id).await?;
+    crate::session::delete_sessions_for_user(catalog, id).await?;
+    Ok(claimed)
+}
+
 /// Delete a user, reporting whether there was one to delete.
 ///
 /// The sessions it holds are **not** dropped here (see the module docs); a caller
@@ -172,6 +210,9 @@ pub async fn set_user_password(catalog: &Catalog, id: Uuid, password: &str) -> R
 /// Deleting the **last enabled admin** is refused, as disabling it is.
 pub async fn delete_user(catalog: &Catalog, id: Uuid) -> Result<bool> {
     refuse_last_admin(catalog, id, "delete").await?;
+    // The grants reference the user; they are the user's and go with them.
+    crate::grants::delete_grants_for_user(catalog, id).await?;
+    crate::credits::delete_credits_for_user(catalog, id).await?;
     let delete = Delete {
         returning: vec![Projection::expr(Expr::col(COL_ID))],
         ..Delete::from(USERS_TABLE).filter(Expr::col(COL_ID).eq(Expr::lit(id)))
@@ -187,7 +228,7 @@ pub async fn delete_user(catalog: &Catalog, id: Uuid) -> Result<bool> {
 /// recovered from a terminal (`feldspar modify-user … --enabled`), and that is
 /// not a state any of those callers means to produce.
 pub async fn refuse_last_admin(catalog: &Catalog, id: Uuid, verb: &str) -> Result<()> {
-    let Some(user) = load_user(catalog, id).await? else {
+    let Some(user) = load_base_user(catalog, id).await? else {
         return Ok(());
     };
     if user.role != ROLE_ADMIN || user.is_disabled() {

@@ -24,6 +24,15 @@
 //!    Authentication's shared cookie and session lifetime apply exactly as they
 //!    do to a password.
 //!
+//! The same callback and completion serve a module's **consent flow**
+//! (TODO-imap M10.3, `sc_module::consent`): an action's `oauth.begin(…)` keeps
+//! a flow and answers **`GET /_feldspar/oauth/consent/{id}`**, where the
+//! application sends the browser. That route checks the session is the user
+//! whose call began it, sets the binding cookie and goes to the provider; the
+//! callback exchanges the code for the module's tokens; and the completion, in
+//! the browser that started, writes them into the row the module named, then
+//! sends the browser back to the application. Nobody is signed in by it.
+//!
 //! Flows and tokens live in this process's memory, as the admin move's handoff
 //! does: a callback must reach the node that started its flow, and a restart in
 //! between costs the person one more click.
@@ -42,12 +51,13 @@ use base64::Engine;
 use sc_api::SessionAction;
 use sc_auth::User;
 use sc_config::OAuthProvider;
+use sc_module::consent::ConsentFlow;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::router::{
-    AppState, Resolved, SessionClient, apply_session, log_failure, parse_query, refuse_sign_in,
-    resolve_app,
+    AppState, Resolved, SessionClient, apply_session, is_served_host, log_failure, parse_query,
+    refuse_sign_in, resolve_app, session_user,
 };
 
 /// Where every route of the flow lives.
@@ -60,6 +70,9 @@ pub const START_ROUTE: &str = "/_feldspar/oauth/{provider}/start";
 pub const CALLBACK_ROUTE: &str = "/_feldspar/oauth/callback";
 /// Where the browser finishes, on the host it started on.
 pub const COMPLETE_ROUTE: &str = "/_feldspar/oauth/complete";
+/// Where a module's consent flow starts in the browser
+/// ([`sc_module::consent::CONSENT_PREFIX`]`/{id}`).
+pub const CONSENT_ROUTE: &str = "/_feldspar/oauth/consent/{id}";
 
 /// The cookie binding a flow to the browser that started it.
 pub const BINDING_COOKIE: &str = "sc_oauth";
@@ -85,23 +98,41 @@ pub struct OAuthFlows {
     completions: Mutex<HashMap<String, Completion>>,
 }
 
+/// What a flow is for.
+enum Purpose {
+    /// Signing in with the provider of this name; `admin` when the flow
+    /// started on the admin UI's host, where only administrators finish.
+    SignIn { provider: String, admin: bool },
+    /// A module's tokens, for the row its flow names.
+    Consent(Box<ConsentFlow>),
+}
+
 /// A flow waiting for the provider to send the browser back.
 struct Pending {
-    provider: String,
+    purpose: Purpose,
     verifier: String,
     /// The host it started on (with its port), which it finishes on.
     host: String,
-    /// Whether that host is the admin UI's: only administrators finish there.
-    admin: bool,
     return_to: String,
     binding: String,
     redirect_uri: String,
     expires: Instant,
 }
 
-/// A sign-in the provider vouched for, waiting for its host.
+/// What the provider granted.
+enum Outcome {
+    /// The account it vouched for.
+    SignIn(User),
+    /// The token response, for the module's row.
+    Consent {
+        flow: Box<ConsentFlow>,
+        tokens: Value,
+    },
+}
+
+/// A flow the provider answered, waiting for its host.
 struct Completion {
-    user: User,
+    outcome: Outcome,
     host: String,
     return_to: String,
     binding: String,
@@ -205,31 +236,34 @@ pub fn pkce_challenge(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
+/// What the authorization request names: where, which client, which scopes,
+/// and anything else the provider is to be told (`login_hint`, `prompt`).
+struct Authorization<'a> {
+    url: &'a str,
+    client_id: &'a str,
+    scope: &'a str,
+    extra: &'a [(String, String)],
+}
+
 /// The address a provider sends the browser to sign in at.
 fn authorization_address(
-    provider: &OAuthProvider,
+    request: &Authorization<'_>,
     redirect_uri: &str,
     state: &str,
     challenge: &str,
 ) -> String {
-    let sep = if provider.authorization_url.contains('?') {
-        '&'
-    } else {
-        '?'
-    };
-    format!(
-        "{}{sep}{}",
-        provider.authorization_url,
-        form(&[
-            ("response_type", "code"),
-            ("client_id", &provider.client_id),
-            ("redirect_uri", redirect_uri),
-            ("scope", &provider.scopes),
-            ("state", state),
-            ("code_challenge", challenge),
-            ("code_challenge_method", "S256"),
-        ])
-    )
+    let sep = if request.url.contains('?') { '&' } else { '?' };
+    let mut pairs = vec![
+        ("response_type", "code"),
+        ("client_id", request.client_id),
+        ("redirect_uri", redirect_uri),
+        ("scope", request.scope),
+        ("state", state),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+    ];
+    pairs.extend(request.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    format!("{}{sep}{}", request.url, form(&pairs))
 }
 
 /// The request's `Host`, as sent (with its port).
@@ -336,6 +370,11 @@ pub(crate) async fn start(
     let Some(provider) = provider.filter(|p| offered(p, admin)) else {
         return Redirect::to(&with_error(&return_to, "unknown identity provider")).into_response();
     };
+    // The flow ends by sending the browser, with a token worth a session, back
+    // to the host it started on: that must be a host this server serves.
+    if !is_served_host(&state, &headers, &jar) {
+        return unserved_host();
+    }
     let host = request_host(&headers);
     let redirect_uri = format!(
         "{}://{}{CALLBACK_ROUTE}",
@@ -346,7 +385,12 @@ pub(crate) async fn start(
     let verifier = crate::security::new_csrf_token();
     let binding = crate::security::new_csrf_token();
     let address = authorization_address(
-        &provider,
+        &Authorization {
+            url: &provider.authorization_url,
+            client_id: &provider.client_id,
+            scope: &provider.scopes,
+            extra: &[],
+        },
         &redirect_uri,
         &flow_state,
         &pkce_challenge(&verifier),
@@ -354,10 +398,12 @@ pub(crate) async fn start(
     state.apps.oauth().start(
         flow_state,
         Pending {
-            provider: provider.name.clone(),
+            purpose: Purpose::SignIn {
+                provider: provider.name.clone(),
+                admin,
+            },
             verifier,
             host,
-            admin,
             return_to,
             binding: binding.clone(),
             redirect_uri,
@@ -367,6 +413,88 @@ pub(crate) async fn start(
     (
         jar.add(binding_cookie(&state, binding)),
         Redirect::to(&address),
+    )
+        .into_response()
+}
+
+/// `GET /_feldspar/oauth/consent/{id}`: a module's consent flow, taken up by
+/// the browser of the user whose call began it, and off to the provider.
+pub(crate) async fn consent(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: axum::http::HeaderMap,
+    jar: CookieJar,
+) -> Response {
+    let Some(flow) = sc_module::consent::flows().take(&id) else {
+        return Redirect::to(&with_error(
+            "/",
+            "connecting the account took too long or was already started; please try again",
+        ))
+        .into_response();
+    };
+    let return_to = flow.return_to.clone();
+    // The one who asked, and nobody else: a link to this flow sent to somebody
+    // else must not connect *their* account to the asker's row.
+    let user = match session_user(&state, &jar).await {
+        Ok(user) => user,
+        Err(response) => return *response,
+    };
+    if user.is_none_or(|u| u.id.to_string() != flow.user) {
+        return Redirect::to(&with_error(
+            &return_to,
+            "sign in as the user who asked to connect this account",
+        ))
+        .into_response();
+    }
+    if !is_served_host(&state, &headers, &jar) {
+        return unserved_host();
+    }
+    let host = request_host(&headers);
+    let redirect_uri = format!(
+        "{}://{}{CALLBACK_ROUTE}",
+        scheme(&state),
+        callback_host(&state, &host)
+    );
+    let flow_state = crate::security::new_csrf_token();
+    let verifier = crate::security::new_csrf_token();
+    let binding = crate::security::new_csrf_token();
+    let address = authorization_address(
+        &Authorization {
+            url: &flow.authorization_url,
+            client_id: &flow.client_id,
+            scope: &flow.scope,
+            extra: &flow.params,
+        },
+        &redirect_uri,
+        &flow_state,
+        &pkce_challenge(&verifier),
+    );
+    state.apps.oauth().start(
+        flow_state,
+        Pending {
+            purpose: Purpose::Consent(Box::new(flow)),
+            verifier,
+            host,
+            return_to,
+            binding: binding.clone(),
+            redirect_uri,
+            expires: Instant::now() + FLOW_TTL,
+        },
+    );
+    (
+        jar.add(binding_cookie(&state, binding)),
+        Redirect::to(&address),
+    )
+        .into_response()
+}
+
+/// The refusal of a flow started on a host this server does not serve
+/// ([`is_served_host`]): no redirect, since the only address to send it to is
+/// the one that is not trusted.
+fn unserved_host() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        "sign-in is not offered on this host",
     )
         .into_response()
 }
@@ -421,23 +549,41 @@ pub(crate) async fn callback(State(state): State<AppState>, uri: Uri) -> Respons
     let Some(code) = query.get("code") else {
         return back("the identity provider sent no code");
     };
-    let Some(catalog) = state.apps.catalog().cloned() else {
-        return back("this server has no database");
-    };
-    let provider = match sc_config::oauth_provider(&catalog, &pending.provider).await {
-        Ok(Some(provider)) if offered(&provider, pending.admin) => provider,
-        _ => return back("unknown identity provider"),
-    };
-    let email = match signed_in_email(&provider, code, &pending).await {
-        Ok(email) => email,
-        Err(message) => return back(&message),
-    };
-    let user = match account_for(&catalog, &provider, &email, pending.admin).await {
-        Ok(user) => user,
-        Err(message) => return back(&message),
+    let outcome = match &pending.purpose {
+        Purpose::SignIn { provider, admin } => {
+            let Some(catalog) = state.apps.catalog().cloned() else {
+                return back("this server has no database");
+            };
+            let provider = match sc_config::oauth_provider(&catalog, provider).await {
+                Ok(Some(provider)) if offered(&provider, *admin) => provider,
+                _ => return back("unknown identity provider"),
+            };
+            let email = match signed_in_email(&provider, code, &pending).await {
+                Ok(email) => email,
+                Err(message) => return back(&message),
+            };
+            match account_for(&catalog, &state.sessions, &provider, &email, *admin).await {
+                Ok(user) => Outcome::SignIn(user),
+                Err(message) => return back(&message),
+            }
+        }
+        Purpose::Consent(flow) => {
+            let client = Client {
+                token_url: &flow.token_url,
+                client_id: &flow.client_id,
+                client_secret: &flow.client_secret,
+            };
+            match exchange(&client, code, &pending).await {
+                Ok((_, tokens)) => Outcome::Consent {
+                    flow: flow.clone(),
+                    tokens,
+                },
+                Err(message) => return back(&message),
+            }
+        }
     };
     let token = state.apps.oauth().complete(Completion {
-        user,
+        outcome,
         host: pending.host.clone(),
         return_to: pending.return_to.clone(),
         binding: pending.binding.clone(),
@@ -451,6 +597,60 @@ pub(crate) async fn callback(State(state): State<AppState>, uri: Uri) -> Respons
     .into_response()
 }
 
+/// The client a token request is made as.
+struct Client<'a> {
+    token_url: &'a str,
+    client_id: &'a str,
+    client_secret: &'a str,
+}
+
+/// Exchange `code` at the token endpoint: an HTTP client for further requests
+/// and the token response, which has an `access_token`. `Err` is a sentence for
+/// the page the browser goes back to.
+async fn exchange(
+    as_client: &Client<'_>,
+    code: &str,
+    pending: &Pending,
+) -> std::result::Result<(reqwest::Client, Value), String> {
+    let client = reqwest::Client::builder()
+        .timeout(PROVIDER_TIMEOUT)
+        .user_agent("Saltcorn Feldspar")
+        .build()
+        .map_err(|e| format!("could not reach the identity provider: {e}"))?;
+    let mut body = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", pending.redirect_uri.as_str()),
+        ("client_id", as_client.client_id),
+        ("code_verifier", pending.verifier.as_str()),
+    ];
+    if !as_client.client_secret.is_empty() {
+        body.push(("client_secret", as_client.client_secret));
+    }
+    let response = client
+        .post(as_client.token_url)
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(form(&body))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the identity provider: {e}"))?;
+    let status = response.status();
+    let token: Value = response.json().await.unwrap_or(Value::Null);
+    if token.get("access_token").and_then(Value::as_str).is_none() {
+        let why = token
+            .get("error_description")
+            .or_else(|| token.get("error"))
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("status {status}"), str::to_owned);
+        return Err(match pending.purpose {
+            Purpose::SignIn { .. } => format!("the identity provider did not sign you in: {why}"),
+            Purpose::Consent(_) => format!("the provider granted no access: {why}"),
+        });
+    }
+    Ok((client, token))
+}
+
 /// Exchange `code` for an access token and read the verified email it is for.
 /// `Err` is a sentence for the sign-in page.
 async fn signed_in_email(
@@ -458,40 +658,17 @@ async fn signed_in_email(
     code: &str,
     pending: &Pending,
 ) -> std::result::Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(PROVIDER_TIMEOUT)
-        .user_agent("Saltcorn Feldspar")
-        .build()
-        .map_err(|e| format!("could not reach the identity provider: {e}"))?;
-    let unreachable = |e: reqwest::Error| format!("could not reach the identity provider: {e}");
-    let mut body = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", pending.redirect_uri.as_str()),
-        ("client_id", provider.client_id.as_str()),
-        ("code_verifier", pending.verifier.as_str()),
-    ];
-    if !provider.client_secret.is_empty() {
-        body.push(("client_secret", provider.client_secret.as_str()));
-    }
-    let response = client
-        .post(&provider.token_url)
-        .header(header::ACCEPT, "application/json")
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(form(&body))
-        .send()
-        .await
-        .map_err(unreachable)?;
-    let status = response.status();
-    let token: Value = response.json().await.unwrap_or(Value::Null);
-    let Some(access_token) = token.get("access_token").and_then(Value::as_str) else {
-        let why = token
-            .get("error_description")
-            .or_else(|| token.get("error"))
-            .and_then(Value::as_str)
-            .map_or_else(|| format!("status {status}"), str::to_owned);
-        return Err(format!("the identity provider did not sign you in: {why}"));
+    let as_client = Client {
+        token_url: &provider.token_url,
+        client_id: &provider.client_id,
+        client_secret: &provider.client_secret,
     };
+    let (client, token) = exchange(&as_client, code, pending).await?;
+    let access_token = token
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let unreachable = |e: reqwest::Error| format!("could not reach the identity provider: {e}");
     let get = |url: &str| {
         client
             .get(url)
@@ -505,24 +682,23 @@ async fn signed_in_email(
         .json()
         .await
         .unwrap_or(Value::Null);
-    let verified = match info.get("email_verified") {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s == "true",
-        _ => true,
-    };
+    let github = provider.preset == sc_config::authentication::PRESET_GITHUB;
     if let Some(email) = info
         .get("email")
         .and_then(Value::as_str)
         .filter(|e| !e.is_empty())
     {
-        if !verified {
+        if email_vouched_for(&info, provider.trust_emails) {
+            return Ok(email.trim().to_owned());
+        }
+        if !github {
             return Err("the identity provider has not verified that email address".to_owned());
         }
-        return Ok(email.trim().to_owned());
     }
-    // GitHub's user shows an address only if its owner made one public; the
-    // verified primary one is on its own endpoint.
-    if provider.preset == sc_config::authentication::PRESET_GITHUB {
+    // GitHub's user shows an address only if its owner made one public, and
+    // never says whether it is verified; the verified primary one is on its
+    // own endpoint.
+    if github {
         let emails: Value = get("https://api.github.com/user/emails")
             .await
             .map_err(unreachable)?
@@ -544,11 +720,24 @@ async fn signed_in_email(
     Err("the identity provider did not say which email address you signed in with".to_owned())
 }
 
+/// Whether userinfo `info` says its `email` is verified. A provider that does
+/// not say (no `email_verified`) is believed only when its admin ticked
+/// `trust_emails`: the account is found by address, and some providers let
+/// the person signing in — or whoever runs their directory — choose it.
+fn email_vouched_for(info: &Value, trust_unsaid: bool) -> bool {
+    match info.get("email_verified") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => s == "true",
+        _ => trust_unsaid,
+    }
+}
+
 /// The account `email` signs in to. An administrator, on the admin UI's host;
 /// on an application's, anybody enabled — and, when the provider creates
 /// accounts, somebody new.
 async fn account_for(
     catalog: &sc_catalog::Catalog,
+    sessions: &sc_auth::SessionStore,
     provider: &OAuthProvider,
     email: &str,
     admin: bool,
@@ -589,6 +778,21 @@ async fn account_for(
     if admin && !user.is_admin() {
         return Err(format!("{email} is not an administrator"));
     }
+    // The provider has just proven the address. An account a signup made for
+    // it proved nothing, so whoever made it may not be its holder: it is
+    // claimed — their password and sessions gone — not joined (security
+    // review #41). The store ends the sessions too, so this node's cached
+    // copies and the sockets listening for them go with the rows.
+    if user.email_unproven() {
+        let claimed = sc_auth::claim_unproven_account(catalog, user)
+            .await
+            .map_err(failed)?;
+        sessions
+            .end_user_sessions(claimed.id)
+            .await
+            .map_err(failed)?;
+        return Ok(claimed);
+    }
     Ok(user)
 }
 
@@ -615,10 +819,27 @@ pub(crate) async fn complete(
     if !bound {
         return Redirect::to(&with_error(
             &completion.return_to,
-            "the sign-in was started in another browser",
+            match completion.outcome {
+                Outcome::SignIn(_) => "the sign-in was started in another browser",
+                Outcome::Consent { .. } => "connecting the account was started in another browser",
+            },
         ))
         .into_response();
     }
+    let user = match completion.outcome {
+        Outcome::SignIn(user) => user,
+        Outcome::Consent { flow, tokens } => {
+            let jar = jar.remove(binding_removal());
+            let target = match state.apps.catalog() {
+                Some(catalog) => match store_tokens(catalog, &flow, &tokens).await {
+                    Ok(()) => completion.return_to,
+                    Err(message) => with_error(&completion.return_to, &message),
+                },
+                None => with_error(&completion.return_to, "this server has no database"),
+            };
+            return (jar, leave_for(&target)).into_response();
+        }
+    };
     let session_token = jar
         .get(crate::security::SESSION_COOKIE)
         .map(|c| c.value().to_owned());
@@ -627,10 +848,7 @@ pub(crate) async fn complete(
     // than with `apply_session`'s bare 403, which it would otherwise meet.
     let client = match resolve_app(&state, &headers, &jar) {
         Resolved::App(app) => {
-            if refuse_sign_in(&state, &app.app, &completion.user)
-                .await
-                .is_some()
-            {
+            if refuse_sign_in(&state, &app.app, &user).await.is_some() {
                 return Redirect::to(&with_error(
                     &completion.return_to,
                     "your account may not use this application",
@@ -647,25 +865,28 @@ pub(crate) async fn complete(
         jar,
         session_token,
         client,
-        SessionAction::Start(completion.user),
+        SessionAction::Start(user),
     )
     .await
     {
         Ok(cookies) => cookies,
         Err(rejection) => return *rejection,
     };
-    // A page rather than a redirect: the session cookie is `SameSite=Strict`,
-    // and a browser does not send it on a redirect at the end of a chain that
-    // began at the provider. Leaving from a page on this host is same-site.
-    let target = html_escape(&completion.return_to);
+    (cookies.jar, cookies.stale, leave_for(&completion.return_to)).into_response()
+}
+
+/// A page that goes on to `target`, rather than a redirect: the session cookie
+/// is `SameSite=Strict`, and a browser does not send it on a redirect at the
+/// end of a chain that began at the provider. Leaving from a page on this host
+/// is same-site.
+fn leave_for(target: &str) -> Response {
+    let target = html_escape(target);
     let mut out = (
         StatusCode::OK,
-        cookies.jar,
-        cookies.stale,
         Html(format!(
             "<!doctype html><html><head><meta charset=\"utf-8\">\
              <meta http-equiv=\"refresh\" content=\"0;url={target}\">\
-             <title>Signing in…</title></head>\
+             <title>Continuing…</title></head>\
              <body><p><a href=\"{target}\">Continue</a></p></body></html>"
         )),
     )
@@ -673,6 +894,42 @@ pub(crate) async fn complete(
     out.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     out
+}
+
+/// Write a consent flow's tokens into the row it names, through the row
+/// layer, so the Secret fields are sealed and the module's service hears of
+/// the change. `Err` is a sentence for the application.
+async fn store_tokens(
+    catalog: &sc_catalog::Catalog,
+    flow: &ConsentFlow,
+    tokens: &Value,
+) -> std::result::Result<(), String> {
+    let store = &flow.store;
+    let mut values = store.set.clone();
+    values.insert(store.access_token.clone(), tokens["access_token"].clone());
+    if let Some(field) = &store.refresh_token
+        && let Some(refresh) = tokens.get("refresh_token").filter(|t| t.is_string())
+    {
+        values.insert(field.clone(), refresh.clone());
+    }
+    if let Some(field) = &store.expires_at {
+        let seconds = match &tokens["expires_in"] {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        };
+        let at = seconds.map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339());
+        values.insert(field.clone(), at.map_or(Value::Null, Value::String));
+    }
+    let failed = |e: sc_error::Error| {
+        log_failure("could not store the tokens of a consent flow", &e);
+        "the account could not be connected: its row could not be written".to_owned()
+    };
+    let table = catalog.require(&store.table).map_err(failed)?;
+    sc_api::rows::update_row(catalog, &table, &store.id, &Value::Object(values))
+        .await
+        .map_err(failed)?;
+    Ok(())
 }
 
 fn html_escape(text: &str) -> String {
@@ -686,6 +943,24 @@ fn html_escape(text: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_address_nobody_vouched_for_is_believed_only_when_trusted() {
+        let silent = json!({ "email": "admin@corp.example" });
+        assert!(!email_vouched_for(&silent, false));
+        assert!(email_vouched_for(&silent, true));
+        for (said, verified) in [
+            (json!(true), true),
+            (json!("true"), true),
+            (json!(false), false),
+            (json!("false"), false),
+        ] {
+            let info = json!({ "email": "a@b.example", "email_verified": said });
+            assert_eq!(email_vouched_for(&info, false), verified, "{info}");
+            assert_eq!(email_vouched_for(&info, true), verified, "{info}");
+        }
+    }
 
     #[test]
     fn only_a_path_on_this_host_is_returned_to() {
@@ -711,6 +986,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_consent_route_is_where_a_module_is_told_to_send_the_browser() {
+        assert_eq!(
+            CONSENT_ROUTE,
+            format!("{}/{{id}}", sc_module::consent::CONSENT_PREFIX)
+        );
+    }
+
     /// RFC 7636's own example.
     #[test]
     fn the_pkce_challenge_is_s256() {
@@ -724,10 +1007,12 @@ mod tests {
     fn a_flow_and_a_completion_are_spent_once() {
         let flows = OAuthFlows::default();
         let pending = || Pending {
-            provider: "p".into(),
+            purpose: Purpose::SignIn {
+                provider: "p".into(),
+                admin: false,
+            },
             verifier: "v".into(),
             host: "h".into(),
-            admin: false,
             return_to: "/".into(),
             binding: "b".into(),
             redirect_uri: "r".into(),
@@ -737,7 +1022,7 @@ mod tests {
         assert!(flows.take("s").is_some());
         assert!(flows.take("s").is_none());
         let token = flows.complete(Completion {
-            user: User::new(uuid::Uuid::new_v4(), 1).unwrap(),
+            outcome: Outcome::SignIn(User::new(uuid::Uuid::new_v4(), 1).unwrap()),
             host: "h".into(),
             return_to: "/".into(),
             binding: "b".into(),

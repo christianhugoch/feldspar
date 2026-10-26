@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use sc_agent::{AppPreviewer, PreviewInfo, RunId};
 use sc_api::ApiProvider;
 use sc_app::{
-    Application, CodeFramework, Framework, app_source_from_config, build_application,
-    list_applications, load_app_bundle,
+    Application, Framework, app_source_from_config, build_application, list_applications,
+    load_app_bundle,
 };
 use sc_catalog::{Catalog, ReprojectedApp, SchemaChanged, SchemaObserver};
 use sc_error::{Error, Repr, Result};
@@ -401,6 +401,25 @@ impl AppMounts {
         chrono::Duration::hours(self.session_ttl_hours.0.load(Ordering::Relaxed))
     }
 
+    /// How long a session started now lasts, read from `_fd_config` rather than
+    /// believed from this process's copy: the save that changed it may have
+    /// been another node's, `feldspar config set` or a restore, none of which
+    /// reach this process's [`session_ttl`](AppMounts::session_ttl). A sign-in
+    /// is rare enough to afford the read. The copy is refreshed with what was
+    /// read, and is the answer when there is no catalog or the read fails.
+    pub async fn current_session_ttl(&self) -> chrono::Duration {
+        if let Some(catalog) = &self.catalog {
+            match sc_config::session_ttl_hours(catalog).await {
+                Ok(hours) => self.set_session_ttl_hours(hours),
+                Err(e) => sc_log::log_warn!(
+                    "the stored session lifetime is ignored, keeping {}h: {e}",
+                    self.session_ttl().num_hours()
+                ),
+            }
+        }
+        self.session_ttl()
+    }
+
     /// Give sessions started from the next response on `hours`. A session
     /// already started keeps the expiry it was given.
     pub fn set_session_ttl_hours(&self, hours: i64) {
@@ -430,14 +449,28 @@ impl AppMounts {
     /// The `Content-Security-Policy` an application's responses carry, with the
     /// admin UI's framing following it to its own subdomain
     /// ([`follow_admin_host`](sc_app::follow_admin_host)).
+    ///
+    /// With the content-security sources its admin has switched on from the
+    /// installed modules' suggestions (TODO-payments P1.4): a suggestion whose
+    /// module is no longer installed adds nothing.
     pub fn app_csp(&self, app: &Application) -> String {
-        match (self.base_domain(), self.admin.subdomain()) {
+        let mut csp = match (self.base_domain(), self.admin.subdomain()) {
             (Some(base), Some(subdomain)) => {
                 sc_app::follow_admin_host(&app.csp, base, &format!("{subdomain}.{base}"))
-                    .header_value()
             }
-            _ => app.csp.header_value(),
+            _ => app.csp.clone(),
+        };
+        let enabled = app.csp_sources();
+        if !enabled.is_empty()
+            && let Some(modules) = self.modules()
+        {
+            for suggestion in modules.modules().csp_suggestions() {
+                if enabled.contains(&suggestion.key()) {
+                    csp = csp.with_sources(&suggestion.sources);
+                }
+            }
         }
+        csp.header_value()
     }
 
     /// Say which domain applications are served under, so a preview has a host
@@ -1121,9 +1154,12 @@ impl AppPreviewer for AppMounts {
         let bundle = tokio::task::spawn_blocking(move || sc_app::AssetBundle::from_dir(&dir))
             .await
             .map_err(|e| Error::msg(format!("loading the preview bundle: {e}")))??;
-        let framework = Arc::new(
-            CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
-        );
+        let framework = sc_app::mount_code_framework(
+            &app,
+            bundle,
+            source.build.clone(),
+            self.triggers().cloned(),
+        )?;
         let mounted =
             MountedApp::new_with(app, framework, catalog, self.evaluator(), self.triggers())?;
         Ok(AppMounts::mount_preview(self, run, mounted))
@@ -1201,6 +1237,17 @@ impl sc_action::TriggerObserver for AppMounts {
 /// runs to completion before anything is mounted, so an `Err` here — carrying the
 /// bundler's own diagnostics (§16) — never disturbs what is already up.
 pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_app::BuildReport> {
+    build_and_mount_with(apps, app, false).await
+}
+
+/// [`build_and_mount`], or with `quick` the dev loop's build
+/// ([`sc_app::build_application_quick`]): no install, no regenerated client, no
+/// prerendering — what the IDE runs on save.
+pub async fn build_and_mount_with(
+    apps: &AppMounts,
+    app: Application,
+    quick: bool,
+) -> Result<sc_app::BuildReport> {
     let catalog = apps.catalog().ok_or_else(|| {
         Error::config("this server was built with no catalog, so it cannot mount applications")
     })?;
@@ -1221,27 +1268,49 @@ pub async fn build_and_mount(apps: &AppMounts, app: Application) -> Result<sc_ap
         });
     }
     let source = app_source_from_config(&app.framework)?;
-    let report = build_application(catalog, &app, &source, apps.triggers()).await?;
+    let report = if quick {
+        sc_app::build_application_quick(catalog, &app, &source, apps.triggers()).await?
+    } else {
+        build_application(catalog, &app, &source, apps.triggers()).await?
+    };
     // The build step travels onto the mounted framework, as
     // [`sc_app::build_code_framework`] already does it: `Framework::build()` is
     // how the rest of the process asks "is this application served from a bundle
     // somebody has to rebuild?", and a mount that dropped the answer would make
     // every re-projection report say no (§13.6).
-    let framework = Arc::new(
-        CodeFramework::new(app.framework.name.clone(), report.bundle.clone())
-            .with_build(source.build.clone()),
-    );
+    let framework = sc_app::mount_code_framework(
+        &app,
+        report.bundle.clone(),
+        source.build.clone(),
+        apps.triggers().cloned(),
+    )?;
+    // A website's A/B tests are reported in the Analytics UI (TODO-astro
+    // W3.6): its workspace is there from the first full build, made once and
+    // the admin's after that. Nothing to report must not fail a build.
+    let site = (app.framework.name == ASTRO_FRAMEWORK && !quick).then(|| app.name.clone());
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
+    if let Some(site) = site
+        && let Err(e) = sc_analytics::ab::ensure_ab_workspace(catalog, &site).await
+    {
+        eprintln!(
+            "feldspar: making the A/B tests workspace of {site}: {}",
+            e.chain()
+        );
+    }
     Ok(report)
 }
+
+/// The Astro module's framework, whose sites may run A/B tests.
+const ASTRO_FRAMEWORK: &str = "astro";
 
 /// Mount `app` from what its last build left on disk, **running no bundler** —
 /// what boot ([`mount_all`]) and a `SIGHUP` reload both do. Returns how many
 /// assets were read.
 ///
 /// The mount is indistinguishable from the one [`build_and_mount`] produces —
-/// same [`CodeFramework`] with the same build step on it, same providers —
+/// same framework from [`sc_app::mount_code_framework`] with the same build step
+/// on it, same providers —
 /// because the only difference between the two paths is who ran the bundler.
 /// An application that has never been built has no output to load, and the
 /// error says to build it first.
@@ -1259,9 +1328,8 @@ pub(crate) async fn mount_from_disk(apps: &AppMounts, app: Application) -> Resul
     let source = app_source_from_config(&app.framework)?;
     let bundle = load_app_bundle(catalog, &source)?;
     let assets = bundle.len();
-    let framework = Arc::new(
-        CodeFramework::new(app.framework.name.clone(), bundle).with_build(source.build.clone()),
-    );
+    let framework =
+        sc_app::mount_code_framework(&app, bundle, source.build.clone(), apps.triggers().cloned())?;
     let mounted = MountedApp::new_with(app, framework, catalog, apps.evaluator(), apps.triggers())?;
     apps.remount(mounted);
     Ok(assets)

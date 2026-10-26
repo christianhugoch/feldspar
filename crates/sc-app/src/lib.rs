@@ -56,6 +56,8 @@ mod code_libraries;
 // written down as data instead of compiled.
 mod declared;
 mod diagnostics;
+// The agents an application exposes to its client (§11.7).
+mod exposed_agents;
 mod exposed_triggers;
 // Frameworks written in Rust above this crate (Saltcorn UI): named constructors.
 mod factory;
@@ -71,6 +73,7 @@ pub mod mcp;
 mod none;
 mod react;
 mod scaffold;
+pub mod server_render;
 mod skill;
 mod store;
 mod streams;
@@ -85,21 +88,23 @@ pub use api::{
     serves_custom_queries, validate_api_config, validate_api_mounts, validate_static_dirs,
 };
 pub use application::{
-    ApiConfig, AppFileUrls, AppId, Application, CspPolicy, FRAME_ANCESTORS, FrameworkRef,
-    StaticDir, StreamRef, TriggerRef, allow_admin_framing, follow_admin_host,
+    ApiConfig, AppFileUrls, AppId, Application, CSP_SOURCES_ATTRIBUTE, CspPolicy, FRAME_ANCESTORS,
+    FrameworkRef, GUEST_SESSION_DAYS_ATTRIBUTE, GUEST_SESSIONS_ATTRIBUTE, StaticDir, StreamRef,
+    TriggerRef, allow_admin_framing, follow_admin_host,
 };
 pub use applications::{
-    APPLICATIONS_TABLE, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION, COL_EXTRA_FRAMEWORKS,
-    COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS, COL_STREAMS, COL_SUBDOMAIN,
-    COL_TABLES, COL_TRIGGERS, COL_UPLOADS, bootstrap,
+    APPLICATIONS_TABLE, COL_AGENTS, COL_APIS, COL_ATTRIBUTES, COL_CSP, COL_DESCRIPTION,
+    COL_EXTRA_FRAMEWORKS, COL_FILE_STORES, COL_FRAMEWORK, COL_ID, COL_NAME, COL_STATIC_DIRS,
+    COL_STREAMS, COL_SUBDOMAIN, COL_TABLES, COL_TRIGGERS, COL_UPLOADS, bootstrap,
 };
 pub use build::{
     AppSource, BuildReport, TargetInfo, TargetReadiness, TargetReport, app_output_dir,
     app_source_from_config, app_source_in, app_store_root, app_target_readiness, app_target_spec,
-    build_app, build_application, build_application_if_changed, build_application_target,
-    build_code_framework, emit_app_client, emit_client, framework_build_targets, load_app_bundle,
-    prepare_remote_target, remove_app_dependencies, remove_dependencies, require_target_ready,
-    requirements_readiness, run_build, run_target, target_log_path,
+    build_app, build_application, build_application_if_changed, build_application_quick,
+    build_application_target, build_code_framework, emit_app_client, emit_client,
+    framework_build_targets, load_app_bundle, prepare_remote_target, remove_app_dependencies,
+    remove_dependencies, require_target_ready, requirements_readiness, run_build, run_target,
+    target_log_path,
 };
 pub use build_hosts::{
     AgentReport, AnsweredTarget, BUILD_AGENT_PROTOCOL, BUILD_HOST_TOKEN_PREFIX, BUILD_HOSTS_TABLE,
@@ -132,6 +137,11 @@ pub use declared::{
     installed_frameworks, requires_json, target_requires,
 };
 pub use diagnostics::{Diagnostic, build_diagnostics, parse_diagnostics};
+pub use exposed_agents::{
+    AGENTS_SEGMENT, AgentExposure, AgentRequest, AgentRoute, ToolDetail, agent_exports,
+    agent_exposures_from_json, agent_exposures_json, agent_path, agent_route,
+    applications_exposing_agent, check_exposed_agents, validate_agent_exposures,
+};
 pub use exposed_triggers::{
     TriggerChange, app_triggers_json, change_app_triggers, public_triggers,
 };
@@ -167,6 +177,9 @@ pub use scaffold::{
     ClientUpdate, GeneratedFile, RUNTIME_DOC_FILE, ScaffoldReport, emit_app_runtime,
     has_generated_runtime, live_doc_ts, require_api_provider, require_scaffoldable,
     require_scaffoldable_in, scaffold_app, update_app_client,
+};
+pub use server_render::{
+    ServerRendered, check_server_entry, mount_code_framework, prerender as prerender_site,
 };
 pub use skill::{SKILL_FILE, generate_skill};
 pub use store::{

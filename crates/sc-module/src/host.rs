@@ -70,6 +70,36 @@ pub struct CallHosts<'a> {
     /// [`crate::files::ModuleFiles`], confined to the stores and folders its
     /// declared file fields name.
     pub module_files: Option<&'a dyn sc_expr::FileHost>,
+    /// The role grants the module may make (TODO-payments P3.3, design C4): the
+    /// `roles` surface, which `ctx.roles` in a service or a webhook and `roles`
+    /// in an action speak — a [`crate::roles::ModuleRoles`], held to the role
+    /// ceiling an admin granted the module.
+    pub roles: Option<&'a dyn RoleAsks>,
+    /// The LLM credits the module may grant and read (TODO-payments P6.4,
+    /// design C4): the `credits` surface, which `ctx.credits` in a service or a
+    /// webhook and `credits` in an action speak — a
+    /// [`crate::credits::ModuleCredits`]. There is no debit.
+    pub credits: Option<&'a dyn CreditAsks>,
+    /// An action's `oauth.begin(…)` (TODO-imap M10.3): the `oauth` surface, a
+    /// [`crate::consent::ConsentAsks`] for the action's module and caller.
+    pub oauth: Option<&'a dyn OAuthAsks>,
+}
+
+/// The `roles` ask surface: `{ op: "grant" | "revoke" | "get", … }`, answered
+/// by [`crate::roles::ModuleRoles`]. Declared here beside [`ServiceAsks`] for
+/// that trait's reason.
+#[async_trait::async_trait]
+pub trait RoleAsks: Send + Sync {
+    /// Answer one ask.
+    async fn ask(&self, plan: Json) -> Result<Json>;
+}
+
+/// The `credits` ask surface: `{ op: "grant" | "balance" | "threshold", … }`,
+/// answered by [`crate::credits::ModuleCredits`].
+#[async_trait::async_trait]
+pub trait CreditAsks: Send + Sync {
+    /// Answer one ask.
+    async fn ask(&self, plan: Json) -> Result<Json>;
 }
 
 /// The `service` ask surface: what a running service asks of the supervisor
@@ -86,6 +116,14 @@ pub trait ServiceAsks: Send + Sync {
     async fn ask(&self, plan: Json) -> Result<Json>;
 }
 
+/// The `oauth` ask surface: an action asking for its caller's consent at an
+/// OAuth 2.0 provider ([`crate::consent`]).
+#[async_trait::async_trait]
+pub trait OAuthAsks: Send + Sync {
+    /// Answer one ask.
+    async fn ask(&self, plan: Json) -> Result<Json>;
+}
+
 impl<'a> CallHosts<'a> {
     /// The surfaces and the schema of one run, as
     /// `sc_core_actions::code_body::Hosts` supplies them.
@@ -97,6 +135,9 @@ impl<'a> CallHosts<'a> {
             views: None,
             service: None,
             module_files: None,
+            roles: None,
+            credits: None,
+            oauth: None,
         }
     }
 
@@ -104,6 +145,27 @@ impl<'a> CallHosts<'a> {
     #[must_use]
     pub fn with_module_files(mut self, files: &'a dyn sc_expr::FileHost) -> CallHosts<'a> {
         self.module_files = Some(files);
+        self
+    }
+
+    /// The same, with the module's role grants.
+    #[must_use]
+    pub fn with_roles(mut self, roles: &'a dyn RoleAsks) -> CallHosts<'a> {
+        self.roles = Some(roles);
+        self
+    }
+
+    /// The same, with the module's credit grants.
+    #[must_use]
+    pub fn with_credits(mut self, credits: &'a dyn CreditAsks) -> CallHosts<'a> {
+        self.credits = Some(credits);
+        self
+    }
+
+    /// The same, with the `oauth` surface.
+    #[must_use]
+    pub fn with_oauth(mut self, oauth: &'a dyn OAuthAsks) -> CallHosts<'a> {
+        self.oauth = Some(oauth);
         self
     }
 
@@ -466,6 +528,38 @@ pub struct ServiceManifest {
     pub description: String,
 }
 
+/// One **webhook** a module receives (TODO-payments P1.1, design C1).
+///
+/// A module exports `webhooks` beside its `services`:
+///
+/// ```js
+/// webhooks: {
+///   events: {
+///     description: "Payment events from the provider",
+///     handle: async (req, ctx) => ({ status: 200, body: { ok: true } }),
+///   },
+/// }
+/// ```
+///
+/// What crosses is the name and the description. `handle` stays in the
+/// worker, and each request is one [`ModuleHost::run_webhook`] call.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WebhookManifest {
+    /// The webhook's name, unique within its module: a segment of its URL.
+    pub name: String,
+    /// One line for the module card.
+    #[serde(default)]
+    pub description: String,
+    /// The HTTP methods it answers: `POST` unless it declares `methods` — a
+    /// test provider's checkout page answers `GET` too (TODO-payments P2.2).
+    #[serde(default = "post_only")]
+    pub methods: Vec<String>,
+}
+
+fn post_only() -> Vec<String> {
+    vec!["POST".to_owned()]
+}
+
 /// An entity type the module exports and this version does not load.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnsupportedEntity {
@@ -531,10 +625,29 @@ pub struct ModuleManifest {
     /// server when the module loads.
     #[serde(default)]
     pub tables: Vec<Json>,
+    /// The core tables it needs (`core_tables`): `role_grants`, and
+    /// `llm_credits` for the three credit ledger tables. Niche enough that a
+    /// new installation does not have them; created by [`crate::ModuleSet::load`]
+    /// when a module that names them loads.
+    #[serde(default)]
+    pub core_tables: Vec<String>,
     /// The services it runs in the background (TODO-imap M5) — started by
     /// [`ServiceSupervisor`](crate::ServiceSupervisor) after every load.
     #[serde(default)]
     pub services: Vec<ServiceManifest>,
+    /// The webhooks it receives (TODO-payments P1.1) — served by the server at
+    /// `POST /_feldspar/hooks/<module>/<name>`.
+    #[serde(default)]
+    pub webhooks: Vec<WebhookManifest>,
+    /// The application tables it asks to read (TODO-payments P4.1) — admitted
+    /// only where its stored configuration names them ([`crate::reads`]).
+    #[serde(default)]
+    pub reads: Vec<String>,
+    /// The content-security sources it suggests an application allow
+    /// (TODO-payments P1.4) — data, `{ name, description, sources }` each, read
+    /// and checked by [`crate::csp::read_suggestions`].
+    #[serde(default)]
+    pub csp: Vec<Json>,
     /// The fields of its `configuration_workflow`'s forms, flattened (§5).
     #[serde(default)]
     pub config_fields: Vec<Json>,
@@ -794,6 +907,31 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, service, call);
+            Err(no_runtime())
+        }
+    }
+
+    /// Run one **webhook** of one module (TODO-payments P1.1): call its
+    /// `handle(req, ctx)` with `request` — `{ method, headers, query, rest,
+    /// body }`, the body base64 — and answer `{ status, headers, body }`, the
+    /// body base64 again.
+    ///
+    /// Bounded like an action: the call's wall clock and its budget of asks.
+    /// Every `ctx.db` read and write is an ask on this call, served from `call`.
+    pub async fn run_webhook(
+        &self,
+        module: &str,
+        webhook: &str,
+        request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.run_webhook(module, webhook, request, call).await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, webhook, request, call);
             Err(no_runtime())
         }
     }

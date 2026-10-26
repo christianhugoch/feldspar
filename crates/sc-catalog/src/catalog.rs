@@ -269,6 +269,23 @@ fn provided_config(table: &Table) -> serde_json::Value {
     }
 }
 
+/// Apply one schema change on its own. On SQLite it runs in a transaction that
+/// keeps the altered table's change-log triggers (see
+/// [`Catalog::apply_schema_batch_in`]).
+async fn apply_one(driver: &dyn DatabaseDriver, change: &SchemaChange) -> Result<()> {
+    if !driver.dialect().is_sqlite() {
+        return driver.apply_schema(change).await;
+    }
+    let mut tx = driver.begin().await?;
+    match crate::change_log_sqlite::apply_keeping_triggers(tx.as_mut(), change).await {
+        Ok(()) => tx.commit().await,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
 /// One step of a transactional schema batch ([`Catalog::apply_schema_batch`]).
 ///
 /// Two shapes, because the DDL a schema change needs comes in two: the
@@ -847,12 +864,15 @@ impl Catalog {
     /// Add a field to an existing table, then reload the cache and return the
     /// updated [`Table`].
     pub async fn create_field(&self, table: &str, field: &DataField) -> Result<Table> {
-        self.driver_for_table(table)?
-            .apply_schema(&SchemaChange::AddColumn {
+        let driver = self.driver_for_table(table)?;
+        apply_one(
+            driver.as_ref(),
+            &SchemaChange::AddColumn {
                 table: table.to_owned(),
                 column: field.to_column_def(),
-            })
-            .await?;
+            },
+        )
+        .await?;
         self.reload().await?;
         self.require(table)
     }
@@ -900,13 +920,15 @@ impl Catalog {
             .unwrap_or(false);
         self.forget_field_meta(table, field).await?;
         if !is_calc {
-            driver
-                .apply_schema(&SchemaChange::DropColumn {
+            apply_one(
+                driver.as_ref(),
+                &SchemaChange::DropColumn {
                     table: table.to_owned(),
                     column: field.to_owned(),
                     if_exists: false,
-                })
-                .await?;
+                },
+            )
+            .await?;
         }
         self.reload().await?;
         self.require(table)
@@ -917,6 +939,7 @@ impl Catalog {
     /// [`drop_table`](Self::drop_table), split out so a batch can do it after its
     /// own DDL has committed.
     pub async fn forget_table_meta(&self, name: &str) -> Result<()> {
+        crate::edited::forget_table_edit(self, name).await?;
         if self.get(FIELD_META_TABLE)?.is_some() {
             for meta in crate::field_meta::list_field_meta_for_table(self, name).await? {
                 crate::field_meta::delete_field_meta_row(self, meta.id).await?;
@@ -967,9 +990,16 @@ impl Catalog {
     /// `sc_api::schema_edit` refuses such a batch outright rather than pretending
     /// otherwise.
     pub async fn apply_schema_batch_in(&self, database: &DbId, steps: &[SchemaStep]) -> Result<()> {
-        let mut tx = self.driver_named(database)?.begin().await?;
+        let driver = self.driver_named(database)?;
+        let sqlite = driver.dialect().is_sqlite();
+        let mut tx = driver.begin().await?;
         for step in steps {
             let outcome = match step {
+                // SQLite's change-log triggers are generated from the table's
+                // columns, so they follow every change to them (§14.12).
+                SchemaStep::Change(change) if sqlite => {
+                    crate::change_log_sqlite::apply_keeping_triggers(tx.as_mut(), change).await
+                }
                 SchemaStep::Change(change) => tx.apply_schema(change).await,
                 SchemaStep::Sql(sql) => tx.batch(sql).await,
             };
@@ -1894,7 +1924,12 @@ pub(crate) fn schema_shape_of_tables<'a>(
             // filter, an ordering, an ownership rule or a calculated field over
             // it could only compare ciphertext — or, computed on read, carry
             // the plaintext out to a client.
-            if field.is_collab_doc() || field.is_secret() {
+            // The password hash likewise: no formula has a use for it, and a
+            // filter over it is an oracle for it although it is never returned.
+            if field.is_collab_doc()
+                || field.is_secret()
+                || (table.name == USERS_TABLE && field.base.name == USERS_PASSWORD_COLUMN)
+            {
                 continue;
             }
             table_shape = match &field.kind {

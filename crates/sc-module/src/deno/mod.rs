@@ -161,6 +161,7 @@ pub fn prime() {
                         &url,
                         DEFAULT_MODULE_MAX_HEAP,
                         &ModulePermissions::closed(),
+                        None,
                     ) {
                         Ok(worker) => {
                             let _hold = worker;
@@ -684,6 +685,33 @@ impl DenoModuleHost {
         .map_err(|e| denial(module, e))
     }
 
+    /// Run one webhook of one module (TODO-payments P1.1).
+    ///
+    /// Routed like [`run`](DenoModuleHost::run), and bounded like it: a
+    /// provider waiting on a webhook is a caller like any other.
+    pub async fn run_webhook(
+        &self,
+        module: &str,
+        webhook: &str,
+        request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        self.send_with(
+            index,
+            json!({
+                "op": "webhook_call",
+                "module": module,
+                "webhook": webhook,
+                "request": request,
+            }),
+            None,
+            call,
+        )
+        .await
+        .map_err(|e| denial(module, e))
+    }
+
     /// Stop one running service, and answer once its `stop` has finished.
     pub async fn stop_service(&self, module: &str, service: &str) -> Result<Json> {
         let index = self.worker_for(module).await;
@@ -1149,6 +1177,9 @@ impl DenoModuleHost {
     /// the worker that has whatever half-loaded state the failure left, rather
     /// than spreading one broken module's wreckage over the pool.
     async fn pin(&self, name: &str, permissions: &ModulePermissions) -> (usize, Option<usize>) {
+        // Pinned by what the worker is built with: a module's role ceiling is
+        // the server's to check, and must not split the pool.
+        let permissions = &permissions.sandbox();
         let mut pool = self.pool.lock().await;
         let mut moved_from = None;
         if let Some(index) = pool.pinned.get(name).copied() {
@@ -1381,7 +1412,10 @@ impl DenoModuleHost {
             || call.hosts.module_fns.is_some()
             || call.hosts.files.is_some()
             || call.service.is_some()
-            || call.module_files.is_some();
+            || call.module_files.is_some()
+            || call.roles.is_some()
+            || call.credits.is_some()
+            || call.oauth.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
             // The functions this call's modules supply, by name, for v1's
@@ -1404,7 +1438,7 @@ impl DenoModuleHost {
             }
         }
         let (reply, answer) = oneshot::channel();
-        let (asks, mut asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
+        let (asks, asked) = tokio::sync::mpsc::unbounded_channel::<HostAsk>();
         control
             .send(Control::Job(Box::new(Job {
                 request,
@@ -1422,16 +1456,25 @@ impl DenoModuleHost {
         let files = call.hosts.files;
         let service = call.service;
         let module_files = call.module_files;
+        let roles = call.roles;
+        let credits = call.credits;
+        let oauth = call.oauth;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work. A service has none (`None`).
         let mut left = bounds.budget;
+        // The asks this caller has taken on and not yet answered, and the ones
+        // still queued for it. Kept so that a caller which stops waiting — its
+        // worker died, its wall clock ran out, or **its future was dropped**, as
+        // a service's is when its stop outlasts the grace — fails them by name
+        // on the way out, rather than leaving a module awaiting a promise that
+        // will never settle (and a reload of it waiting on that module's stop).
+        let mut pending_asks = PendingAsks {
+            control: control.clone(),
+            outstanding: BTreeSet::new(),
+            asked,
+        };
         let mut serving = FuturesUnordered::new();
-        // The asks this caller has taken on and not yet answered. Kept so that a
-        // caller which stops waiting — its worker died, or its wall clock ran out
-        // — can fail them **by name** on the way out, rather than leaving a
-        // module awaiting a promise that will never settle.
-        let mut outstanding: BTreeSet<u64> = BTreeSet::new();
         let limit = bounds.clock;
         let clock = async move {
             match limit {
@@ -1461,7 +1504,7 @@ impl DenoModuleHost {
                         limit.unwrap_or_default()
                     )));
                 }
-                Some(ask) = asked.recv() => {
+                Some(ask) = pending_asks.asked.recv() => {
                     if left == Some(0) {
                         let _ = control.send(Control::Answer {
                             ask: ask.id,
@@ -1473,7 +1516,7 @@ impl DenoModuleHost {
                     if let Some(left) = left.as_mut() {
                         *left -= 1;
                     }
-                    outstanding.insert(ask.id);
+                    pending_asks.outstanding.insert(ask.id);
                     let control = control.clone();
                     serving.push(async move {
                         let surfaces = Surfaces {
@@ -1483,6 +1526,9 @@ impl DenoModuleHost {
                             files,
                             service,
                             module_files,
+                            roles,
+                            credits,
+                            oauth,
                         };
                         let (ok, text) = match serve(surfaces, ask.request).await {
                             Ok(value) => (
@@ -1500,14 +1546,42 @@ impl DenoModuleHost {
                     });
                 }
                 Some(answered) = serving.next(), if !serving.is_empty() => {
-                    outstanding.remove(&answered);
+                    pending_asks.outstanding.remove(&answered);
                 }
             }
         };
-        // Nobody is going to answer these now, and a module left awaiting one
-        // would hang until its own worker was restarted for some other reason.
-        for ask in outstanding {
-            let _ = control.send(Control::Answer {
+        // The serving futures go first: an ask one of them was about to answer
+        // is answered by the guard instead, and only once.
+        drop(serving);
+        drop(pending_asks);
+        outcome
+    }
+}
+
+/// The asks one call has taken on and not answered, and the queue of those it
+/// has not taken yet — refused, by name, when the call stops waiting.
+///
+/// A guard rather than a loop after the call's own loop, because the call's
+/// future can be **dropped** before it gets there, and then nobody answers: a
+/// module awaiting one of these would hang until its worker happened to be
+/// restarted, and every `stop` and reload that waited on it would hang too.
+struct PendingAsks {
+    control: tokio::sync::mpsc::UnboundedSender<Control>,
+    outstanding: BTreeSet<u64>,
+    asked: tokio::sync::mpsc::UnboundedReceiver<HostAsk>,
+}
+
+impl Drop for PendingAsks {
+    fn drop(&mut self) {
+        // Closed first, so an ask routed from here on is refused at the worker.
+        self.asked.close();
+        let queued = std::iter::from_fn(|| self.asked.try_recv().ok().map(|ask| ask.id));
+        let unanswered: Vec<u64> = std::mem::take(&mut self.outstanding)
+            .into_iter()
+            .chain(queued)
+            .collect();
+        for ask in unanswered {
+            let _ = self.control.send(Control::Answer {
                 ask,
                 ok: false,
                 text: "the call this request belongs to was given up on before this server \
@@ -1515,7 +1589,6 @@ impl DenoModuleHost {
                     .to_owned(),
             });
         }
-        outcome
     }
 }
 
@@ -1558,6 +1631,9 @@ struct Surfaces<'a> {
     files: Option<&'a dyn sc_expr::FileHost>,
     service: Option<&'a dyn crate::host::ServiceAsks>,
     module_files: Option<&'a dyn sc_expr::FileHost>,
+    roles: Option<&'a dyn crate::host::RoleAsks>,
+    credits: Option<&'a dyn crate::host::CreditAsks>,
+    oauth: Option<&'a dyn crate::host::OAuthAsks>,
 }
 
 /// One ask, on the surface it names.
@@ -1609,11 +1685,33 @@ async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
                 "only a module's running service can ask for this (`ctx.onTableChange`)",
             )),
         },
+        "roles" => match surfaces.roles {
+            Some(roles) => roles.ask(plan).await,
+            None => Err(Error::config(
+                "this module call cannot grant roles: `roles` is there in an action, a \
+                 service and a webhook (TODO-payments P3.3)",
+            )),
+        },
+        "credits" => match surfaces.credits {
+            Some(credits) => credits.ask(plan).await,
+            None => Err(Error::config(
+                "this module call cannot grant credits: `credits` is there in an action, a \
+                 service and a webhook (TODO-payments P6.4)",
+            )),
+        },
+        "oauth" => match surfaces.oauth {
+            Some(oauth) => oauth.ask(plan).await,
+            None => Err(Error::config(
+                "only an action called by a user can ask for their consent (`oauth.begin`)",
+            )),
+        },
         other => Err(Error::config(format!(
             "`{other}` is not something a module can ask this server for; what a module may \
              reach is the database (`db`), this server's triggers (`trigger`), its modules' \
              functions (`function`), the file stores it was given (`files`), its own \
-             file areas (`module_files`) and, from a service, its supervisor (`service`)"
+             file areas (`module_files`), role grants (`roles`), LLM credits \
+             (`credits`), from a service its \
+             supervisor (`service`) and, from an action, a consent flow (`oauth`)"
         ))),
     }
 }

@@ -8919,6 +8919,7 @@ dependencies = [
  "chrono",
  "futures",
  "regex-lite",
+ "rust_decimal",
  "sc-action",
  "sc-agent",
  "sc-auth",
@@ -9010,6 +9011,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "image",
  "regex-lite",
  "sc-action",
  "sc-api",
@@ -9039,11 +9041,13 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "lru 0.12.5",
+ "rust_decimal",
  "sc-catalog",
  "sc-db",
  "sc-db-postgres",
  "sc-error",
  "sc-expr",
+ "sc-log",
  "sc-query",
  "sc-test-harness",
  "sc-types",
@@ -9157,6 +9161,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "reqwest",
  "sc-action",
  "sc-api",
@@ -9175,6 +9180,7 @@ dependencies = [
  "sc-types",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -9306,11 +9312,14 @@ dependencies = [
  "async-trait",
  "lettre",
  "mrml",
+ "rcgen",
+ "rustls",
  "sc-catalog",
  "sc-config",
  "sc-error",
  "sc-test-harness",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -9465,6 +9474,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "deno_core",
  "deno_error",
  "deno_path_util",
@@ -9472,6 +9482,7 @@ dependencies = [
  "deno_runtime",
  "futures",
  "node_resolver",
+ "rust_decimal",
  "sc-action",
  "sc-api",
  "sc-app",

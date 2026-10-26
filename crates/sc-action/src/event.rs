@@ -23,6 +23,9 @@
 //! [`MAX_DEPTH`], naming the whole chain. A depth counter alone would have caught
 //! the loop but left the admin to find it; the chain *is* the diagnosis.
 
+use std::sync::Arc;
+
+use sc_catalog::{CallerContext, CallingApp, Changeset, Origin};
 use sc_error::{Error, ErrorKind, Result};
 use serde_json::{Map, Value as Json};
 
@@ -207,6 +210,18 @@ pub struct Event {
     /// The trigger names that led here, outermost first. Empty for an event
     /// raised by a request rather than by another trigger's action.
     pub chain: Vec<String>,
+    /// The application the event's request came through (TODO-payments P1.3):
+    /// its id, its base URL as that request reached it, and its native apps'
+    /// URL scheme. `None` for an event no application's request raised.
+    pub app: Option<CallingApp>,
+    /// The caller's **guest session** public id (TODO-payments P1.5), what a
+    /// formula sees as `session.id`. `None` for a signed-in caller and for
+    /// anybody with no guest session.
+    pub session: Option<String>,
+    /// The changeset of the write that raised it (§14.12), which the writes
+    /// of the triggers it fires join: the user's edit and its trigger's
+    /// follow-up are one action. `None` for an event no changeset led to.
+    pub changeset: Option<Arc<Changeset>>,
 }
 
 impl Event {
@@ -222,6 +237,9 @@ impl Event {
             role: ROLE_PUBLIC,
             user: None,
             chain: Vec::new(),
+            app: None,
+            session: None,
+            changeset: None,
         }
     }
 
@@ -324,6 +342,34 @@ impl Event {
         self
     }
 
+    /// Set everything about who caused this event from the caller context of
+    /// the write or the run that raised it: the role, the user, the chain, the
+    /// application, the guest session and the changeset.
+    pub fn caused_by(mut self, caller: &CallerContext) -> Event {
+        self.role = caller.role;
+        self.user = caller.user.clone();
+        self.chain = caller.chain.clone();
+        self.app = caller.app.clone();
+        self.session = caller.session.clone();
+        self.changeset = caller.changeset.clone();
+        self
+    }
+
+    /// Set where the event came from: the application and the guest session.
+    pub fn from_origin(mut self, origin: Origin) -> Event {
+        self.app = origin.app;
+        self.session = origin.session;
+        self
+    }
+
+    /// Where the event came from, to run its trigger's action inside.
+    pub fn origin(&self) -> Origin {
+        Origin {
+            app: self.app.clone(),
+            session: self.session.clone(),
+        }
+    }
+
     /// Set the chain of triggers this event descends from — what
     /// [`firing`](Event::firing) handed the action that caused it.
     pub fn chained(mut self, chain: Vec<String>) -> Event {
@@ -331,9 +377,26 @@ impl Event {
         self
     }
 
+    /// Set the changeset the event belongs to.
+    pub fn in_changeset(mut self, changeset: Option<Arc<Changeset>>) -> Event {
+        self.changeset = changeset;
+        self
+    }
+
     /// How deep in a cascade this event is: 0 for one raised by a request.
+    /// The [`UNTRUSTED_ORIGIN`](sc_catalog::UNTRUSTED_ORIGIN) mark is not a
+    /// trigger and is not counted.
     pub fn depth(&self) -> usize {
-        self.chain.len()
+        self.chain
+            .iter()
+            .filter(|name| *name != sc_catalog::UNTRUSTED_ORIGIN)
+            .count()
+    }
+
+    /// Whether the cascade this event belongs to began on untrusted input
+    /// (security review #32).
+    pub fn untrusted(&self) -> bool {
+        sc_catalog::is_untrusted_chain(&self.chain)
     }
 
     /// Record that `trigger` is firing for this event, returning the chain any
@@ -350,7 +413,7 @@ impl Event {
             return Err(Error::invalid(format!(
                 "trigger `{trigger}` was not run: it is {} triggers deep, past the \
                  limit of {MAX_DEPTH} — the chain is {}",
-                chain.len(),
+                self.depth() + 1,
                 chain.join(" → ")
             )));
         }

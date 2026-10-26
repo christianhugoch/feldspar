@@ -81,6 +81,11 @@ pub struct BuildTemplate {
     /// The generated client's file name **within** the runtime directory —
     /// `client.ts`. Only meaningful with a `runtime`.
     pub client_file: String,
+    /// The server entry **within** the output directory — `_server/entry.js` —
+    /// for a framework whose build emits a code body the server runs per
+    /// request (a server-rendered site, see [`crate::server_render`]). `None` for
+    /// a framework whose output is only static files.
+    pub server: Option<String>,
 }
 
 /// An extra build a framework offers next to its web build, such as an Android
@@ -363,6 +368,7 @@ impl FrameworkDecl {
             source_dir: render(&self.build.source)?,
             output_dir: render(&self.build.output)?,
             install: self.build.install.clone(),
+            server_entry: self.build.server.clone(),
         })
     }
 
@@ -893,6 +899,7 @@ pub(crate) mod tests {
                 }),
                 runtime: Some(template("{{ project }}/src/feldspar")),
                 client_file: "client.ts".to_owned(),
+                server: None,
             },
             csp: Some(CspPolicy::strict().directive("img-src", ["'self'", "data:"])),
             builder_prompt: Some(template(

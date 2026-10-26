@@ -256,6 +256,10 @@ async fn fake_provider(seen: Arc<Mutex<Seen>>) -> String {
             .strip_prefix("Bearer tok:")
             .unwrap_or_default()
             .to_owned();
+        // `silent…` gets no `email_verified` at all, as Microsoft's userinfo.
+        if email.starts_with("silent") {
+            return axum::Json(json!({ "sub": "1", "email": email }));
+        }
         let verified = !email.starts_with("unverified");
         axum::Json(json!({ "sub": "1", "email": email, "email_verified": verified }))
     };
@@ -504,12 +508,64 @@ async fn an_application_and_the_admin_ui_sign_in_with_an_identity_provider() -> 
     let token_request = seen.lock().unwrap().token_requests.last().cloned().unwrap();
     assert_eq!(token_request["grant_type"], "authorization_code");
 
+    // An account a signup made for somebody else's address (security review
+    // #41): the provider's sign-in for that address claims it. Whoever signed
+    // up loses their password and their session, and the address is proven.
+    let squatted = sc_auth::sign_up_user(&catalog, "victim@example.com", "squat-pw", 100).await?;
+    assert!(squatted.email_unproven());
+    let mut squatter = Browser::new(router.clone(), APP_HOST);
+    squatter.send("GET", "/", None).await;
+    let (status, body) = squatter
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "victim@example.com", "password": "squat-pw" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        squatter.whoami().await.as_deref(),
+        Some("victim@example.com")
+    );
+    let mut holder = Browser::new(router.clone(), APP_HOST);
+    let (status, _) = sign_in(&router, &mut holder, &seen, "victim@example.com", "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(holder.whoami().await.as_deref(), Some("victim@example.com"));
+    assert_eq!(
+        squatter.whoami().await,
+        None,
+        "the squatter's session is gone"
+    );
+    let (status, _) = squatter
+        .send(
+            "POST",
+            "/api/login",
+            Some(json!({ "email": "victim@example.com", "password": "squat-pw" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "and so is their password");
+    let claimed = load_user_by_email(&catalog, "victim@example.com")
+        .await?
+        .unwrap();
+    assert_eq!(claimed.id, squatted.id);
+    assert!(!claimed.email_unproven());
+
     // An unverified address is refused, back on the page it started from.
     let mut other = Browser::new(router.clone(), APP_HOST);
     let (_, back) = sign_in(&router, &mut other, &seen, "unverified@example.com", "/x").await;
     assert!(back.unwrap().starts_with("/x?oauth_error="));
     assert!(
         load_user_by_email(&catalog, "unverified@example.com")
+            .await?
+            .is_none()
+    );
+    // So is one the provider does not say it verified, unless the admin
+    // trusts its addresses.
+    let mut other = Browser::new(router.clone(), APP_HOST);
+    let (_, back) = sign_in(&router, &mut other, &seen, "silent@example.com", "/x").await;
+    assert!(back.unwrap().starts_with("/x?oauth_error="));
+    assert!(
+        load_user_by_email(&catalog, "silent@example.com")
             .await?
             .is_none()
     );
@@ -571,6 +627,17 @@ async fn an_application_and_the_admin_ui_sign_in_with_an_identity_provider() -> 
     let (status, _) = sign_in(&router, &mut admin_ui, &seen, ADMIN_EMAIL, "/").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(admin_ui.admin_user().await.as_deref(), Some(ADMIN_EMAIL));
+    // A flow started on a host this server does not serve by name — which
+    // routes to the admin, as any unknown host does — is refused: its
+    // completion token would be sent back there, to whoever runs that host.
+    for forged in ["attacker.example", "evil.com:8080"] {
+        let mut attacker = Browser::new(router.clone(), forged);
+        let (status, _) = attacker
+            .raw("GET", "/_feldspar/oauth/corp/start?return_to=/", None)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{forged}");
+        assert!(!attacker.cookies.contains_key(OAUTH_BINDING_COOKIE));
+    }
     // The admin host does not create accounts, whatever the provider says.
     let mut stranger = Browser::new(router.clone(), BASE_DOMAIN);
     sign_in(&router, &mut stranger, &seen, "stranger@example.com", "/").await;

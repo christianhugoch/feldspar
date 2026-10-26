@@ -338,11 +338,13 @@ pub struct TraitCheck<'a> {
 
 /// Who a run's tools execute as (decision 5).
 ///
-/// Two shapes, and only two: a **user**, which is a chat turn — the person is
-/// there, and every tool is their read or their write — and the **system**, which
-/// is a trigger-started run carrying the trigger's own authority. There is no
-/// third, and in particular no default: [`Run::new`](crate::Run::new) takes one,
-/// so a run that never decided cannot exist.
+/// Three shapes: a **user**, which is a chat turn — the person is there, and
+/// every tool is their read or their write — the **system**, which is a
+/// trigger-started run carrying the trigger's own authority, and an
+/// **anonymous** visitor of an application that exposes an agent to people who
+/// are not signed in, who holds the public role and nothing more. There is no
+/// default: [`Run::new`](crate::Run::new) takes one, so a run that never decided
+/// cannot exist.
 ///
 /// The two fields are what a trait hands to the row layer:
 /// `sc_api::caller_context_at(caller.role, caller.user.as_ref())` is the whole
@@ -350,11 +352,24 @@ pub struct TraitCheck<'a> {
 /// `sc-api` is above this crate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunCaller {
-    /// The user every tool runs as, or `None` for a system run.
+    /// The user every tool runs as, or `None` for a system or anonymous run.
     pub user: Option<User>,
-    /// The role every tool's access is checked at — the user's own, or admin for
-    /// a system run.
+    /// The role every tool's access is checked at — the user's own, admin for
+    /// a system run, public for an anonymous one.
     pub role: u8,
+    /// Whether a trigger started this run ([`RunCaller::triggered`]): it reads
+    /// and writes rows with the trigger's authority, but is never offered the
+    /// tools that act as the server itself — the shell, module installs, the
+    /// project's scripts and checks, the admin copilot.
+    pub triggered: bool,
+    /// Whether this run is a chat with an agent an application exposes
+    /// ([`RunCaller::exposed`], [`RunCaller::anonymous`]). Like a triggered
+    /// run, it keeps its caller's authority over rows but is never offered the
+    /// tools that act as the server: the request came from an application's
+    /// origin, where any script on the page holds the visitor's cookie and
+    /// CSRF token, and an admin signed in to the application is not therefore
+    /// at the admin console (security review #21).
+    pub exposed: bool,
 }
 
 impl RunCaller {
@@ -363,6 +378,18 @@ impl RunCaller {
         RunCaller {
             role: user.role,
             user: Some(user),
+            triggered: false,
+            exposed: false,
+        }
+    }
+
+    /// A chat turn of `user` with an agent an application exposes: the user's
+    /// own authority over rows, without the server's own tools (see
+    /// [`exposed`](Self::exposed)).
+    pub fn exposed(user: User) -> RunCaller {
+        RunCaller {
+            exposed: true,
+            ..RunCaller::user(user)
         }
     }
 
@@ -375,6 +402,70 @@ impl RunCaller {
         RunCaller {
             user: None,
             role: 1,
+            triggered: false,
+            exposed: false,
+        }
+    }
+
+    /// A run a trigger started: [`system`](Self::system)'s authority over rows,
+    /// without the tools that act as the server's operating-system user or
+    /// rewrite the application.
+    ///
+    /// The difference is where the prompt came from. A trigger's prompt is a
+    /// formula over the event — a row somebody inserted, a webhook somebody
+    /// sent — so a run that holds the admin's shell because a trigger started it
+    /// hands the shell to whoever can cause the event, by prompt injection. The
+    /// `run_agent` action makes this one unless its trigger is marked as
+    /// running on trusted input.
+    pub fn triggered() -> RunCaller {
+        RunCaller {
+            triggered: true,
+            ..RunCaller::system()
+        }
+    }
+
+    /// A run for somebody who is not signed in: no user, the public role.
+    ///
+    /// Only an application that exposes an agent with `anonymous` set makes
+    /// one. Every tool then sees exactly what a signed-out request to the same
+    /// table would see, which is the point: being anonymous must not be a way
+    /// to borrow anybody's authority, least of all the system's.
+    pub fn anonymous() -> RunCaller {
+        RunCaller {
+            user: None,
+            role: 100,
+            triggered: false,
+            exposed: true,
+        }
+    }
+
+    /// Whether this is an anonymous visitor's run ([`anonymous`](Self::anonymous)),
+    /// as opposed to a system or triggered one, which also has no user. A tool
+    /// that falls back to a configured account when "nobody is chatting" must
+    /// not fall back for a visitor, who is somebody (security review #20).
+    pub fn is_anonymous(&self) -> bool {
+        self.user.is_none() && self.exposed
+    }
+
+    /// Whether the prompt this run acts on came from outside the admin
+    /// console — an event a trigger fired on, or an application's page — so
+    /// that holding role 1 is not being an administrator at the console. Such a
+    /// run is never offered the tools that act as the server.
+    pub fn untrusted_origin(&self) -> bool {
+        self.triggered || self.exposed
+    }
+
+    /// The trigger chain a write or a trigger run made by one of this run's
+    /// tools carries: empty — a tool call is not a trigger firing — or, for a
+    /// run of [untrusted origin](Self::untrusted_origin), the
+    /// [`UNTRUSTED_ORIGIN`](sc_catalog::UNTRUSTED_ORIGIN) mark, so a
+    /// `trusted_input` trigger the write fires does not hand the server's
+    /// tools back to the prompt that caused it (security review #32).
+    pub fn tool_chain(&self) -> Vec<String> {
+        if self.untrusted_origin() {
+            sc_catalog::untrusted_chain(Vec::new())
+        } else {
+            Vec::new()
         }
     }
 
@@ -649,6 +740,31 @@ mod tests {
         // A trigger's authority reaches everything a role floor could ask for.
         assert!(caller.meets_role(None));
         assert!(caller.meets_role(Some(80)));
+    }
+
+    #[test]
+    fn an_anonymous_run_is_public_with_no_user() {
+        let caller = RunCaller::anonymous();
+        assert_eq!(caller.role, 100);
+        assert!(caller.user.is_none());
+        // Only a floor of public is met: anything signed in is out of reach.
+        assert!(caller.meets_role(Some(100)));
+        assert!(!caller.meets_role(Some(80)));
+        assert!(!caller.meets_role(None));
+        // A visitor is somebody, and not a system run.
+        assert!(caller.is_anonymous() && caller.untrusted_origin());
+        assert!(!RunCaller::system().is_anonymous());
+        assert!(!RunCaller::triggered().is_anonymous());
+        assert!(RunCaller::triggered().untrusted_origin());
+    }
+
+    #[test]
+    fn an_exposed_run_is_its_user_from_an_untrusted_origin() {
+        let admin = User::new(Uuid::new_v4(), 1).unwrap();
+        let caller = RunCaller::exposed(admin.clone());
+        assert_eq!(caller.role, 1);
+        assert!(caller.untrusted_origin() && !caller.is_anonymous());
+        assert!(!RunCaller::user(admin).untrusted_origin());
     }
 
     #[test]
