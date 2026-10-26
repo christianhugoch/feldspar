@@ -6408,6 +6408,7 @@ pub fn admin_handlers_with(
                 if !sc_app::app_target_readiness(&app, &target)?.is_ready() {
                     let hosts = sc_app::list_build_hosts(&catalog).await?;
                     if sc_app::host_for_target(&hosts, &spec.name, chrono::Utc::now()).is_some() {
+                        let _queueing = sc_app::lock_build_queue().await;
                         if let Some(open) = sc_app::latest_build_job(&catalog, id.0, &spec.name)
                             .await?
                             .filter(|j| j.state.is_open())

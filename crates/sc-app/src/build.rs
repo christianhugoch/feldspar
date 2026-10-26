@@ -34,6 +34,7 @@ use tokio::sync::Mutex;
 use crate::api::app_endpoints_with;
 use crate::application::{Application, FrameworkRef};
 use crate::build_cache::build_key;
+use crate::build_hosts::BUILD_TOKEN_ENV;
 use crate::declared::{
     FrameworkDecl, FrameworkSet, TargetRequirement, TargetRequirementKind, TargetSpec,
     installed_frameworks,
@@ -1093,6 +1094,7 @@ pub async fn run_target(spec: &TargetSpec, root: &Path, log_path: &str) -> Resul
     let status = Command::new(&spec.command)
         .args(&spec.args)
         .envs(&spec.env)
+        .env_remove(BUILD_TOKEN_ENV)
         .current_dir(&source_dir)
         .stdout(log.try_clone().with_context(|| log_path.to_owned())?)
         .stderr(log.try_clone().with_context(|| log_path.to_owned())?)
@@ -1480,6 +1482,7 @@ async fn run_install(
     let output = Command::new(&install.command)
         .args(&install.args)
         .envs(env)
+        .env_remove(BUILD_TOKEN_ENV)
         .current_dir(source_dir)
         .output()
         .await
@@ -2321,6 +2324,26 @@ touch ran
             )),
             "{log}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_build_hosts_token_never_reaches_the_build() {
+        let tmp = TempDir::new("targettoken");
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        write_script(
+            &web,
+            "apk.sh",
+            "#!/bin/sh\nset -e\nmkdir -p out\nprintf %s \"${FELDSPAR_BUILD_TOKEN-unset}\" > out/app.apk\n",
+        );
+        // Only this test sets the variable, so no other test can see it change.
+        unsafe { std::env::set_var(BUILD_TOKEN_ENV, "fsbh_secret") };
+
+        run_target(&target_spec("apk.sh"), tmp.path(), LOG)
+            .await
+            .unwrap();
+        let apk = std::fs::read_to_string(web.join("out/app.apk")).unwrap();
+        assert_eq!(apk, "unset");
     }
 
     #[tokio::test]

@@ -108,14 +108,14 @@ pub use build::{
 };
 pub use build_hosts::{
     AgentReport, AnsweredTarget, BUILD_AGENT_PROTOCOL, BUILD_HOST_TOKEN_PREFIX, BUILD_HOSTS_TABLE,
-    BuildHost, HEARTBEAT_SECONDS, ONLINE_SECONDS, add_build_host, answered_targets,
-    authenticate_build_host, bootstrap_build_hosts, check_protocol, delete_build_host,
-    heartbeat_answer, list_build_hosts, record_heartbeat, update_build_host,
+    BUILD_TOKEN_ENV, BuildHost, HEARTBEAT_SECONDS, ONLINE_SECONDS, add_build_host,
+    answered_targets, authenticate_build_host, bootstrap_build_hosts, check_protocol,
+    delete_build_host, heartbeat_answer, list_build_hosts, record_heartbeat, update_build_host,
 };
 pub use build_jobs::{
     BuildJob, JobOutcome, JobState, QueuedJob, claim_build_job, finish_build_job, held_build_job,
-    host_for_target, latest_build_job, queue_build_job, renew_leases, target_spec_from_json,
-    target_spec_json,
+    host_for_target, latest_build_job, lock_build_queue, queue_build_job, renew_leases,
+    target_spec_from_json, target_spec_json,
 };
 pub use builder_agent::{
     BuilderAgentSpec, BuilderTrait, EDIT_FORMAT_AUTO, HTTP_NAME_WEB, TRAIT_CFG_APPLICATION,

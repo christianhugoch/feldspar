@@ -30,7 +30,7 @@ use serde_json::{Value as Json, json};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Where the token is read from when there is no `--token-file`.
-pub const TOKEN_ENV: &str = "FELDSPAR_BUILD_TOKEN";
+pub const TOKEN_ENV: &str = sc_app::BUILD_TOKEN_ENV;
 
 /// What `build-agent` was asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]

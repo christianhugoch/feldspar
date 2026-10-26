@@ -41,6 +41,10 @@ pub const BUILD_HOSTS_TABLE: &str = "_fd_build_hosts";
 /// never mistaken for an API token (`fspk_`).
 pub const BUILD_HOST_TOKEN_PREFIX: &str = "fsbh_";
 
+/// The environment variable an agent can read its token from. Build commands
+/// never see it, so a build script or a package's install hook can't take it.
+pub const BUILD_TOKEN_ENV: &str = "FELDSPAR_BUILD_TOKEN";
+
 /// The version of the conversation between a build agent and this server. An
 /// agent speaking another one is refused with the server's version to install.
 pub const BUILD_AGENT_PROTOCOL: i64 = 1;

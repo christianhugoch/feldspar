@@ -2,6 +2,24 @@
 
 Changes in reverse chronological order.
 
+## Build hosts: no job stays open forever, and no stale result is kept
+
+A review of the build hosts found ways a build could hang or report the wrong result.
+
+- An agent that asks for a new job while the server still counts it as running one lost that job
+  (it gave up after a failed upload, restarted, or never got the answer handing it over). That
+  job now fails at once, saying so. Before, the host's heartbeats kept its lease alive forever and
+  the target could not be built again.
+- A queued job fails once no online build host builds its target, for example when the Mac went
+  offline or was removed before taking it. Before, the admin UI showed "Building…" forever.
+- Two presses of Build at the same moment queue one job, not two (within one server process).
+- An artifact whose upload ends after the job's lease ran out is no longer stored over the last
+  good one. The agent is told why. A failed upload leaves no `.part` file, and an `app.apk` and
+  an `app.ipa` in one folder no longer share one.
+- Build commands and install steps never see `FELDSPAR_BUILD_TOKEN`, so a package's install
+  script can't take the build host's token.
+- The rest of the review is in `TODO-build-hosts.md` (B3.6–B3.18).
+
 ## Build hosts: no secrets over plain http, no signing keys left behind
 
 A job carries the app's build secrets, and an Android job its signing key. The agent now protects

@@ -260,7 +260,20 @@ pub(crate) async fn artifact(
         let app = job_application(&catalog, &job).await?;
         let spec = sc_app::app_target_spec(&app, &job.target)?;
         let path = store_file(&catalog, &app, &spec.artifact)?;
-        let size = receive(body, &path).await?;
+        let (partial, size) = receive(body, &path).await?;
+        // A long upload can outlast the lease. A job that ended meanwhile
+        // keeps the end it has, and the store keeps the artifact it had.
+        if held_job(&state, &headers, &id).await.is_err() {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(sc_error::Error::invalid(
+                "the job ended while its artifact arrived (its lease ran out), so the \
+                 artifact was not stored",
+            ));
+        }
+        if let Err(e) = tokio::fs::rename(&partial, &path).await {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(e.into());
+        }
         let log = store_file(&catalog, &app, &job.log_path)?;
         let outcome = JobOutcome::Succeeded {
             artifact: spec.artifact.clone(),
@@ -394,14 +407,27 @@ async fn append(path: &Path, bytes: &[u8]) -> sc_error::Result<()> {
     Ok(())
 }
 
-/// Write an uploaded body to `path`: into a file beside it first, which takes
-/// its place once the whole of it has arrived. Answers its size.
-async fn receive(body: Body, path: &Path) -> sc_error::Result<u64> {
+/// Write an uploaded body into a file beside `path` (`app.apk.part`), which
+/// the caller moves into its place once it knows the job still wants it.
+/// Answers that file and the size. A failed upload leaves nothing behind.
+async fn receive(body: Body, path: &Path) -> sc_error::Result<(PathBuf, u64)> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
-    let partial = path.with_extension("part");
-    let mut file = tokio::fs::File::create(&partial).await?;
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".part");
+    let partial = path.with_file_name(name);
+    match write_body(body, &partial).await {
+        Ok(size) => Ok((partial, size)),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&partial).await;
+            Err(e)
+        }
+    }
+}
+
+async fn write_body(body: Body, path: &Path) -> sc_error::Result<u64> {
+    let mut file = tokio::fs::File::create(path).await?;
     let mut size = 0u64;
     let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
@@ -409,15 +435,11 @@ async fn receive(body: Body, path: &Path) -> sc_error::Result<u64> {
             chunk.map_err(|e| sc_error::Error::msg(format!("receiving the artifact: {e}")))?;
         size += chunk.len() as u64;
         if size > MAX_ARTIFACT_BYTES {
-            drop(file);
-            let _ = tokio::fs::remove_file(&partial).await;
             return Err(sc_error::Error::invalid("an artifact is at most 4 GiB"));
         }
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
-    drop(file);
-    tokio::fs::rename(&partial, path).await?;
     Ok(size)
 }
 

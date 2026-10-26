@@ -113,6 +113,7 @@ impl FrameworkHost for StubHost {
     }
 }
 
+#[derive(Clone)]
 struct Client {
     router: Router,
     cookies: HashMap<String, String>,
@@ -312,11 +313,15 @@ async fn a_build_host_takes_the_job_and_its_artifact_lands_in_the_store() -> sc_
     assert_eq!(readiness["ready"], json!(true), "{list}");
     assert_eq!(readiness["build_host"], json!("Mac mini"), "{list}");
 
-    // …and the button queues a job, which a second press joins.
-    let (status, queued) = client.send("POST", &build, None).await;
+    // …and the button queues a job, which a second press joins, even one
+    // made at the same moment.
+    let (mut first, mut second) = (client.clone(), client.clone());
+    let ((status, queued), (_, again)) = tokio::join!(
+        first.send("POST", &build, None),
+        second.send("POST", &build, None)
+    );
     assert_eq!(status, StatusCode::OK, "{queued}");
     assert_eq!(queued["status"], json!("queued"), "{queued}");
-    let (_, again) = client.send("POST", &build, None).await;
     assert_eq!(again["started_at"], queued["started_at"], "{again}");
     // The generated code was written before the job was queued.
     let project = dir.0.join("site");
@@ -352,10 +357,6 @@ async fn a_build_host_takes_the_job_and_its_artifact_lands_in_the_store() -> sc_
         json!("site/remote-output/app.bin")
     );
     let job = claimed["job"].as_str().unwrap().to_owned();
-    let (status, _) = client
-        .agent(&token, "POST", "/build-agent/claim", Vec::new())
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "the job is taken");
     let (_, running) = client.send("GET", &build, None).await;
     assert_eq!(running["status"], json!("running"), "{running}");
     assert_eq!(running["build_host"], json!("Mac mini"), "{running}");
@@ -533,6 +534,69 @@ async fn a_job_fails_with_the_hosts_reason_or_when_the_host_stops_answering() ->
             .unwrap_or_default()
             .contains("`Mac mini` stopped answering"),
         "{lost}"
+    );
+
+    // An artifact that finishes arriving after the lease ran out is not
+    // stored: the job keeps its end, and no part file is left behind.
+    client.send("POST", &build, None).await;
+    let (_, claimed) = client
+        .agent(&token, "POST", "/build-agent/claim", Vec::new())
+        .await;
+    let job = json_of(&claimed)["job"].as_str().unwrap().to_owned();
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::io::Error>>();
+    let upload = Request::builder()
+        .method("POST")
+        .uri(format!("/build-agent/jobs/{job}/artifact"))
+        .header(header::HOST, BASE_DOMAIN)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from_stream(rx))
+        .unwrap();
+    let uploading = tokio::spawn(client.router.clone().oneshot(upload));
+    tx.unbounded_send(Ok(b"half".to_vec())).unwrap();
+    let artifact = dir.0.join("site/remote-output/app.bin");
+    let partial = dir.0.join("site/remote-output/app.bin.part");
+    for _ in 0..500 {
+        if partial.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(partial.exists(), "the upload never started");
+    db.client()
+        .await?
+        .batch_execute(
+            "UPDATE _fd_build_jobs SET lease_until = now() - interval '1 minute' \
+             WHERE state = 'running'",
+        )
+        .await
+        .map_err(|e| sc_error::Error::database(e.to_string()))?;
+    tx.unbounded_send(Ok(b" more".to_vec())).unwrap();
+    drop(tx);
+    let response = uploading.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(!artifact.exists() && !partial.exists());
+    let (_, late) = client.send("GET", &build, None).await;
+    assert_eq!(late["status"], json!("failed"), "{late}");
+
+    // An agent that asks for a new job while one is still running for it lost
+    // that one: it fails at once, though the heartbeats keep the lease fresh.
+    client.send("POST", &build, None).await;
+    client
+        .agent(&token, "POST", "/build-agent/claim", Vec::new())
+        .await;
+    client.heartbeat_ready(&token).await;
+    let (status, _) = client
+        .agent(&token, "POST", "/build-agent/claim", Vec::new())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, dropped) = client.send("GET", &build, None).await;
+    assert_eq!(dropped["status"], json!("failed"), "{dropped}");
+    assert!(
+        dropped["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`Mac mini` dropped the build"),
+        "{dropped}"
     );
     Ok(())
 }

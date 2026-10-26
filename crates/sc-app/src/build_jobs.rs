@@ -22,7 +22,7 @@ use sc_types::{BasicType, TypeRef};
 use serde_json::{Value as Json, json};
 use uuid::Uuid;
 
-use crate::build_hosts::{BuildHost, ONLINE_SECONDS};
+use crate::build_hosts::{BuildHost, ONLINE_SECONDS, list_build_hosts};
 use crate::declared::{TargetSpec, requires_json, target_requires};
 use crate::framework::InstallSpec;
 
@@ -165,6 +165,18 @@ pub struct QueuedJob<'a> {
     pub log_path: &'a str,
 }
 
+/// Held while a build is queued, from looking for an open job to inserting the
+/// new one, so two presses of Build at once queue one job, not two. It guards
+/// this server process only.
+static QUEUEING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Wait for any other request that is queueing a job, then block the next ones
+/// until the returned guard is dropped. Hold it while checking for an open
+/// job, preparing the project and calling [`queue_build_job`].
+pub async fn lock_build_queue() -> tokio::sync::MutexGuard<'static, ()> {
+    QUEUEING.lock().await
+}
+
 /// Queue a build of `job.target` for a build host, unless one is already queued
 /// or running for the same application and target: then that one is answered,
 /// as a second press of a local build's button joins the running build.
@@ -248,8 +260,14 @@ pub async fn latest_build_job(
 ///
 /// Two agents asking at once never get the same job: only a job that is still
 /// queued can be taken, so the slower agent moves on to the next one.
+///
+/// An agent builds one job at a time, so when it asks for another, any job it
+/// is still running was lost: it gave up on it, restarted, or never heard the
+/// answer that handed it over. That job fails now, rather than being kept alive
+/// by the host's heartbeats forever.
 pub async fn claim_build_job(catalog: &Catalog, host: &BuildHost) -> Result<Option<BuildJob>> {
     expire_leases(catalog).await?;
+    drop_lost_jobs(catalog, host).await?;
     let select = Select::from(Source::table(BUILD_JOBS_TABLE))
         .filter(Expr::col(COL_STATE).eq(Expr::lit(JobState::Queued.as_str().to_owned())));
     let mut queued: Vec<BuildJob> = jobs(catalog, select)
@@ -286,6 +304,28 @@ pub async fn claim_build_job(catalog: &Catalog, host: &BuildHost) -> Result<Opti
         }
     }
     Ok(None)
+}
+
+/// Fail every job `host` is running: it asked for a new one, so it lost them.
+async fn drop_lost_jobs(catalog: &Catalog, host: &BuildHost) -> Result<()> {
+    let select = Select::from(Source::table(BUILD_JOBS_TABLE)).filter(
+        Expr::col(COL_HOST)
+            .eq(Expr::lit(host.id))
+            .and(Expr::col(COL_STATE).eq(Expr::lit(JobState::Running.as_str().to_owned()))),
+    );
+    for job in jobs(catalog, select).await? {
+        finish_build_job(
+            catalog,
+            job.id,
+            JobOutcome::Failed(format!(
+                "the build host `{}` dropped the build of the {}: its agent restarted or lost \
+                 touch with this server mid-build. Build again.",
+                host.name, job.label
+            )),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Running job `id`, if `host` is the one building it. Returns `None` for
@@ -337,6 +377,11 @@ pub enum JobOutcome {
 /// Record how running job `id` ended. A job that is no longer running (its
 /// lease ran out first) keeps the end it already has.
 pub async fn finish_build_job(catalog: &Catalog, id: Uuid, outcome: JobOutcome) -> Result<()> {
+    end_job(catalog, id, JobState::Running, outcome).await
+}
+
+/// End job `id` with `outcome`, if it is still in state `from`.
+async fn end_job(catalog: &Catalog, id: Uuid, from: JobState, outcome: JobOutcome) -> Result<()> {
     let mut assignments = vec![set(COL_FINISHED_AT, Value::Timestamp(Utc::now()))];
     match outcome {
         JobOutcome::Succeeded {
@@ -363,14 +408,18 @@ pub async fn finish_build_job(catalog: &Catalog, id: Uuid, outcome: JobOutcome) 
     let update = Update::new(BUILD_JOBS_TABLE, assignments).filter(
         Expr::col(COL_ID)
             .eq(Expr::lit(id))
-            .and(Expr::col(COL_STATE).eq(Expr::lit(JobState::Running.as_str().to_owned()))),
+            .and(Expr::col(COL_STATE).eq(Expr::lit(from.as_str().to_owned()))),
     );
     rows(catalog, Statement::from(update)).await?;
     Ok(())
 }
 
-/// Fail every running job whose lease has run out: its build host stopped
-/// answering. Asked whenever jobs are read, so nothing has to watch the clock.
+/// Fail every job no build host will finish, so none stays open forever:
+/// - a running job whose lease has run out: its build host stopped answering;
+/// - a queued job no online host builds: the host it was queued for went
+///   offline, or was removed, before it took the job.
+///
+/// Asked whenever jobs are read, so nothing has to watch the clock.
 pub async fn expire_leases(catalog: &Catalog) -> Result<()> {
     let select = Select::from(Source::table(BUILD_JOBS_TABLE))
         .filter(Expr::col(COL_STATE).eq(Expr::lit(JobState::Running.as_str().to_owned())));
@@ -386,6 +435,33 @@ pub async fn expire_leases(catalog: &Catalog) -> Result<()> {
             JobOutcome::Failed(format!(
                 "the build host `{host}` stopped answering while it built the {}, so the \
                  build was given up. Check that its agent is running, then build again.",
+                job.label
+            )),
+        )
+        .await?;
+    }
+    let select = Select::from(Source::table(BUILD_JOBS_TABLE))
+        .filter(Expr::col(COL_STATE).eq(Expr::lit(JobState::Queued.as_str().to_owned())));
+    let queued = jobs(catalog, select).await?;
+    if queued.is_empty() {
+        return Ok(());
+    }
+    let hosts = list_build_hosts(catalog).await?;
+    for job in queued {
+        let taken_up = hosts
+            .iter()
+            .any(|host| host.is_online(now) && host.targets.contains(&job.target));
+        if taken_up {
+            continue;
+        }
+        end_job(
+            catalog,
+            job.id,
+            JobState::Queued,
+            JobOutcome::Failed(format!(
+                "no build host that builds the {} is online any more, so the build was \
+                 given up before it started. Start the agent on the build host, then build \
+                 again.",
                 job.label
             )),
         )

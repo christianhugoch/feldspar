@@ -18,7 +18,7 @@ use sc_app::{
 };
 use sc_auth::SessionStore;
 use sc_catalog::{Catalog, FileStoreId};
-use sc_cli::build_agent::{Built, Worker};
+use sc_cli::build_agent::{Agent, Built, Worker};
 use sc_db::DatabaseDriver;
 use sc_db_postgres::PgDriver;
 use sc_expr::Template;
@@ -157,6 +157,11 @@ async fn the_agent_builds_a_claimed_job_and_sends_the_artifact_home() -> sc_erro
     });
 
     let (_, token) = sc_app::add_build_host(&catalog, "Mac mini", &["bundle".into()]).await?;
+    // Online, so the job waits for it rather than being given up.
+    Agent::new(&server, token.clone())?
+        .heartbeat()
+        .await
+        .expect("the server answers");
     let queued = sc_app::queue_build_job(
         &catalog,
         QueuedJob {
