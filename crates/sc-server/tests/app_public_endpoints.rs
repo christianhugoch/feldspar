@@ -593,11 +593,13 @@ async fn a_public_trigger_runs_for_anybody_as_nobody() -> sc_error::Result<()> {
     Ok(())
 }
 
-/// The exemption is not a hole: a session without the token lends a request no
-/// authority. On a public endpoint it runs as nobody; anywhere stricter it is
-/// refused, as it always was.
+/// The exemption is not a hole, and does not anonymise a signed-in user: a
+/// request carrying a session but not its token — a stale token in an old
+/// tab — is refused with 403 and the token, on a public endpoint as anywhere
+/// stricter, so the client retries as the user. Without a session cookie the
+/// same request is anybody's.
 #[tokio::test]
-async fn a_session_without_the_token_is_served_as_nobody() -> sc_error::Result<()> {
+async fn a_session_with_a_stale_token_is_refused_not_anonymised() -> sc_error::Result<()> {
     let server = setup().await?;
     let r = &server.router;
     let (session, csrf) = server.editor_session().await;
@@ -618,29 +620,31 @@ async fn a_session_without_the_token_is_served_as_nobody() -> sc_error::Result<(
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    // Without it — what a cross-site form would send — the call still runs, but
-    // as nobody: the session cookie rode along and was not read.
-    let (status, body, set) = send(
-        r,
-        "POST",
-        "/api/actions/sign",
-        Some(json!({ "message": "forged" })),
-        &jar,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        server.guestbook().await,
-        vec![
-            ("signed".to_owned(), Some(EDITOR.to_owned())),
-            ("forged".to_owned(), None),
-        ]
-    );
-    // Nor did it touch the session.
-    assert_eq!(cookie(&set, SESSION_COOKIE), None, "{set:?}");
+    // A stale token, or none, on the public trigger and the public query alike:
+    // refused before anything runs, not run as nobody.
+    for token in [Some("stale-token"), None] {
+        let (status, body, set) = send(
+            r,
+            "POST",
+            "/api/actions/sign",
+            Some(json!({ "message": "as nobody" })),
+            &jar,
+            token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.to_string().contains("CSRF"), "{body}");
+        assert_eq!(cookie(&set, SESSION_COOKIE), None, "{set:?}");
+        let (status, body, _) = send(r, "POST", "/api/stats/latest", None, &jar, token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+    assert_eq!(server.guestbook().await.len(), 1);
 
-    // The editor's own trigger, without the token: refused before it runs.
+    // Retried with the cookie's token, the query is the editor's.
+    let (status, body, _) = send(r, "POST", "/api/stats/latest", None, &jar, Some(&csrf)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The editor's own trigger, without the token: refused, as it always was.
     let (status, body, _) = send(
         r,
         "POST",
@@ -651,8 +655,25 @@ async fn a_session_without_the_token_is_served_as_nobody() -> sc_error::Result<(
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(body.to_string().contains("CSRF"), "{body}");
-    assert_eq!(server.guestbook().await.len(), 2);
+
+    // With no session cookie, the public trigger is anybody's, token or not.
+    let (status, body, _) = send(
+        r,
+        "POST",
+        "/api/actions/sign",
+        Some(json!({ "message": "guest" })),
+        &[(CSRF_COOKIE, csrf.as_str())],
+        Some("stale-token"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        server.guestbook().await,
+        vec![
+            ("signed".to_owned(), Some(EDITOR.to_owned())),
+            ("guest".to_owned(), None),
+        ]
+    );
 
     // And the session survived it all.
     let (status, body, _) = send(r, "GET", "/api/whoami", None, &jar, None).await;

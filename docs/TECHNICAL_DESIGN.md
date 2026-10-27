@@ -1130,10 +1130,13 @@ so a `min_role` of 100 — on a table operation, an application's custom query o
 trigger — admits them: no login, no session, and no CSRF token. It does not mean "a logged-in
 user whose role is 100". `AuthRequirement::admits` states the rule once, and the REST
 provider, the admin dispatcher and the MCP endpoint tools all ask it. A mutating request to
-such an endpoint that fails the CSRF check is not refused; it is served as the anonymous caller
-it then is. Its session cookie is not read, and no session is started or ended, so a
-cross-site page that makes the browser send the cookie gets nothing an anonymous caller would
-not. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
+such an endpoint that fails the CSRF check and carries **no session cookie** is not refused; it
+is served as the anonymous caller it then is, and no session is started. One that carries a
+session cookie but no valid token (a stale token in an old tab, a native app that lost its token)
+is refused with 403 and handed the token, as a protected endpoint would refuse it. Its client
+retries as the signed-in user instead of silently running as nobody (a 401 from a query the user
+can plainly see). The session cookie is `SameSite=Strict`, so a cross-site page cannot make the
+browser send it in the first place. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
 `signup`, …) and an application's own UI pages.
 
 **One language, parsed once, evaluated two ways.** The formula lives in the `sc-expr` crate
@@ -5010,10 +5013,12 @@ is the admin socket's rule for a closed connection. A turn that keeps running fo
 has gone, and can be rejoined later, is left for when it is needed. It would need the turn detached
 from the request, plus the message bus to rejoin it from another node.
 
-**Whose a run is.** A run started here carries `attributes.app`, `attributes.app_mode` (`chat` |
-`prompt`) and `attributes.owner`. The owner is `user:<id>`, or for an anonymous caller a hash of
-the browser's cookie, as an upload's uploader is. Only the owner, in the same application and
-mode, sees a run through these routes. Anybody else gets the 404 a missing run gets. Prompt runs are
+**Whose a run is.** A run started here carries `attributes.app_mode` (`chat` | `prompt`) and
+`attributes.owner`. The owner is `user:<id>`, or for an anonymous caller a hash of the browser's
+cookie, as an upload's uploader is. A run belongs to its owner and its agent, not to the
+application it was started in: any application that exposes the agent lists, reads, continues,
+renames and deletes the owner's runs, so a chat panel can follow a user across a suite of
+applications. Only the owner, in the same mode, sees a run through these routes. Anybody else gets the 404 a missing run gets. Prompt runs are
 kept for audit and are never listed as conversations. A turn may not start, and a run may not be
 renamed or deleted, while the run is `running` (409): the turn writes the row after every step and
 would undo the change. Deleting or renaming an agent that an application exposes is refused, naming

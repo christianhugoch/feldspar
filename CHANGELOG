@@ -2,6 +2,42 @@
 
 Changes in reverse chronological order.
 
+## A signed-in caller with a stale CSRF token is refused, not served as anonymous
+
+A mutating request to an endpoint open to the public role (`min_role` 100) that failed the CSRF
+check used to run as the anonymous caller. When the browser was signed in but held a stale token,
+for example in an old tab, a public query answered 401 while a protected one answered 403. The
+client could recover from the 403 but not from the 401. Now any request that carries a session
+cookie but no valid token gets the 403 refusal, which names the current token, so the client
+retries as the signed-in user. Before, only native apps got this. A request with no session cookie
+is still served as anybody, token or not. The session cookie is `SameSite=Strict`, so a
+cross-site page could never make the browser send it. Refusing is no looser than anonymising.
+
+- `sc-server/src/security.rs` (`csrf_middleware`): the `signed_in_native` exception is now
+  `signed_in`, any request carrying `sc_session`.
+- `TECHNICAL_DESIGN.md` §7.3 ("The public role is everybody") updated.
+- Test: `app_public_endpoints::a_session_without_the_token_is_served_as_nobody` became
+  `a_session_with_a_stale_token_is_refused_not_anonymised`. A stale or missing token on the public
+  trigger and the public query is 403 with nothing written. A retry with the cookie's token
+  succeeds, and the same request with no session cookie still runs as anybody.
+
+## Agent conversations belong to the user and the agent, not the application
+
+A chat run started through an application's `/api/_agents/{name}/…` routes no longer records
+`attributes.app`, and ownership no longer checks it. Any application exposing the same agent now
+lists, reads, continues, renames and deletes the user's conversations with it, so a chat panel
+that follows the user across a suite of applications keeps the conversation. Ownership is still the
+agent (`subject`), the mode (`app_mode`: `chat` | `prompt`), the owner (`user:<id>` or the
+anonymous cookie hash) and `user_id`. Another user still gets 404.
+
+- `sc-server/src/app_agents.rs`: dropped `ATTR_APP` from `AgentCtx::owns` and `claim`. Turn
+  slots and rate limits are still per application.
+- `TECHNICAL_DESIGN.md` §"Whose a run is" updated.
+- Test: `app_agents::a_conversation_follows_its_owner_to_every_application_exposing_the_agent`
+  mounts a second application exposing `helpdesk`. Alice lists, reads, continues and deletes a
+  conversation from the shop there, and Bob gets 404.
+- Existing runs keep the stale `attributes.app` key. It is ignored, so no migration is needed.
+
 ## `feldspar backup -` streams the backup to stdout
 
 `feldspar backup -` (the Unix convention for "stdout" in place of a file) writes the zip
