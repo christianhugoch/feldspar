@@ -150,19 +150,21 @@ pub fn is_api_hidden_column(table: &str, column: &str) -> bool {
 /// constraint any database will accept. It also means the two built-in roles
 /// exist before the first user can be created with one.
 ///
-/// Idempotent: if a `users` table is already present in the catalog it is
-/// returned unchanged (the MVP performs no schema reconciliation on an existing
-/// table). A database that predates the roles table therefore **gains
-/// `_fd_roles` but keeps its unconstrained `role` column** — per GOALS, early
-/// development evolves the initial setup rather than running migrations, so the
-/// constraint arrives with the next database rather than being retrofitted onto
-/// this one. Call this once at startup after the [`Catalog`] is initialised.
+/// Idempotent, and **additively reconciled**
+/// ([`Catalog::bootstrap_table`]): a declared column an existing `users` table
+/// lacks is created, which is how [`COL_EMAIL_VERIFIED`] reaches a database
+/// made before it — without it every redeemed link and every signup fails. A
+/// column that exists is left as it is, so a database that predates the roles
+/// table **gains `_fd_roles` but keeps its unconstrained `role` column**: per
+/// GOALS, early development evolves the initial setup rather than running
+/// migrations, so the constraint arrives with the next database rather than
+/// being retrofitted onto this one. Call this once at startup after the
+/// [`Catalog`] is initialised.
 pub async fn bootstrap(catalog: &Catalog) -> Result<Table> {
     crate::roles::bootstrap_roles(catalog).await?;
-    let users = match catalog.get(USERS_TABLE)? {
-        Some(existing) => existing,
-        None => catalog.create_table(USERS_TABLE, &users_fields()).await?,
-    };
+    let users = catalog
+        .bootstrap_table(USERS_TABLE, &users_fields())
+        .await?;
     // Last, and that order is load-bearing too: a session names a user, and so
     // does an API token (§13.6), and so does a password token.
     crate::session::bootstrap_sessions(catalog).await?;

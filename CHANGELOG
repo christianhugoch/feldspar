@@ -2,6 +2,29 @@
 
 Changes in reverse chronological order.
 
+## `users.email_verified` added at startup; password links redeemed in one transaction
+
+A production instance upgraded on 2026-10-26 without running the `users.email_verified` line of
+`TABLES_RENAME.sql` (security review #41). There, `POST /api/set-password` returned a 500 for
+every invite and reset link. Worse, the failure was only half a failure. `redeem_password_token`
+deleted the token, then wrote the new password hash, and only then failed on `email_verified`. The
+holder saw an error, had in fact got the new password, and could not retry the link.
+
+- `redeem_password_token` now runs its writes in one `SharedTx`: spend the token, set
+  `password_hash` and `email_verified` in a **single** `UPDATE`, delete the user's other tokens,
+  and commit. A failed write rolls everything back, so the link still works once the cause is
+  fixed. Sessions are still ended after the commit, as before.
+- `manage::mark_email_proven` is gone; that `UPDATE` was its only caller.
+- `sc_auth::bootstrap` now creates the `users` table with `Catalog::bootstrap_table`, as the
+  `_fd_*` tables already do. A declared column an existing `users` table lacks is added at
+  startup, so `email_verified` reaches old databases with no manual step. Columns that exist are
+  left as they are, including the unconstrained `role` of a database older than `_fd_roles`. The
+  `TABLES_RENAME.sql` line stays, marked "(Bootstrap adds it too.)".
+- Test: `db_password_tokens::a_failed_redemption_leaves_the_token_and_the_password_as_they_were`
+  drops the column and checks that a redemption fails and changes nothing. It then starts a fresh
+  catalog and bootstrap, as a restart would, checks that the column is back, and redeems the same
+  link.
+
 ## Test suite green again: drifted docs, a v1 table name, and unreadable i18n call sites
 
 A full `cargo test --workspace` failed only in `sc-cli`'s `it` target (four hygiene checks), and

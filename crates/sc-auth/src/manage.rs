@@ -163,17 +163,6 @@ pub async fn set_user_password(catalog: &Catalog, id: Uuid, password: &str) -> R
     .await
 }
 
-/// Record that the holder of `id`'s address has proven it — by redeeming a
-/// link sent there, or by an identity provider vouching for it.
-pub(crate) async fn mark_email_proven(catalog: &Catalog, id: Uuid) -> Result<User> {
-    write(
-        catalog,
-        id,
-        vec![Assignment::new(COL_EMAIL_VERIFIED, Expr::lit(true))],
-    )
-    .await
-}
-
 /// Hand an account whose address was never proven
 /// ([`User::email_unproven`]) to somebody who has just proven it — an
 /// identity provider's sign-in for that address (security review #41).
