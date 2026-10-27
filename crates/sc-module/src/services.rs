@@ -452,6 +452,7 @@ async fn serve_once(
         roles: Some(&roles),
         credits: Some(&credits),
         oauth: None,
+        system: None,
     };
     let run = shared.host.run_service(module, service, call);
     tokio::pin!(run);

@@ -2,6 +2,48 @@
 
 Changes in reverse chronological order.
 
+## v1 plugin routes, served on the admin host (`@saltcorn/heartbeat-monitor` runs)
+
+A v1 plugin's `routes` export now loads, and each route is served on the admin host at
+`/_feldspar/routes/<module><url>`. For example, `@saltcorn/heartbeat-monitor` serves
+`/_feldspar/routes/heartbeat-monitor/heartbeat`. Routes are served only there, never on an
+application's host. A route runs as whoever calls: an API token's user (`Authorization: Bearer`),
+else the admin host's session, else nobody. v1's `apiToken` (nobody gets a 401) and `noCsrf` (a
+`POST` needs no CSRF token) are enforced by the server. The module card lists each route's URL.
+Payments stays on module webhooks: its callbacks need the raw body, no session, and the module's
+own authority, which a route does not give.
+
+- `sc-module`: `routes` key, `RouteManifest`, `route_call` with an Express-shaped `req`/`res`
+  (`module-host.mjs`), `routes.rs` (`route_path`, `route_module`, `match_route`, `run_route`), and
+  a `system` ask surface (`SystemAsks`) carried only by a route's call.
+- The host answers `require("systeminformation")` (`fsSize`, `mem` and `currentLoad`, from
+  `statvfs` and `/proc`), v1's `EventLog.find` (the server's startups) and `MetaData.find`
+  (successful automated backups). A route's `getState().getConfig("auto_backup_frequency")` is
+  the most frequent backup schedule's.
+- `sc-server`: `module_routes.rs` (route, caller, rate limit, body cap, `no_csrf_route` for the
+  CSRF layer, `SystemFacts`). Every boot now records its time in the internal config key
+  `startup_history`, keeping 7 days. Adds a `libc` dependency, for `statvfs`.
+- Admin API: the module card has `routes: [{ method, url, path }]`, and the Modules tab shows
+  them.
+- `TECHNICAL_DESIGN.md` §15.1g.
+- The plugin itself (`saltcorn/heartbeat-monitor` 0.2.0, released separately):
+  - the callback is Express's `(req, res)`; `({ res }, { req })` only worked through Express's
+    back-references;
+  - startups are filtered to the last 24 hours in the query rather than all read;
+  - the thresholds and `min_role` (now admin by default) apply before the settings are saved;
+    an unsaved module used to compare against `undefined` and report a full disk as `ok`;
+  - `Monthly` backups are known;
+  - a 500 no longer returns the stack trace;
+  - the README says how to call it on Feldspar.
+- Tests:
+  - `module_routes::a_modules_routes_are_served_on_the_admin_host_as_whoever_calls` (fixture
+    `route-module`): session, nobody and token callers; not served on an application's host;
+    `noCsrf` and CSRF; `apiToken`; `:param` and JSON body; an answer from an unreturned promise;
+    a throw; `res.render` named; 405 and 404.
+  - `module_routes::a_route_reads_the_machine_the_startups_and_the_backups`.
+  - Unit tests for matching, `req.user`, `/proc` parsing and `statvfs`.
+  - The real plugin was also checked by hand: public refused, token answered.
+
 ## A signed-in caller with a stale CSRF token is refused, not served as anonymous
 
 A mutating request to an endpoint open to the public role (`min_role` 100) that failed the CSRF

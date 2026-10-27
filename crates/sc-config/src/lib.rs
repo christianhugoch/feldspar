@@ -57,7 +57,8 @@ pub use authentication::{
 };
 pub use defs::{
     BACKUP_INCLUDE, BACKUP_SCHEDULE_STATUS, BACKUP_SCHEDULES, ConfigDef, ConfigSection,
-    DEFAULT_LLM_PROVIDER, config_sections, config_spec, definition, internal_defs, known_keys,
+    DEFAULT_LLM_PROVIDER, STARTUP_HISTORY, STARTUP_HISTORY_DAYS, config_sections, config_spec,
+    definition, internal_defs, known_keys,
 };
 pub use development::{
     ADMIN_SUBDOMAIN, DevelopmentSettings, LOG_SQL, LOG_VERBOSITY, MCP_ENABLED, MCP_LOOPBACK_ONLY,

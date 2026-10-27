@@ -9792,6 +9792,25 @@ fn module_json(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
+        // The v1 routes it serves, each with its path on the admin host —
+        // where they are served, so the tab puts its own origin in front.
+        "routes": loaded
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .routes
+                    .iter()
+                    .map(|route| {
+                        json!({
+                            "method": route.method,
+                            "url": route.url,
+                            "path": sc_module::route_path(&module.name, &route.url),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         // And the model providers, for the same reason: installing
         // `feldspar-sklearn` gets an admin five estimators on the model form,
         // and the tab is where they find that out.

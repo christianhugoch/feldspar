@@ -45,6 +45,17 @@ use crate::agents::AgentServices;
 
 /// The module machinery a running server holds: the npm project, the Python
 /// environment, the worker pool modules run on, and the loaded set.
+/// What a request to a module's route reaches ([`ModuleServices::route_lookup`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteLookup {
+    /// No module's route is there.
+    NotFound,
+    /// A route is there, but not for this method; these are.
+    MethodNotAllowed(Vec<String>),
+    /// This route.
+    Found(sc_module::RouteManifest),
+}
+
 pub struct ModuleServices {
     catalog: Arc<Catalog>,
     dispatcher: Arc<TriggerDispatcher>,
@@ -545,6 +556,68 @@ impl ModuleServices {
             loaded,
             name,
             request,
+        )
+        .await
+        .map(Some)
+    }
+
+    /// What a request to `/_feldspar/routes/<segment><path>` reaches: the
+    /// route's flags, the methods there are when none is `method`, or nothing.
+    pub fn route_lookup(&self, segment: &str, method: &str, path: &str) -> Result<RouteLookup> {
+        let set = self.modules();
+        let Some(loaded) = sc_module::route_module(&set, segment)? else {
+            return Ok(RouteLookup::NotFound);
+        };
+        let routes = loaded
+            .manifest
+            .as_ref()
+            .map(|m| m.routes.as_slice())
+            .unwrap_or_default();
+        Ok(match sc_module::match_route(routes, method, path) {
+            Some(matched) => RouteLookup::Found(matched.route.clone()),
+            None => match sc_module::allowed_methods(routes, path) {
+                allowed if allowed.is_empty() => RouteLookup::NotFound,
+                allowed => RouteLookup::MethodNotAllowed(allowed),
+            },
+        })
+    }
+
+    /// Run the route of the module `segment` addresses that `request` reaches,
+    /// as `caller` (v1's `routes`). `Ok(None)` when none does.
+    pub async fn route(
+        &self,
+        segment: &str,
+        request: sc_module::RouteRequest,
+        caller: &sc_module::RouteCaller,
+    ) -> Result<Option<sc_module::WebhookResponse>> {
+        let set = self.modules();
+        let Some(loaded) = sc_module::route_module(&set, segment)? else {
+            return Ok(None);
+        };
+        let routes = loaded
+            .manifest
+            .as_ref()
+            .map(|m| m.routes.as_slice())
+            .unwrap_or_default();
+        let path = format!("/{}", request.request.rest);
+        let Some(matched) = sc_module::match_route(routes, &request.request.method, &path) else {
+            return Ok(None);
+        };
+        let system = crate::module_routes::SystemFacts {
+            catalog: &self.catalog,
+            data_dir: self.host.root(),
+        };
+        let installation = crate::module_routes::installation(&self.catalog).await;
+        sc_module::run_route(
+            &self.catalog,
+            &self.host,
+            Some(&self.dispatcher),
+            loaded,
+            &matched,
+            request,
+            caller,
+            &system,
+            installation,
         )
         .await
         .map(Some)

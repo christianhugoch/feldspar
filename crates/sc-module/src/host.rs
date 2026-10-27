@@ -83,6 +83,10 @@ pub struct CallHosts<'a> {
     /// An action's `oauth.begin(…)` (TODO-imap M10.3): the `oauth` surface, a
     /// [`crate::consent::ConsentAsks`] for the action's module and caller.
     pub oauth: Option<&'a dyn OAuthAsks>,
+    /// What a module's **route** reads of the installation and the machine it
+    /// runs on — the `system` surface ([`SystemAsks`]), which only a route's
+    /// call carries.
+    pub system: Option<&'a dyn SystemAsks>,
 }
 
 /// The `roles` ask surface: `{ op: "grant" | "revoke" | "get", … }`, answered
@@ -124,6 +128,16 @@ pub trait OAuthAsks: Send + Sync {
     async fn ask(&self, plan: Json) -> Result<Json>;
 }
 
+/// The `system` ask surface: `{ op }` for one fact about the installation or
+/// the machine — `fs_size`, `mem` and `current_load` in the `systeminformation`
+/// package's shapes, `events` (v1's `EventLog` rows) and `metadata` (v1's
+/// `MetaData` rows). Implemented by the server, which knows where each is kept.
+#[async_trait::async_trait]
+pub trait SystemAsks: Send + Sync {
+    /// Answer one ask.
+    async fn ask(&self, plan: Json) -> Result<Json>;
+}
+
 impl<'a> CallHosts<'a> {
     /// The surfaces and the schema of one run, as
     /// `sc_core_actions::code_body::Hosts` supplies them.
@@ -138,6 +152,7 @@ impl<'a> CallHosts<'a> {
             roles: None,
             credits: None,
             oauth: None,
+            system: None,
         }
     }
 
@@ -556,6 +571,25 @@ pub struct WebhookManifest {
     pub methods: Vec<String>,
 }
 
+/// One of v1's `routes` a module serves: a URL on the admin host under
+/// `/_feldspar/routes/<module>` ([`crate::routes`]).
+///
+/// The callback stays in the worker; each request is one
+/// [`ModuleHost::run_route`] call.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RouteManifest {
+    /// `GET` or `POST`.
+    pub method: String,
+    /// The path as v1 declared it: literal segments and `:param`s.
+    pub url: String,
+    /// v1's `apiToken`: the caller must present an API token.
+    #[serde(default)]
+    pub api_token: bool,
+    /// v1's `noCsrf`: a `POST` needs no CSRF token.
+    #[serde(default)]
+    pub no_csrf: bool,
+}
+
 fn post_only() -> Vec<String> {
     vec!["POST".to_owned()]
 }
@@ -639,6 +673,10 @@ pub struct ModuleManifest {
     /// `POST /_feldspar/hooks/<module>/<name>`.
     #[serde(default)]
     pub webhooks: Vec<WebhookManifest>,
+    /// v1's `routes`: URLs it serves on the admin host, under
+    /// `/_feldspar/routes/<module>` ([`crate::routes`]).
+    #[serde(default)]
+    pub routes: Vec<RouteManifest>,
     /// The application tables it asks to read (TODO-payments P4.1) — admitted
     /// only where its stored configuration names them ([`crate::reads`]).
     #[serde(default)]
@@ -932,6 +970,29 @@ impl ModuleHost {
         #[cfg(not(feature = "deno-host"))]
         {
             let _ = (module, webhook, request, call);
+            Err(no_runtime())
+        }
+    }
+
+    /// Run one of v1's **routes** of one module: call its `callback(req, res,
+    /// next)` for `request` — the route it matched (`route`: `{ method, url }`),
+    /// its `params`, and `{ path, base, query, headers, body, ip, user }`, the
+    /// body base64 — and answer `{ status, headers, body }`, the body base64.
+    ///
+    /// Bounded like an action: the call's wall clock and its budget of asks.
+    pub async fn run_route(
+        &self,
+        module: &str,
+        request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        #[cfg(feature = "deno-host")]
+        {
+            self.pool.run_route(module, request, call).await
+        }
+        #[cfg(not(feature = "deno-host"))]
+        {
+            let _ = (module, request, call);
             Err(no_runtime())
         }
     }

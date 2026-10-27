@@ -9614,6 +9614,7 @@ dependencies = [
  "csv",
  "flate2",
  "futures",
+ "libc",
  "matchit",
  "rcgen",
  "regex-lite",

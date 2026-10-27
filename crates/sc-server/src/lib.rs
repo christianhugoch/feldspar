@@ -50,6 +50,7 @@ mod lsp;
 mod mcp;
 mod mcp_servers;
 mod models;
+mod module_routes;
 mod modules;
 mod oauth;
 mod observe;

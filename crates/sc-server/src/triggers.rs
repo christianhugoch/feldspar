@@ -230,6 +230,15 @@ pub fn start_workflow_engine(
 /// Reports rather than fails, like every other fire-and-forget event: a
 /// misconfigured startup trigger must not be the reason a server refuses to
 /// boot, which is the one moment nobody can fix it from the admin UI.
+///
+/// It is also recorded ([`STARTUP_HISTORY`](sc_config::STARTUP_HISTORY)), which
+/// is how a module's route counts restarts.
 pub async fn fire_startup(catalog: &Arc<Catalog>, dispatcher: &Arc<TriggerDispatcher>) {
+    if let Err(e) = crate::module_routes::record_startup(catalog, chrono::Utc::now()).await {
+        sc_log::log_error!(
+            "feldspar: this startup could not be recorded: {}",
+            e.chain()
+        );
+    }
     dispatcher.fire(catalog, &sc_action::Event::startup()).await;
 }

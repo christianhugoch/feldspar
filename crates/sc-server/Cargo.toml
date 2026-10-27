@@ -100,6 +100,9 @@ sc-db.workspace = true
 sc-db-postgres.workspace = true
 sc-query.workspace = true
 sc-types.workspace = true
+# `statvfs`, for the size of the filesystem a module route reports
+# (`module_routes`).
+libc.workspace = true
 # The settings an admin edits (§13.5): the TLS section is read at boot to decide
 # how the listener is set up, and written by the settings endpoints this crate
 # serves. The ACME cache is a table there too, because it is *what this

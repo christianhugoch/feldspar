@@ -575,6 +575,10 @@ function saltcornModule(specifier) {
     // library below, reading `getState().library` (TODO "The builder" 2.3).
     case "@saltcorn/data/models/page_group":
       return V1PageGroup;
+    case "@saltcorn/data/models/eventlog":
+      return V1EventLog;
+    case "@saltcorn/data/models/metadata":
+      return V1MetaData;
     // v1's `db`: its pure helpers and `withTransaction`, which the patterns'
     // POST paths call (TODO "Saltcorn UI" Phase 6). Everything else on it — a
     // query, a client, a tenant schema — is still refused by name.
@@ -751,6 +755,11 @@ Module._load = function (request, parent, isMain) {
   if (request === "@saltcorn" || request.startsWith("@saltcorn/")) {
     return saltcornModule(request);
   }
+  // The npm package reads `/proc` and runs `df`, neither of which a module's
+  // sandbox grants; this server answers the part of it a route reads.
+  if (request === "systeminformation") {
+    return hostModule(request, systemInformation);
+  }
   return originalLoad.apply(this, arguments);
 };
 
@@ -791,6 +800,9 @@ const supportedKeys = new Set([
   "services",
   // The webhooks a module receives (TODO-payments P1.1).
   "webhooks",
+  // v1's `routes`: URLs a plugin serves, on the admin host under
+  // `/_feldspar/routes/<module>`.
+  "routes",
   // The application tables a module reads because its settings name them
   // (TODO-payments P4.1).
   "reads",
@@ -1627,6 +1639,311 @@ function webhookAnswer(answer, module, hook) {
     contentType = "application/json";
   }
   if (contentType && !headers["content-type"]) headers["content-type"] = contentType;
+  return { status, headers, body: bytes.toString("base64") };
+}
+
+/** v1's `routes` key: URLs a plugin serves itself.
+ *
+ * ```js
+ * routes: (configuration) => [
+ *   { method: "get", url: "/heartbeat", callback: async (req, res) => res.json({ ok: true }) },
+ * ]
+ * ```
+ *
+ * In v1 each is mounted at its `url` on the tenant's own site. Here a module is
+ * installed once for every application, so its routes are served on the
+ * **admin host** under `/_feldspar/routes/<module>` — `/heartbeat` of
+ * `@saltcorn/heartbeat-monitor` is `/_feldspar/routes/heartbeat-monitor/heartbeat`.
+ * A list, or a function of the module's configuration returning one; `method`
+ * is `get` (the default) or `post`, and `url` is literal segments and
+ * `:param`s — Express's other pattern syntax is refused here, because the
+ * server matches the URL before it calls the module. `apiToken` and `noCsrf`
+ * are v1's flags and cross in the manifest; the server enforces them. */
+async function evalRoutes(plugin, configuration) {
+  const exported = plugin.routes;
+  let raw = [];
+  const issues = [];
+  if (typeof exported === "function") {
+    try {
+      raw = (await exported(configuration || {})) || [];
+    } catch (e) {
+      issues.push(`its routes could not be built: ${e.message}`);
+      raw = [];
+    }
+  } else if (exported) {
+    raw = exported;
+  }
+  const routes = [];
+  const set = [];
+  if (!Array.isArray(raw)) {
+    issues.push("its `routes` is not a list of routes");
+    return { routes, set, issues };
+  }
+  raw.forEach((route, i) => {
+    const label = route && typeof route.url === "string" ? `the route ${route.url}` : `route ${i + 1}`;
+    if (!route || typeof route.callback !== "function") {
+      issues.push(`${label} has no callback`);
+      return;
+    }
+    if (typeof route.url !== "string" || !route.url.startsWith("/")) {
+      issues.push(`${label} cannot be served: its url must start with /`);
+      return;
+    }
+    if (/[*?()+]/.test(route.url)) {
+      issues.push(
+        `${label} cannot be served: a route's url is literal segments and \`:param\`s here, ` +
+          "not Express's other pattern syntax",
+      );
+      return;
+    }
+    const method = String(route.method || "get").toLowerCase();
+    if (method !== "get" && method !== "post") {
+      issues.push(`${label} answers GET or POST only, not ${String(route.method).toUpperCase()}`);
+      return;
+    }
+    if (set.some((r) => r.method === method && r.url === route.url)) {
+      issues.push(`${label} is declared twice for ${method.toUpperCase()}`);
+      return;
+    }
+    set.push({ method, url: route.url, callback: route.callback });
+    routes.push({
+      method: method.toUpperCase(),
+      url: route.url,
+      api_token: route.apiToken === true,
+      no_csrf: route.noCsrf === true,
+    });
+  });
+  return { routes, set, issues };
+}
+
+/** The `content-type` Express's `res.type` sets for a short name. */
+const routeTypes = {
+  json: "application/json",
+  html: "text/html; charset=utf-8",
+  text: "text/plain; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  xml: "application/xml",
+  csv: "text/csv; charset=utf-8",
+  js: "text/javascript; charset=utf-8",
+  css: "text/css; charset=utf-8",
+};
+
+/** `route_call`: one request to one of a module's v1 routes.
+ *
+ * The server has matched the URL and checked the caller, and sends the route
+ * it matched (`url`, `method`), its `params`, and the request: `path` (the
+ * route's own, without the `/_feldspar/routes/<module>` prefix), `query`,
+ * `headers` (without the cookie and the credential), the body base64, `ip`
+ * and `user` (absent for the public). The callback gets Express's
+ * `(req, res, next)`, over what that request is and what `res` records;
+ * a member Express has and this does not is a named stub on `res` and
+ * `undefined` on `req`, as it is on an Express request that lacks it.
+ *
+ * Answered once `res` is ended — not once the callback returns, because a
+ * callback may answer from a promise it did not return. A route that never
+ * answers runs out its call's wall clock. A `next()` with no error falls
+ * through to a `404`, as it does in Express; with one, it is a failure. */
+async function runRoute({ module: name, route: routeRef, params, request }) {
+  const entry = loaded.get(name);
+  if (!entry) throw new Error(`the module ${name} is not loaded in this host`);
+  const ref = routeRef || {};
+  const route = (entry.routes || []).find(
+    (r) => r.url === ref.url && r.method === String(ref.method || "").toLowerCase(),
+  );
+  if (!route) throw new Error(`the module ${name} has no route ${ref.method} ${ref.url}`);
+  const incoming = request || {};
+  const headers = incoming.headers || {};
+  const query = incoming.query || {};
+  const rawBody = Buffer.from(incoming.body || "", "base64");
+  const contentType = String(headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  // body-parser's: JSON and urlencoded forms are parsed, anything else is `{}`.
+  let body = {};
+  if (rawBody.length && contentType === "application/json") {
+    try {
+      body = JSON.parse(rawBody.toString("utf8"));
+    } catch (_) {
+      return routeAnswer(400, { "content-type": "text/plain; charset=utf-8" }, "the body is not JSON");
+    }
+  } else if (rawBody.length && contentType === "application/x-www-form-urlencoded") {
+    body = Object.fromEntries(new URLSearchParams(rawBody.toString("utf8")));
+  }
+  const search = new URLSearchParams(query).toString();
+  const path = incoming.path || "/";
+  const url = path + (search ? `?${search}` : "");
+  const baseUrl = incoming.base || "";
+  const header = (headerName) => {
+    const key = String(headerName).toLowerCase();
+    return headers[key === "referrer" ? "referer" : key];
+  };
+  const user = incoming.user ? { ...incoming.user, attributes: incoming.user.attributes || {} } : undefined;
+
+  const out = { status: 200, headers: {}, chunks: [], ended: false };
+  let settle;
+  const finished = new Promise((resolve) => {
+    settle = resolve;
+  });
+  const sent = () => {
+    if (out.ended) {
+      throw new Error(`the route ${route.url} of ${name} answered twice: Cannot set headers after they are sent`);
+    }
+  };
+  const chunk = (value) =>
+    value === undefined || value === null
+      ? Buffer.alloc(0)
+      : Buffer.isBuffer(value) || value instanceof Uint8Array
+        ? Buffer.from(value)
+        : Buffer.from(String(value), "utf8");
+  const req = {
+    method: String(ref.method || "GET").toUpperCase(),
+    path,
+    url,
+    originalUrl: baseUrl + url,
+    baseUrl,
+    params: params || {},
+    query,
+    body,
+    rawBody,
+    headers,
+    get: header,
+    header,
+    ip: incoming.ip || "",
+    ips: [],
+    protocol: incoming.protocol || "http",
+    secure: incoming.protocol === "https",
+    hostname: String(header("host") || "").split(":")[0],
+    xhr: String(header("x-requested-with") || "").toLowerCase() === "xmlhttprequest",
+    user,
+    isAuthenticated: () => !!user,
+    getLocale: () => currentLocale(),
+    __: translate,
+  };
+  const own = {
+    req,
+    locals: {},
+    get statusCode() {
+      return out.status;
+    },
+    set statusCode(code) {
+      out.status = Number(code);
+    },
+    get headersSent() {
+      return out.ended;
+    },
+    status(code) {
+      out.status = Number(code);
+      return res;
+    },
+    set(field, value) {
+      sent();
+      if (field && typeof field === "object") {
+        for (const [key, each] of Object.entries(field)) out.headers[key.toLowerCase()] = String(each);
+      } else {
+        out.headers[String(field).toLowerCase()] = String(value);
+      }
+      return res;
+    },
+    header(field, value) {
+      return res.set(field, value);
+    },
+    setHeader(field, value) {
+      res.set(field, value);
+      return res;
+    },
+    getHeader(field) {
+      return out.headers[String(field).toLowerCase()];
+    },
+    removeHeader(field) {
+      delete out.headers[String(field).toLowerCase()];
+    },
+    type(type) {
+      const t = String(type).replace(/^\./, "");
+      return res.set("content-type", t.includes("/") ? t : routeTypes[t] || "application/octet-stream");
+    },
+    write(value) {
+      sent();
+      out.chunks.push(chunk(value));
+      return true;
+    },
+    end(value) {
+      sent();
+      out.chunks.push(chunk(value));
+      out.ended = true;
+      settle();
+      return res;
+    },
+    json(value) {
+      if (!out.headers["content-type"]) res.set("content-type", "application/json; charset=utf-8");
+      return res.end(JSON.stringify(value === undefined ? null : value));
+    },
+    send(value) {
+      if (value !== null && typeof value === "object" && !Buffer.isBuffer(value) && !(value instanceof Uint8Array)) {
+        return res.json(value);
+      }
+      if (!out.headers["content-type"]) {
+        res.set(
+          "content-type",
+          typeof value === "string" ? "text/html; charset=utf-8" : "application/octet-stream",
+        );
+      }
+      return res.end(value);
+    },
+    sendStatus(code) {
+      out.status = Number(code);
+      return res.type("text").end(String(code));
+    },
+    redirect(first, second) {
+      const [code, location] = typeof first === "number" ? [first, second] : [302, first];
+      out.status = code;
+      res.set("location", String(location));
+      return res.end();
+    },
+  };
+  // A member of Express's `res` that is not here is a stub that names itself
+  // when called — `res.render`, v1's `res.sendWrap` — rather than an
+  // `undefined` that throws "is not a function" from inside the plugin.
+  const res = new Proxy(own, {
+    get(target, prop, receiver) {
+      if (typeof prop === "symbol" || prop in target) return Reflect.get(target, prop, receiver);
+      if (passThrough.has(prop)) return undefined;
+      return namedStub(`res.${prop}`);
+    },
+  });
+  req.res = res;
+
+  let failure = null;
+  let fellThrough = false;
+  const next = (err) => {
+    if (out.ended) return;
+    if (err) failure = err;
+    else fellThrough = true;
+    settle();
+  };
+  const called = Promise.resolve()
+    .then(() => route.callback(req, res, next))
+    .catch((e) => {
+      failure = e;
+      settle();
+    });
+  await finished;
+  // A callback that answered and then threw: what it answered stands, as in
+  // Express, and the throw is said in the log.
+  if (out.ended) {
+    called.then(() => {
+      if (failure) speak("error")(`the route ${route.url} of ${name} failed after answering: ${(failure && failure.stack) || failure}`);
+    });
+    return routeAnswer(out.status, out.headers, Buffer.concat(out.chunks));
+  }
+  if (failure) throw failure instanceof Error ? failure : new Error(String(failure));
+  if (fellThrough) return routeAnswer(404, { "content-type": "text/plain; charset=utf-8" }, "Not found");
+  throw new Error(`the route ${route.url} of ${name} settled without answering`);
+}
+
+/** What a route answered, as the server sends it. */
+function routeAnswer(status, headers, body) {
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error(`a route answered status ${status}`);
+  }
+  const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body), "utf8");
   return { status, headers, body: bytes.toString("base64") };
 }
 
@@ -2487,6 +2804,9 @@ async function loadModule({ module: name, dir, configuration }) {
   } = await evalWebhooks(plugin, configuration);
   issues.push(...webhookIssues);
 
+  const { routes: routeList, set: routeSet, issues: routeIssues } = await evalRoutes(plugin, configuration);
+  issues.push(...routeIssues);
+
   const { csp, issues: cspIssues } = await evalCsp(plugin, configuration);
   issues.push(...cspIssues);
 
@@ -2529,6 +2849,7 @@ async function loadModule({ module: name, dir, configuration }) {
     viewtemplates: viewPatternSet,
     services: serviceSet,
     webhooks: webhookSet,
+    routes: routeSet,
     configuration: configuration || {},
   });
   // The registry may hold this module's previous patterns: rebuild it on the
@@ -2549,6 +2870,7 @@ async function loadModule({ module: name, dir, configuration }) {
     core_tables: coreTables,
     services: serviceList,
     webhooks: webhookList,
+    routes: routeList,
     reads,
     csp,
     frameworks,
@@ -3944,6 +4266,144 @@ const V1PageGroup = class PageGroup {
   }
 };
 
+// --- What a module's route reads of the server --------------------------------
+//
+// `@saltcorn/heartbeat-monitor` reports the machine's disk, memory and CPU
+// (`systeminformation`), how often the server started (v1's `EventLog`) and
+// whether its backups are current (v1's `MetaData` and `auto_backup_frequency`).
+// Each is a `system` ask, which only a route's call carries: these are facts
+// about the installation, and a route is served on the admin host.
+
+/** The installation-wide setting `key` a route's call carried, by v1's name:
+ * `{ found, value }`, so an unknown key falls through to the application's. */
+function installationConfig(key, def) {
+  const store = running.getStore();
+  const config = store && store.installation && store.installation.config;
+  if (!config || !Object.prototype.hasOwnProperty.call(config, key)) return { found: false };
+  const held = config[key];
+  return { found: true, value: held === undefined || held === null ? def : structuredClone(held) };
+}
+
+/** A value as v1's `where` compares it: a `Date` or a date string by its time. */
+function comparable(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "string") {
+    const time = Date.parse(value);
+    if (!Number.isNaN(time)) return time;
+  }
+  return value;
+}
+
+const whereOps = {
+  gt: (a, b) => a > b,
+  gte: (a, b) => a >= b,
+  lt: (a, b) => a < b,
+  lte: (a, b) => a <= b,
+};
+
+/** Rows this host holds, selected by v1's `where` and select options:
+ * equality, `{ gt | gte | lt | lte }`, and `orderBy`/`orderDesc`/`limit`/`offset`.
+ * Anything else in a `where` is refused naming it — a filter ignored would be
+ * the wrong rows, not an error. */
+function selectRows(rows, where, opts, what) {
+  const conditions = Object.entries(where || {});
+  let out = rows.filter((row) =>
+    conditions.every(([key, cond]) => {
+      if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
+        return Object.entries(cond).every(([op, value]) => {
+          if (!whereOps[op]) throw new Error(`\`${what}\` does not filter by \`${op}\` here`);
+          return whereOps[op](comparable(row[key]), comparable(value));
+        });
+      }
+      return comparable(row[key]) === comparable(cond);
+    }),
+  );
+  const o = opts || {};
+  if (o.orderBy) {
+    const key = o.orderBy;
+    out.sort((a, b) => {
+      const x = comparable(a[key]);
+      const y = comparable(b[key]);
+      return x < y ? -1 : x > y ? 1 : 0;
+    });
+    if (o.orderDesc) out.reverse();
+  }
+  if (o.offset) out = out.slice(o.offset);
+  if (o.limit) out = out.slice(0, o.limit);
+  return out;
+}
+
+/** A host class whose members that are not here are named stubs, as a
+ * `hostModule`'s exports are: `EventLog.create(…)` says what it is. */
+function hostClass(label, cls) {
+  return new Proxy(cls, {
+    get(target, prop, receiver) {
+      if (typeof prop === "symbol" || prop in target) return Reflect.get(target, prop, receiver);
+      if (passThrough.has(prop)) return undefined;
+      return namedStub(`${label}.${prop}`);
+    },
+  });
+}
+
+/** v1's `EventLog`, read-only, over the events this server records: its
+ * startups (`event_type: "Startup"`, `occur_at`). */
+const V1EventLog = hostClass(
+  "EventLog",
+  class EventLog {
+    constructor(o) {
+      Object.assign(this, o);
+    }
+
+    static async find(where, selectOpts) {
+      const events = (await ask("system", { op: "events" })) || [];
+      const rows = events.map((e) => new EventLog({ ...e, occur_at: new Date(e.occur_at) }));
+      return selectRows(rows, where, selectOpts, "EventLog.find");
+    }
+
+    static async findOne(where) {
+      return (await EventLog.find(where, { limit: 1 }))[0] || null;
+    }
+  },
+);
+
+/** v1's `MetaData`, read-only, over the records this server keeps that v1
+ * kept there: a successful backup (`type: "Backup"`, `name: "Success"`,
+ * `written_at`), one per automated backup that has succeeded. */
+const V1MetaData = hostClass(
+  "MetaData",
+  class MetaData {
+    constructor(o) {
+      Object.assign(this, o);
+    }
+
+    static async find(where, selectOpts) {
+      const records = (await ask("system", { op: "metadata" })) || [];
+      const rows = records.map((m) => new MetaData({ ...m, written_at: new Date(m.written_at) }));
+      return selectRows(rows, where, selectOpts, "MetaData.find");
+    }
+
+    static async findOne(where) {
+      return (await MetaData.find(where, { limit: 1 }))[0] || null;
+    }
+  },
+);
+
+/** One `systeminformation` call: a promise, and its optional callback. */
+const systemCall = (op) => (callback) => {
+  const answer = ask("system", { op });
+  if (typeof callback === "function") answer.then(callback, () => callback(undefined));
+  return answer;
+};
+
+/** The members of the `systeminformation` package this server answers, in
+ * that package's shapes: `fsSize` (the filesystem holding the server's data),
+ * `mem` and `currentLoad`. */
+const systemInformation = {
+  fsSize: systemCall("fs_size"),
+  mem: systemCall("mem"),
+  currentLoad: systemCall("current_load"),
+};
+
 /** v1's `new Field(cfg)`: a field of a **form**, in memory — ported from v1's
  * constructor, less the database (4.5). What v1's `Form` and `FieldRepeat` build
  * every field into, and so what a module's `configuration_workflow`, a plugin
@@ -4388,6 +4848,10 @@ function makeState(set) {
       return [...loadedRuntime("getState().keyframes").stateDefaults.keyframes];
     },
     getConfig(key, def) {
+      if (!set) {
+        const installation = installationConfig(key, def);
+        if (installation.found) return installation.value;
+      }
       return configValue(application(`getState().getConfig("${key}")`), key, def);
     },
     getConfigCopy(key, def) {
@@ -4898,6 +5362,11 @@ async function handle(request) {
       if (pending) await pending;
       return await runWebhook(request);
     }
+    case "route_call": {
+      const pending = loading.get(request.module);
+      if (pending) await pending;
+      return await runRoute(request);
+    }
     // Saltcorn UI's view runtime (TODO "Saltcorn UI" §3). No module to wait
     // on: the runtime is not a module in `loaded`, and imports itself.
     case "view_patterns":
@@ -4986,6 +5455,9 @@ globalThis.__scModuleHost = (id, request) => {
     // visitor the first visitor's language.
     locale: null,
     messages: null,
+    // The installation's settings a route's `getState().getConfig` answers —
+    // synchronous in v1, so they cross with the call (`route_call` only).
+    installation: request && request.installation && typeof request.installation === "object" ? request.installation : null,
   };
   const viewRequestOf = request && request.request;
   if (viewRequestOf && typeof viewRequestOf === "object") {

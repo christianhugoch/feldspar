@@ -12861,6 +12861,60 @@ has been answered. Where a provider differs in a way the module shows, the drive
 (`renewalPaymentsKnowTheirRow`: a Stripe renewal's PaymentIntent names no subscription). The fake-only copies of
 those scenarios were removed. An adapter added later is a driver and a simulation, run through the
 same suite.
+### 15.1g v1 plugin routes (`sc_module::routes`, `sc-server/src/module_routes.rs`)
+
+A v1 plugin's `routes` export, `[{ method, url, callback, apiToken?, noCsrf? }]` (or a function of
+its configuration returning one), is loaded. In v1 each route is mounted at its `url` on the
+tenant's own site. Here a module is installed once for every application, and a root URL would
+claim that path in every application. So a module's routes are served **on the admin host only**
+(`resolve_app` → `Admin`), under `/_feldspar/routes/<module><url>`, where `<module>` is the
+webhook segment (`hook_segment`). For example, `@saltcorn/heartbeat-monitor`'s `/heartbeat` is
+`/_feldspar/routes/heartbeat-monitor/heartbeat`. There is no per-application mount. A plugin
+whose v1 URL mattered is told its new one; the installed card lists each route's path.
+
+**Matching is the server's.** `url` is literal segments and `:param`s; Express's other pattern
+syntax is an issue on the card. The server matches before it calls the module (`match_route`,
+404, or 405 with `Allow`), because both flags are properties of the route a request reaches.
+
+**A route runs as whoever calls.** This is unlike a webhook. The caller is an API token's user
+when the request carries `Authorization: Bearer` (a bad token is a 401, never the public), else
+the admin host's session user, else nobody. `apiToken: true` refuses nobody with a 401, as v1's
+middleware does. A `POST` passes the CSRF check unless the route says `noCsrf`. In that case
+`open_to_public` lets a cookie-less request through as the anonymous caller, as it does a webhook.
+The module's `Table` reads and writes as the caller, like a view's (`TableHost::viewer_only`).
+
+**The worker side.** One `route_call` per request. `callback(req, res, next)` gets Express's
+shape: `req.user` (the row with `role_id`), `params`, `query`, `body` (JSON and urlencoded forms
+parsed, as body-parser does), `rawBody`, `headers` (cookie and credential withheld), `path` below
+the prefix, `originalUrl`, and `req.res`/`res.req`. `res` provides `status`, `set`/`header`,
+`type`, `json`, `send`, `sendStatus`, `redirect`, `write`/`end` and `locals`. Any other member of
+`res` is a named stub, so `res.render` and v1's `res.sendWrap` fail saying what they are. The
+call answers once `res` is ended, not once the callback returns, because a callback may answer
+from a promise it did not return. Calls are bounded like a webhook's: 1 MiB body, 600 requests a
+minute per address, and the action wall clock. A throw is a 500 and the `error` event.
+
+**What a route reads of the installation** (the `system` ask surface, `SystemAsks`, carried only
+by a route's call). This is what `heartbeat-monitor` needs:
+- `require("systeminformation")` is answered by the host, not the npm package, which reads `/proc`
+  and runs `df` outside a module's sandbox. Only `fsSize` (one entry: the filesystem holding the
+  modules directory, by `statvfs`), `mem` (`/proc/meminfo`, `active = total - available`) and
+  `currentLoad` (`/proc/stat`, measured from the previous call or over 250 ms) are answered, in
+  the package's shapes. Every other member is a named stub.
+- v1's `EventLog.find` reads the server's startups. Each boot records one in the internal config
+  key `startup_history`, keeping 7 days (`fire_startup`).
+- v1's `MetaData.find` reads the `Backup`/`Success` records, one per automated backup that has
+  succeeded (`backup_schedule_status`).
+- A route's `getState().getConfig("auto_backup_frequency")` is the most frequent schedule's, by
+  v1's name (`Daily` | `Weekly` | `Monthly` | `Never`). It crosses with the call because v1's
+  `getConfig` is synchronous.
+
+The two models filter in the worker by v1's `where` (equality and `gt`/`gte`/`lt`/`lte` on
+numbers and dates) and select options. Any other operator is refused by name.
+
+**Payments stays on webhooks.** Its callbacks come from a provider's servers. They need the raw
+bytes for the signature, no session or credentials, the module's own authority over its own
+tables, and one stable URL on every host. A v1 route provides none of these.
+
 ### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
 
 The second adapter. It is small for a reason that is structural rather than lucky: the JavaScript

@@ -5955,6 +5955,16 @@ fn module_schema() -> TypeSchema {
                 StructField::new("path", TypeSchema::text()),
             ])),
         ),
+        // The v1 routes it serves, with the path each is served at on the
+        // admin host (`/_feldspar/routes/<module><url>`).
+        StructField::new(
+            "routes",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("method", TypeSchema::text()),
+                StructField::new("url", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
+            ])),
+        ),
         // The model providers it supplies — names only, for the same reason:
         // what a provider *asks for* belongs to the model being fitted and is
         // on `listModelProviders`.

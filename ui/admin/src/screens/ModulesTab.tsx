@@ -771,6 +771,23 @@ function ModuleCard({
           </>
         )}
 
+        {module.routes.length > 0 && (
+          <>
+            <div className="text-secondary mb-1"><T text="Serves" /></div>
+            <ul className="list-unstyled mb-2">
+              {module.routes.map((route) => (
+                <li key={`${route.method} ${route.url}`}>
+                  <span className="text-secondary">{route.method}</span>{" "}
+                  <WebhookUrl path={route.path} />
+                </li>
+              ))}
+            </ul>
+            <div className="text-secondary mb-2">
+              <T text="Served on this host, as whoever calls: signed in here, or with an API token." />
+            </div>
+          </>
+        )}
+
         {module.table_providers.length > 0 && (
           <>
             <div className="text-secondary mb-1"><T text="Table providers" /></div>

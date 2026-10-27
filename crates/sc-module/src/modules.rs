@@ -604,6 +604,7 @@ mod tests {
             core_tables: Vec::new(),
             services: Vec::new(),
             webhooks: Vec::new(),
+            routes: Vec::new(),
             reads: Vec::new(),
             csp: Vec::new(),
             frameworks: Vec::new(),
