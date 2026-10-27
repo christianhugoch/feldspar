@@ -2,6 +2,18 @@
 
 Changes in reverse chronological order.
 
+## Build keys no longer miss a same-size edit made in the second of the last index write
+
+The boot-time build cache hashes the source tree through a copy of git's index. The copy was
+stamped with the current time, which defeats git's "racily clean" check (git compares mtimes to the
+second, and re-reads a file only when it is no older than the index). So an edit that kept the
+file's size and landed in the same second as the last index write kept its old blob. The key then
+matched the last build, and boot served a stale bundle. This was also why
+`build_cache::tests::the_key_follows_the_source_directorys_content_in_any_git_state` failed now
+and then under load. The scratch index now keeps the real index's mtime. Fixed the admin client
+copies too: `ui/ide`, `ui/builder` and `ui/analytics` were regenerated for the module `routes`
+field, which only `ui/admin` had been regenerated for.
+
 ## v1 plugin routes, served on the admin host (`@saltcorn/heartbeat-monitor` runs)
 
 A v1 plugin's `routes` export now loads, and each route is served on the admin host at
