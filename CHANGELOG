@@ -2,6 +2,41 @@
 
 Changes in reverse chronological order.
 
+## Password-protected backups (AES-256, opens in 7-Zip)
+
+A backup can now be protected by a password. Every entry in the zip is encrypted with WinZip
+AES-256 (AE-2), the standard zip encryption that 7-Zip, WinZip, Keka and `7z x` open with the same
+password. Each entry has its own salt and an HMAC. ZipCrypto is never written. Entry names stay
+readable, as in any zip.
+
+- **Backup now**: the dialog has an optional password, typed twice. It is not remembered: the next
+  backup is protected only if a password is given again. `POST /backup/create` takes `password`.
+- **Automated backups**: a schedule has an optional `password`. It is stored like the destination's
+  credentials, sent to the UI as the mask, and kept when the mask comes back. An empty one removes
+  it, and the dialog has a **Remove password** link. The list marks protected schedules.
+- **Restore**: uploading a protected file answers `{id, encrypted: true, locked: true}`. The admin
+  UI then asks for the password in a modal, before the "What should be restored?" dialog. The new
+  `unlockBackup` (`POST /api/backup/unlock`) checks the password against the file and holds it with
+  the upload for `restoreBackup`. It answers what an upload answers. A wrong password is refused and
+  can be retried. `restoreBackup` refuses a locked upload without consuming it.
+- **CLI**: `feldspar backup` and `feldspar restore` take `--password VALUE`, `--password` (asks
+  without echo: twice for a backup, once for a restore) or `FELDSPAR_BACKUP_PASSWORD`. A restore of a
+  protected file given none of these asks at the terminal, and fails naming both when there is none
+  (`sc-cli::backup_password`).
+- `sc-server::backup`: `write_backup_to`, `write_backup_stream`, `inspect` and `restore_backup`
+  take the password; `is_encrypted` (exported as `backup_is_encrypted`) reads only the zip's
+  directory. `Archive::open_zip` verifies the password by reading the manifest (or the first
+  encrypted entry) to its end, so the HMAC settles it rather than AES's two-byte check.
+- Workspace `zip` dependency: `aes-crypto` feature enabled.
+- Docs: OPERATIONS.md "Password-protected backups".
+- Tests: `write::tests::a_password_encrypts_every_entry_with_aes` (file and pipe, method 99, wrong
+  and missing password), `a_password_is_only_needed_where_there_is_one`,
+  `schedule::tests::a_schedule_password_is_stored_masked_and_kept`, `sc-cli`
+  `backup_password::tests`, and the integration tests
+  `backup_api::a_password_protected_backup_restores_with_its_password` and
+  `backup_api::an_automated_backup_can_be_password_protected`. On the UI side,
+  `backupSchedules.test.ts` covers the schedule form's password.
+
 ## Build keys no longer miss a same-size edit made in the second of the last index write
 
 The boot-time build cache hashes the source tree through a copy of git's index. The copy was

@@ -88,9 +88,10 @@ impl RestoreReport {
 }
 
 /// Read a backup's manifest without restoring anything: what the dialog is built
-/// from after the file is uploaded.
-pub fn inspect(path: &Path) -> Result<(Available, Json)> {
-    let archive = read_backup(path)?;
+/// from after the file is uploaded. A password-protected backup needs its
+/// `password` (see [`is_encrypted`](super::is_encrypted)).
+pub fn inspect(path: &Path, password: Option<&str>) -> Result<(Available, Json)> {
+    let archive = read_backup(path, password)?;
     let manifest = manifest_of(&archive)?;
     let contents = manifest
         .get("contents")
@@ -101,14 +102,15 @@ pub fn inspect(path: &Path) -> Result<(Available, Json)> {
 /// Restore the parts of the backup at `path` that `selection` asks for.
 ///
 /// The file is read as the restore goes ([`Archive`]), so it must stay where it
-/// is until this returns.
+/// is until this returns. `password` decrypts a password-protected backup.
 pub async fn restore_backup(
     catalog: &Catalog,
     apps: &AppMounts,
     path: &Path,
+    password: Option<&str>,
     selection: &Selection,
 ) -> Result<RestoreReport> {
-    let archive = read_backup(path)?;
+    let archive = read_backup(path, password)?;
     let manifest = manifest_of(&archive)?;
     let contents = Available::from_json(
         manifest
@@ -3671,8 +3673,8 @@ async fn restore_workspaces(catalog: &Catalog, archive: &Archive, report: &mut R
 /// of it is read, and only then expanded into memory for the conversion (as v1
 /// imports always were); a Feldspar backup is read from the file as the restore
 /// goes.
-fn read_backup(path: &Path) -> Result<Archive> {
-    let archive = Archive::open_zip(path)?;
+fn read_backup(path: &Path, password: Option<&str>) -> Result<Archive> {
+    let archive = Archive::open_zip(path, password)?;
     let names = archive.names();
     if !names.iter().any(|n| n == MANIFEST_FILE)
         && super::v1::is_v1_backup(names.iter().map(String::as_str))

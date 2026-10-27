@@ -1697,6 +1697,9 @@ fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, 
 ///
 /// Nothing is remembered: the dialog's stored selection is the dialog's, and a
 /// script's backup is not the admin saying what the next one should include.
+///
+/// `--password` or `FELDSPAR_BACKUP_PASSWORD` encrypts it with AES-256 (see
+/// [`sc_cli::backup_password`]).
 async fn backup_command(args: &[String]) -> Result<()> {
     let (file, rest) = match args.split_first() {
         Some((first, rest)) if first == "-" => (None, rest.to_vec()),
@@ -1705,6 +1708,7 @@ async fn backup_command(args: &[String]) -> Result<()> {
             (Some(file), rest)
         }
     };
+    let (password, rest) = sc_cli::backup_password::extract(rest)?;
     let (db, leftover) = DbConfig::extract(rest)?;
     if let Some(unknown) = leftover.first() {
         return Err(sc_error::Error::config(format!(
@@ -1719,6 +1723,12 @@ async fn backup_command(args: &[String]) -> Result<()> {
              redirect or pipe it (feldspar backup - > site.zip)",
         ));
     }
+    // Asked for before the database is connected to, so a mistyped
+    // confirmation costs nothing.
+    let password = sc_cli::backup_password::for_backup(
+        password,
+        std::env::var(sc_cli::backup_password::PASSWORD_ENV).ok(),
+    )?;
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
@@ -1739,18 +1749,31 @@ async fn backup_command(args: &[String]) -> Result<()> {
     let size = match &file {
         Some(file) => {
             write_whole(file, |out| {
-                sc_server::write_backup_to(&catalog, &selection, out)
+                sc_server::write_backup_to(&catalog, &selection, password.as_deref(), out)
             })
             .await?
         }
-        None => sc_server::write_backup_stream(&catalog, &selection, std::io::stdout()).await?,
+        None => {
+            sc_server::write_backup_stream(
+                &catalog,
+                &selection,
+                password.as_deref(),
+                std::io::stdout(),
+            )
+            .await?
+        }
     };
     eprintln!(
-        "feldspar: wrote {} ({} tables, {} applications, {} file stores, {})",
+        "feldspar: wrote {}{} ({} tables, {} applications, {} file stores, {})",
         file.as_ref().map_or_else(
             || "the backup to stdout".to_owned(),
             |f| f.display().to_string()
         ),
+        if password.is_some() {
+            ", protected by a password"
+        } else {
+            ""
+        },
         selection.tables.len(),
         selection.applications.len(),
         selection.file_stores.len(),
@@ -1818,15 +1841,25 @@ fn human_size(bytes: u64) -> String {
 ///
 /// A server already running on the database does not see the result until it
 /// is restarted: its catalog, mounts and trigger set were loaded at its boot.
+///
+/// A password-protected FILE is opened with `--password`,
+/// `FELDSPAR_BACKUP_PASSWORD`, or the password asked for at the terminal.
 async fn restore_command(args: &[String]) -> Result<()> {
     let (file, rest) = file_argument("restore", args)?;
+    let (password, rest) = sc_cli::backup_password::extract(rest)?;
     let (db, rest) = DbConfig::extract(rest)?;
     let config = ServerConfig::from_args(serving_defaults(&db).iter().chain(&rest))?;
 
     // The file before the database: one that is not a backup is refused before
-    // anything has been connected to, let alone written. It is read from where
-    // it is as the restore goes, never into memory whole.
-    let (contents, manifest) = sc_server::inspect_backup(&file)?;
+    // anything has been connected to, let alone written — and so is a wrong
+    // password. It is read from where it is as the restore goes, never into
+    // memory whole.
+    let password = sc_cli::backup_password::for_restore(
+        password,
+        std::env::var(sc_cli::backup_password::PASSWORD_ENV).ok(),
+        sc_server::backup_is_encrypted(&file)?,
+    )?;
+    let (contents, manifest) = sc_server::inspect_backup(&file, password.as_deref())?;
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
@@ -1854,7 +1887,8 @@ async fn restore_command(args: &[String]) -> Result<()> {
             .unwrap_or("at an unrecorded time"),
     );
     let selection = sc_server::BackupSelection::everything(&contents);
-    let report = sc_server::restore_backup(&catalog, &apps, &file, &selection).await?;
+    let report =
+        sc_server::restore_backup(&catalog, &apps, &file, password.as_deref(), &selection).await?;
     for line in &report.restored {
         println!("restored {line}");
     }
@@ -2428,8 +2462,8 @@ fn print_usage() {
     eprintln!(
         "  feldspar app triggers (add|remove|list) --app SUBDOMAIN [NAME...] [--json] [database flags]"
     );
-    eprintln!("  feldspar backup FILE|- [database flags]");
-    eprintln!("  feldspar restore FILE [database flags] [server flags]");
+    eprintln!("  feldspar backup FILE|- [--password [P]] [database flags]");
+    eprintln!("  feldspar restore FILE [--password [P]] [database flags] [server flags]");
     eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
     eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
@@ -2524,6 +2558,11 @@ fn print_usage() {
        The file's directory must exist; a FILE already there is replaced only
        once the new one is complete. A FILE of - writes the zip to stdout
        instead, with no temporary file (feldspar backup - | aws s3 cp - …).
+       --password P, or the FELDSPAR_BACKUP_PASSWORD environment variable,
+       encrypts every entry with AES-256 (WinZip AES), which 7-Zip and other
+       standard tools open with the same password; --password with no value
+       asks for it. A password on the command line is visible to other users
+       of the machine (ps) — prefer the prompt or the variable.
 
   restore: restores everything in FILE — a backup from `feldspar backup`, from
        Settings → Backup, or from Saltcorn 1 — exactly as the Restore dialog
@@ -2533,7 +2572,9 @@ fn print_usage() {
        `serve` does to do it (modules are reinstalled, applications built), so
        give it the server flags the server is started with, or the same
        --environment. A server already running on the database loads the
-       result when it is restarted.
+       result when it is restarted. A password-protected backup is opened
+       with --password P, or FELDSPAR_BACKUP_PASSWORD, or the password asked
+       for at the terminal.
 
   app list: every application with its framework and the project directory
        its source is in on this machine; --json prints an array of

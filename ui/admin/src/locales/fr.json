@@ -1011,5 +1011,16 @@
   "This question is no longer waiting for an answer.": "Cette question n'attend plus de réponse.",
   "Answer": "Répondre",
   "Your answer": "Votre réponse",
-  "Decline": "Refuser"
+  "Decline": "Refuser",
+  "This backup is protected by a password": "Cette sauvegarde est protégée par un mot de passe",
+  "Backup password": "Mot de passe de la sauvegarde",
+  "Enter the password the backup was protected with to see what it contains.": "Saisissez le mot de passe qui protège la sauvegarde pour voir son contenu.",
+  "Continue": "Continuer",
+  "Password protection": "Protection par mot de passe",
+  "Optional. Encrypts the backup with AES-256, which 7-Zip and other standard zip tools open with the same password. A lost password cannot be recovered.": "Facultatif. Chiffre la sauvegarde en AES-256, que 7-Zip et les autres outils zip courants ouvrent avec le même mot de passe. Un mot de passe perdu ne peut pas être récupéré.",
+  "No password": "Aucun mot de passe",
+  "Remove password": "Supprimer le mot de passe",
+  "Repeat password": "Répéter le mot de passe",
+  "The passwords do not match.": "Les mots de passe ne correspondent pas.",
+  "Password protected": "Protégée par mot de passe"
 }

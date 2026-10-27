@@ -251,7 +251,7 @@ pub fn password_from(arg: Option<&PasswordArg>) -> Result<String> {
 
 /// Ask for a password: twice and without echo at a terminal, or one line of
 /// stdin when it is not one.
-fn prompt_password() -> Result<String> {
+pub(crate) fn prompt_password() -> Result<String> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         let mut line = String::new();
@@ -271,7 +271,7 @@ fn prompt_password() -> Result<String> {
 
 /// Read one line from the terminal with echo turned off, restoring it after —
 /// including when the read fails.
-fn read_hidden(prompt: &str) -> Result<String> {
+pub(crate) fn read_hidden(prompt: &str) -> Result<String> {
     let mut stderr = std::io::stderr();
     let _ = write!(stderr, "{prompt}");
     let _ = stderr.flush();

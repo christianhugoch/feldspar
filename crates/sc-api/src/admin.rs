@@ -4737,6 +4737,33 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // The password of an uploaded backup that is protected by one: the upload
+    // answered `locked` and its `id`, and this answers what the upload would
+    // have — what the file holds — once the password opens it. A wrong one is
+    // refused and the file stays held, to be tried again; the right one is
+    // held with it for `restoreBackup`.
+    set.register(
+        Endpoint::new(
+            "unlockBackup",
+            Method::Post,
+            api().lit("backup").lit("unlock"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::text()),
+            StructField::new("password", TypeSchema::text()),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::text()),
+            StructField::new("encrypted", TypeSchema::bool()),
+            StructField::new("locked", TypeSchema::bool()),
+            StructField::new("created_at", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("source", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("available", backup_contents_schema()),
+            StructField::new("include", backup_selection_schema()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Restore from an archive already uploaded (`/backup/upload` handed back its
     // `id`), taking the parts `include` names.
     //
@@ -4945,6 +4972,10 @@ fn backup_schedule_input_fields() -> Vec<StructField> {
         StructField::new("frequency", TypeSchema::text()),
         StructField::new("retention_days", TypeSchema::int()),
         StructField::new("include", backup_selection_schema()),
+        // The password each backup is protected with (WinZip AES-256, which
+        // 7-Zip opens); null or empty for none. Sent as the mask when one is
+        // stored, and handing the mask back on an update keeps it.
+        StructField::new("password", TypeSchema::optional(TypeSchema::text())),
     ]
 }
 
@@ -7934,6 +7965,7 @@ mod tests {
             "readFile",
             "writeFile",
             // Backup, restore and user management.
+            "unlockBackup",
             "restoreBackup",
             "createBackupSchedule",
             "updateBackupSchedule",

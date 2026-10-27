@@ -76,6 +76,13 @@
 //!   restored into a table whose columns nobody described would be rows nothing
 //!   could read.
 //!
+//! A backup can be **protected by a password**: every entry is encrypted with
+//! WinZip AES-256 ([`write`]), the zip encryption 7-Zip, WinZip and Keka open
+//! with the same password. The entry names are not encrypted, which is how a
+//! zip is: someone without the password can list the tables and stores a
+//! backup holds, and read none of them. The password is the admin's to keep —
+//! none is stored but an automated backup's own ([`schedule`]).
+//!
 //! A **Saltcorn 1** backup can be restored too, and nothing above changes for it:
 //! [`v1`] translates such an archive into the layout described here before the
 //! restorer sees it, so the upload, the dialog, the selection and the report are
@@ -124,6 +131,45 @@ pub fn start_backup_scheduler(
     (scheduler, handle)
 }
 pub use write::{available, write_backup_stream, write_backup_to};
+
+/// Whether the backup at `path` is protected by a password, so the password
+/// can be asked for before it is [`inspect`]ed or restored. Reads only the
+/// zip's directory. A file that is not a zip is refused, as `inspect` would.
+pub fn is_encrypted(path: &std::path::Path) -> Result<bool> {
+    archive::is_encrypted(path)
+}
+
+/// The longest backup password accepted — far beyond any passphrase, short
+/// enough that a pasted file is not taken for one.
+const MAX_PASSWORD_CHARS: usize = 1024;
+
+/// Refuse a password no backup should be written with: an empty one (which
+/// would look like protection and be none) and an absurdly long one.
+pub(crate) fn check_password(password: &str) -> Result<()> {
+    if password.is_empty() {
+        return Err(Error::invalid("the backup password is empty"));
+    }
+    if password.chars().count() > MAX_PASSWORD_CHARS {
+        return Err(Error::invalid(format!(
+            "the backup password is longer than {MAX_PASSWORD_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// A password from a request body's `password`: `None` when it is absent,
+/// null or empty — no password — and the text otherwise.
+pub fn password_from_body(body: &Json) -> Result<Option<String>> {
+    match body.get("password") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(p)) if p.is_empty() => Ok(None),
+        Some(Json::String(p)) => {
+            check_password(p)?;
+            Ok(Some(p.clone()))
+        }
+        Some(_) => Err(Error::invalid("`password` must be text")),
+    }
+}
 
 /// Where a browser posts a selection and gets a zip back.
 ///
@@ -227,6 +273,10 @@ struct Pending {
     id: Uuid,
     at: Instant,
     file: Arc<SpoolFile>,
+    /// The password of a protected backup, once it has been given and
+    /// checked ([`PendingUploads::unlock`]) — held for the restore, so it is
+    /// asked for once.
+    password: Option<String>,
 }
 
 impl PendingUploads {
@@ -247,20 +297,61 @@ impl PendingUploads {
             id,
             at: Instant::now(),
             file,
+            password: None,
         });
         Ok(id)
     }
 
-    /// Take an archive back out, removing it: a restore consumes its upload, so
-    /// pressing the button twice cannot run the restore twice.
-    pub fn take(&self, id: Uuid) -> Result<Arc<SpoolFile>> {
+    /// The archive `id` names, left where it is — what a password is checked
+    /// against before [`unlock`](Self::unlock) records it.
+    pub fn file(&self, id: Uuid) -> Result<Arc<SpoolFile>> {
+        let mut held = self.lock()?;
+        held.retain(|pending| pending.at.elapsed() < UPLOAD_TTL);
+        match held.iter().find(|pending| pending.id == id) {
+            Some(pending) => Ok(Arc::clone(&pending.file)),
+            None => Err(no_longer_held()),
+        }
+    }
+
+    /// Record the password that opens the archive `id` names, for the restore
+    /// that takes it.
+    pub fn unlock(&self, id: Uuid, password: String) -> Result<()> {
+        let mut held = self.lock()?;
+        match held.iter_mut().find(|pending| pending.id == id) {
+            Some(pending) => {
+                pending.password = Some(password);
+                Ok(())
+            }
+            None => Err(no_longer_held()),
+        }
+    }
+
+    /// Whether the archive `id` names is protected by a password nobody has
+    /// given yet — a restore of it would read nothing, and must not take it.
+    pub fn is_locked(&self, id: Uuid) -> Result<bool> {
+        let (file, unlocked) = {
+            let mut held = self.lock()?;
+            held.retain(|pending| pending.at.elapsed() < UPLOAD_TTL);
+            match held.iter().find(|pending| pending.id == id) {
+                Some(pending) => (Arc::clone(&pending.file), pending.password.is_some()),
+                None => return Err(no_longer_held()),
+            }
+        };
+        Ok(!unlocked && is_encrypted(file.path())?)
+    }
+
+    /// Take an archive back out, removing it, with the password it was
+    /// unlocked with: a restore consumes its upload, so pressing the button
+    /// twice cannot run the restore twice.
+    pub fn take(&self, id: Uuid) -> Result<(Arc<SpoolFile>, Option<String>)> {
         let mut held = self.lock()?;
         held.retain(|pending| pending.at.elapsed() < UPLOAD_TTL);
         match held.iter().position(|pending| pending.id == id) {
-            Some(index) => Ok(held.remove(index).file),
-            None => Err(Error::not_found(
-                "that uploaded backup is no longer held — upload the file again",
-            )),
+            Some(index) => {
+                let pending = held.remove(index);
+                Ok((pending.file, pending.password))
+            }
+            None => Err(no_longer_held()),
         }
     }
 
@@ -269,6 +360,10 @@ impl PendingUploads {
             .lock()
             .map_err(|_| Error::msg("the uploaded-backup lock is poisoned"))
     }
+}
+
+fn no_longer_held() -> Error {
+    Error::not_found("that uploaded backup is no longer held — upload the file again")
 }
 
 /// One thing that can be included or left out, as both dialogs show it.
@@ -1212,7 +1307,7 @@ mod tests {
         }
         assert!(!paths[0].exists(), "the oldest was pushed out and deleted");
         assert!(pending.take(ids[0]).is_err());
-        let taken = pending.take(ids[1]).unwrap();
+        let (taken, _) = pending.take(ids[1]).unwrap();
         assert!(paths[1].exists(), "held by the restore that took it");
         drop(taken);
         assert!(!paths[1].exists(), "and deleted when it is done");

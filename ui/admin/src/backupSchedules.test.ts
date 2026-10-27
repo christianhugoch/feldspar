@@ -182,6 +182,7 @@ describe("the schedule form", () => {
       frequency: "weekly",
       retention_days: 14,
       include: all,
+      password: null,
     });
     expect(
       scheduleBody({ ...sftp, port: "", password: " pass word ", remoteDirectory: " b/ " })
@@ -210,6 +211,31 @@ describe("the schedule form", () => {
     expect(scheduleBody(edit).destination).toMatchObject({ password: SECRET_SENTINEL });
     // The host key is the server's to record, never the form's to send.
     expect(scheduleBody(edit).destination).not.toHaveProperty("host_key");
+  });
+
+  it("protects each backup with a password typed twice, and keeps a stored one", () => {
+    // None by default, and none is sent as null.
+    expect(scheduleBody(local).password).toBeNull();
+    // A typed password must be repeated.
+    const typed = { ...local, backupPassword: "s3cret", backupPasswordRepeat: "s3cre" };
+    expect(scheduleFormErrors(typed).backupPassword).toBeDefined();
+    const repeated = { ...typed, backupPasswordRepeat: "s3cret" };
+    expect(scheduleFormErrors(repeated)).toEqual({});
+    expect(scheduleBody(repeated).password).toBe("s3cret");
+
+    // A stored one opens as the mask, needs no repeat, and is sent back as it.
+    const edit = editScheduleForm({ ...schedule, password: SECRET_SENTINEL });
+    expect(edit).toMatchObject({ backupPassword: SECRET_SENTINEL, backupPasswordStored: true });
+    expect(scheduleFormErrors(edit)).toEqual({});
+    expect(scheduleBody(edit).password).toBe(SECRET_SENTINEL);
+    // Removed, it is sent as null, which removes it on the server.
+    expect(scheduleBody({ ...edit, backupPassword: "", backupPasswordStored: false }).password)
+      .toBeNull();
+    // A schedule without one opens empty.
+    expect(editScheduleForm(schedule)).toMatchObject({
+      backupPassword: "",
+      backupPasswordStored: false,
+    });
   });
 
   it("names the kinds", () => {

@@ -64,6 +64,14 @@ export type ScheduleForm = {
   frequency: Frequency;
   retention: string;
   include: BackupSelection;
+  /** The password each backup is encrypted with: empty for none, and
+   * `SECRET_SENTINEL` while the stored one is kept. */
+  backupPassword: string;
+  /** The password typed again; checked only for one that was typed. */
+  backupPasswordRepeat: string;
+  /** Whether the server holds a password for this schedule that the form has
+   * not removed. */
+  backupPasswordStored: boolean;
 };
 
 export type ScheduleField =
@@ -79,7 +87,8 @@ export type ScheduleField =
   | "accessKey"
   | "secretKey"
   | "retention"
-  | "include";
+  | "include"
+  | "backupPassword";
 
 /** What the Add button opens on: what to include starts as the Backup card's
  * current selection, the one choice the admin has already made. */
@@ -102,6 +111,9 @@ export function newScheduleForm(include: BackupSelection): ScheduleForm {
     frequency: "daily",
     retention: "30",
     include,
+    backupPassword: "",
+    backupPasswordRepeat: "",
+    backupPasswordStored: false,
   };
 }
 
@@ -130,6 +142,8 @@ export function editScheduleForm(schedule: BackupSchedule): ScheduleForm {
       ? (schedule.frequency as Frequency)
       : "daily",
     retention: String(schedule.retention_days),
+    backupPassword: schedule.password ? SECRET_SENTINEL : "",
+    backupPasswordStored: !!schedule.password,
   };
 }
 
@@ -178,6 +192,12 @@ export function scheduleFormErrors(
       max: MAX_RETENTION_DAYS,
     });
   if (isEmpty(form.include)) errors.include = t("Choose at least one thing to include.");
+  if (
+    form.backupPassword !== "" &&
+    !isStoredSecret(form.backupPassword) &&
+    form.backupPassword !== form.backupPasswordRepeat
+  )
+    errors.backupPassword = t("The passwords do not match.");
   return errors;
 }
 
@@ -215,6 +235,8 @@ export function scheduleBody(form: ScheduleForm) {
     frequency: form.frequency,
     retention_days: Number(form.retention.trim()),
     include: form.include,
+    // The mask keeps the stored password; empty is none, which removes it.
+    password: form.backupPassword === "" ? null : form.backupPassword,
   };
 }
 

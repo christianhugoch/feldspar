@@ -5,7 +5,8 @@
 //! A schedule is four things an admin chooses — a **destination** (a
 //! [`Destination`]: a local directory, an SFTP directory or a bucket), a
 //! **frequency** (daily, weekly or monthly), a **retention** (days before a
-//! backup there is deleted) and what it **includes** — stored as a list under
+//! backup there is deleted) and what it **includes** — and optionally a
+//! **password** each backup is encrypted with, stored as a list under
 //! [`BACKUP_SCHEDULES`](sc_config::BACKUP_SCHEDULES). Each schedule has its own
 //! selection, so a nightly schema-only backup and a weekly full one can sit
 //! side by side.
@@ -49,6 +50,8 @@ use sc_catalog::Catalog;
 use sc_error::{Error, Result};
 use serde_json::{Map, Value as Json, json};
 use uuid::Uuid;
+
+use sc_types::SECRET_SENTINEL;
 
 use super::destination::{Connection, Destination};
 use super::{Available, BackupPreferences};
@@ -121,6 +124,9 @@ pub struct BackupSchedule {
     pub retention_days: i64,
     /// What each backup includes, as what is left out.
     pub include: BackupPreferences,
+    /// The password each backup is protected with, if any. Stored as the
+    /// destination's credentials are, and sent to the admin UI as the mask.
+    pub password: Option<String>,
 }
 
 impl BackupSchedule {
@@ -162,13 +168,31 @@ impl BackupSchedule {
                 "`retention_days` must be between 1 and {MAX_RETENTION_DAYS}"
             )));
         }
+        // The mask is kept as it came, for `keep_password` to put the stored
+        // one back; `password_from_body` would refuse nothing about it.
+        let password = super::password_from_body(&Json::Object(body.clone()))?;
         Ok(BackupSchedule {
             id,
             destination,
             frequency,
             retention_days,
             include,
+            password,
         })
+    }
+
+    /// Put back the password a save left as [`SECRET_SENTINEL`] — "unchanged"
+    /// — from `previous`, the schedule being edited. The mask with no stored
+    /// password is refused, as a destination's is: saving it would protect
+    /// every backup with the mask's text.
+    pub fn keep_password(mut self, previous: Option<&BackupSchedule>) -> Result<BackupSchedule> {
+        if self.password.as_deref() == Some(SECRET_SENTINEL) {
+            self.password = match previous.and_then(|p| p.password.clone()) {
+                Some(stored) => Some(stored),
+                None => return Err(Error::invalid("`password`: enter the backup password")),
+            };
+        }
+        Ok(self)
     }
 
     /// The stored shape.
@@ -179,6 +203,7 @@ impl BackupSchedule {
             "frequency": self.frequency.as_str(),
             "retention_days": self.retention_days,
             "include": self.include.to_json(),
+            "password": self.password,
         })
     }
 
@@ -338,6 +363,9 @@ pub fn schedule_json(
             "destination".to_owned(),
             schedule.destination.redacted_json(),
         );
+        if schedule.password.is_some() {
+            obj.insert("password".to_owned(), json!(SECRET_SENTINEL));
+        }
         obj.insert(
             "location".to_owned(),
             Json::String(schedule.destination.location()),
@@ -436,6 +464,7 @@ pub async fn run_schedule(
     super::write_backup_to(
         catalog,
         &schedule.include.selection(&available),
+        schedule.password.as_deref(),
         spool.create()?,
     )
     .await?;
@@ -573,6 +602,7 @@ mod tests {
             frequency,
             retention_days: 7,
             include: BackupPreferences::default(),
+            password: None,
         }
     }
 
@@ -679,6 +709,40 @@ mod tests {
             ..schedule(Frequency::Daily)
         };
         assert_eq!(BackupSchedule::from_json(&s.to_json()), Some(s));
+    }
+
+    /// A password is stored with the schedule, goes out as the mask, and the
+    /// mask handed back keeps it; the mask with nothing stored is refused.
+    #[test]
+    fn a_schedule_password_is_stored_masked_and_kept() {
+        let body = |v: Json| v.as_object().unwrap().clone();
+        let with = |password: Json| {
+            BackupSchedule::from_body(
+                Uuid::nil(),
+                &body(json!({
+                    "destination": { "kind": "local", "directory": "/srv/b" },
+                    "frequency": "daily",
+                    "retention_days": 7,
+                    "password": password,
+                })),
+                BackupPreferences::default(),
+            )
+            .unwrap()
+        };
+        let stored = with(json!("correct horse")).keep_password(None).unwrap();
+        assert_eq!(stored.password.as_deref(), Some("correct horse"));
+        assert_eq!(BackupSchedule::from_json(&stored.to_json()), Some(stored.clone()));
+        let sent = schedule_json(&stored, None, &Available::default());
+        assert_eq!(sent["password"], json!(SECRET_SENTINEL));
+
+        let kept = with(json!(SECRET_SENTINEL)).keep_password(Some(&stored)).unwrap();
+        assert_eq!(kept.password.as_deref(), Some("correct horse"));
+        assert!(with(json!(SECRET_SENTINEL)).keep_password(None).is_err());
+        // Empty or null is no password: an edit can remove it.
+        assert_eq!(with(json!("")).keep_password(Some(&stored)).unwrap().password, None);
+        assert_eq!(with(Json::Null).password, None);
+        let unprotected = schedule_json(&schedule(Frequency::Daily), None, &Available::default());
+        assert_eq!(unprotected["password"], Json::Null);
     }
 
     #[test]

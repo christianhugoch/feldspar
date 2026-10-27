@@ -61,12 +61,19 @@ import { MultiSelect } from "../multiSelect";
 import type { RestoreBackupResponse } from "../client";
 import { T, useT } from "../i18n";
 
-/** What the restore flow is doing: nothing, holding an uploaded file's contents,
- * or showing what a finished restore did. */
+/** What the restore flow is doing: nothing, waiting for the password of a
+ * protected file, holding an uploaded file's contents, or showing what a
+ * finished restore did. */
 type Restore =
   | { stage: "idle" }
+  | { stage: "password"; id: string; password: string; error: string | null }
   | { stage: "choosing"; uploaded: UploadedBackup; selection: BackupSelection }
   | { stage: "done"; report: RestoreBackupResponse };
+
+/** The optional password a backup is protected with, typed twice. */
+type BackupPassword = { password: string; repeat: string };
+
+const NO_PASSWORD: BackupPassword = { password: "", repeat: "" };
 
 export function BackupTab() {
   const { t } = useT();
@@ -77,6 +84,7 @@ export function BackupTab() {
   const [error, setError] = useState<string | null>(null);
   const [taken, setTaken] = useState(false);
   const [restore, setRestore] = useState<Restore>({ stage: "idle" });
+  const [password, setPassword] = useState<BackupPassword>(NO_PASSWORD);
   const fileInput = useRef<HTMLInputElement>(null);
 
   /** What this server has, and the selection the admin last backed up with. */
@@ -99,8 +107,10 @@ export function BackupTab() {
     setError(null);
     setTaken(false);
     try {
-      await createBackup(include);
+      await createBackup(include, password.password);
       setChoosing(false);
+      // Not kept for the next backup: each one is protected only if asked.
+      setPassword(NO_PASSWORD);
       setTaken(true);
       // The server remembers the selection as part of taking the backup, so the
       // options are read back: the next dialog opens on what was just used.
@@ -119,9 +129,31 @@ export function BackupTab() {
     setRestore({ stage: "idle" });
     try {
       const uploaded = await uploadBackup(file);
-      setRestore({ stage: "choosing", uploaded, selection: uploaded.include });
+      if (uploaded.locked)
+        setRestore({ stage: "password", id: uploaded.id, password: "", error: null });
+      else setRestore({ stage: "choosing", uploaded, selection: uploaded.include });
     } catch (e) {
       setError(errorMessage(e, "That file could not be read as a backup."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Give the server the password of the protected file it holds; on the
+   * right one, go on to what to restore. A wrong one is said in the modal,
+   * which stays open to try again. */
+  const unlock = async (id: string, typed: string) => {
+    setBusy("Reading the backup…");
+    try {
+      const uploaded = (await api.unlockBackup({ id, password: typed })) as UploadedBackup;
+      setRestore({ stage: "choosing", uploaded, selection: uploaded.include });
+    } catch (e) {
+      setRestore({
+        stage: "password",
+        id,
+        password: "",
+        error: errorMessage(e, "That password does not open the backup."),
+      });
     } finally {
       setBusy(null);
     }
@@ -254,8 +286,21 @@ export function BackupTab() {
           contents={contents}
           selection={selection}
           onChange={setSelection}
+          password={password}
+          onPasswordChange={setPassword}
           onCancel={() => setChoosing(false)}
           onConfirm={() => void takeBackup(selection)}
+        />
+      )}
+
+      {restore.stage === "password" && (
+        <PasswordDialog
+          busy={busy}
+          password={restore.password}
+          error={restore.error}
+          onChange={(typed) => setRestore({ ...restore, password: typed })}
+          onCancel={() => setRestore({ stage: "idle" })}
+          onConfirm={() => void unlock(restore.id, restore.password)}
         />
       )}
 
@@ -292,8 +337,151 @@ function restoreSubtitle(uploaded: UploadedBackup): string | undefined {
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
+/** Asks for the password of an uploaded backup that is protected by one,
+ * before the restore dialog can say what is in it. */
+function PasswordDialog({
+  busy,
+  password,
+  error,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  busy: string | null;
+  password: string;
+  error: string | null;
+  onChange: (password: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useT();
+  return (
+    <Modal show onHide={onCancel}>
+      <Form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (password !== "") onConfirm();
+        }}
+      >
+        <Modal.Header closeButton>
+          <Modal.Title className="h4">
+            <T text="This backup is protected by a password" />
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {error && (
+            <Alert variant="danger">
+              <AlertBody>{error}</AlertBody>
+            </Alert>
+          )}
+          <Form.Group controlId="restore-password">
+            <Form.Label><T text="Backup password" /></Form.Label>
+            <Form.Control
+              type="password"
+              autoComplete="off"
+              autoFocus
+              value={password}
+              onChange={(e) => onChange(e.target.value)}
+            />
+            <Form.Text muted>
+              <T text="Enter the password the backup was protected with to see what it contains." />
+            </Form.Text>
+          </Form.Group>
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" type="button" onClick={onCancel}>
+            <T text="Cancel" />
+          </Button>
+          <Button type="submit" disabled={busy !== null || password === ""}>
+            {busy !== null ? t("Working…") : t("Continue")}
+          </Button>
+        </Modal.Footer>
+      </Form>
+    </Modal>
+  );
+}
+
+/** The optional password boxes, typed twice, of a backup and of an automated
+ * backup. `stored` is for a schedule whose password is kept on the server: the
+ * box holds the mask, is cleared on focus so typing replaces it, and gets the
+ * mask back on blur if nothing was typed — so tabbing through keeps it, and
+ * only `onRemove` (the Remove link) takes it away. */
+function PasswordFields({
+  idPrefix,
+  value,
+  onChange,
+  stored = false,
+  onRemove,
+}: {
+  idPrefix: string;
+  value: BackupPassword;
+  onChange: (value: BackupPassword) => void;
+  stored?: boolean;
+  onRemove?: () => void;
+}) {
+  const { t } = useT();
+  const mismatch = backupPasswordMismatch(value);
+  return (
+    <>
+      <h4 className="mb-1"><T text="Password protection" /></h4>
+      <p className="text-secondary small mb-3">
+        <T text="Optional. Encrypts the backup with AES-256, which 7-Zip and other standard zip tools open with the same password. A lost password cannot be recovered." />
+      </p>
+      <div className="row">
+        <Form.Group className="col-sm-6 mb-3" controlId={`${idPrefix}-password`}>
+          <Form.Label><T text="Password" /></Form.Label>
+          <Form.Control
+            type="password"
+            autoComplete="new-password"
+            value={value.password}
+            placeholder={t("No password")}
+            onChange={(e) => onChange({ ...value, password: e.target.value })}
+            onFocus={() => stored && isStoredSecret(value.password) && onChange(NO_PASSWORD)}
+            onBlur={() =>
+              stored &&
+              value.password === "" &&
+              onChange({ password: SECRET_SENTINEL, repeat: "" })
+            }
+          />
+          {stored && (
+            <Form.Text muted>
+              <T text="Stored. Type to replace it." />{" "}
+              {onRemove && (
+                <Button variant="link" size="sm" className="p-0 align-baseline" onClick={onRemove}>
+                  <T text="Remove password" />
+                </Button>
+              )}
+            </Form.Text>
+          )}
+        </Form.Group>
+        {value.password !== "" && !isStoredSecret(value.password) && (
+          <Form.Group className="col-sm-6 mb-3" controlId={`${idPrefix}-password-repeat`}>
+            <Form.Label><T text="Repeat password" /></Form.Label>
+            <Form.Control
+              type="password"
+              autoComplete="new-password"
+              value={value.repeat}
+              isInvalid={mismatch && value.repeat !== ""}
+              onChange={(e) => onChange({ ...value, repeat: e.target.value })}
+            />
+            <Form.Control.Feedback type="invalid">
+              <T text="The passwords do not match." />
+            </Form.Control.Feedback>
+          </Form.Group>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Whether a typed password still needs its repeat to match. A stored one
+ * (the mask) and none at all need nothing. */
+function backupPasswordMismatch(value: BackupPassword): boolean {
+  return value.password !== "" && !isStoredSecret(value.password) && value.password !== value.repeat;
+}
+
 /** The backup and restore dialog: a title, the tick boxes and pickers, and a
- * button. */
+ * button — and, for a backup, the optional password. */
 function IncludeDialog({
   show,
   title,
@@ -303,6 +491,8 @@ function IncludeDialog({
   contents,
   selection,
   onChange,
+  password,
+  onPasswordChange,
   onCancel,
   onConfirm,
 }: {
@@ -314,10 +504,13 @@ function IncludeDialog({
   contents: BackupContents;
   selection: BackupSelection;
   onChange: (selection: BackupSelection) => void;
+  password?: BackupPassword;
+  onPasswordChange?: (password: BackupPassword) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const nothing = isEmpty(selection);
+  const mismatch = password !== undefined && backupPasswordMismatch(password);
   return (
     <Modal show={show} onHide={onCancel} size="lg" scrollable>
       <Modal.Header closeButton>
@@ -332,12 +525,22 @@ function IncludeDialog({
           selection={selection}
           onChange={onChange}
         />
+
+        {password !== undefined && onPasswordChange && (
+          <div className="mt-4">
+            <PasswordFields idPrefix="backup" value={password} onChange={onPasswordChange} />
+          </div>
+        )}
       </Modal.Body>
       <Modal.Footer>
         <Button variant="secondary" type="button" onClick={onCancel}>
           <T text="Cancel" />
         </Button>
-        <Button type="button" disabled={busy !== null || nothing} onClick={onConfirm}>
+        <Button
+          type="button"
+          disabled={busy !== null || nothing || mismatch}
+          onClick={onConfirm}
+        >
           {busy !== null ? "Working…" : confirm}
         </Button>
       </Modal.Footer>
@@ -916,6 +1119,9 @@ function AutomatedBackups({
                       {t("Includes: {summary}", {
                         summary: summarise(schedule.include, contents),
                       })}
+                      {schedule.password && (
+                        <span className="ms-2">· <T text="Password protected" /></span>
+                      )}
                     </div>
                   </td>
                   <td>{frequencyLabel(schedule.frequency, t)}</td>
@@ -1018,6 +1224,35 @@ function AutomatedBackups({
                 selection={editing.include}
                 onChange={(include) => setEditing({ ...editing, include })}
               />
+
+              <div className="mt-4">
+                <PasswordFields
+                  idPrefix="schedule"
+                  stored={editing.backupPasswordStored}
+                  onRemove={() =>
+                    setEditing({
+                      ...editing,
+                      backupPasswordStored: false,
+                      backupPassword: "",
+                      backupPasswordRepeat: "",
+                    })
+                  }
+                  value={{
+                    password: editing.backupPassword,
+                    repeat: editing.backupPasswordRepeat,
+                  }}
+                  onChange={(value) =>
+                    setEditing({
+                      ...editing,
+                      backupPassword: value.password,
+                      backupPasswordRepeat: value.repeat,
+                    })
+                  }
+                />
+                {errors.backupPassword && (
+                  <div className="text-danger small">{errors.backupPassword}</div>
+                )}
+              </div>
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" type="button" onClick={() => setEditing(null)}>

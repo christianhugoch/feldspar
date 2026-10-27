@@ -1536,6 +1536,44 @@ most for `--modules-dir`. **Restart a server that is already running on that
 database** afterwards, because it loaded its tables, applications and triggers when
 it started.
 
+#### Password-protected backups
+
+A backup can be protected by a password. Every entry in the zip is then
+encrypted with **AES-256 (WinZip AES)**, the standard zip encryption: 7-Zip,
+WinZip, Keka, `7z x` and other standard tools open the file with the same
+password. (The old "ZipCrypto" scheme is broken and is never written. macOS's
+Archive Utility and Windows Explorer's built-in unzip do not open AES zips;
+use one of the tools above.) The entry **names** are not encrypted, as in any
+zip, so someone without the password can list the tables and stores a backup
+holds but read none of them. A lost password cannot be recovered.
+
+- **Settings → Backup → Backup now**: the dialog has an optional password,
+  typed twice. It applies to that download only; the next backup is
+  unprotected unless a password is given again.
+- **Automated backups**: each schedule has an optional password, stored with
+  the schedule's other credentials (`_fd_config`, `backup_schedules`) and shown
+  as the mask. Leave the mask to keep it, type to replace it, or use **Remove
+  password**.
+- **Restore**: when the uploaded file is protected, a dialog asks for the
+  password before the dialog that asks what to restore. A wrong password is
+  refused there and can be tried again.
+- **Terminal**: `--password VALUE`, `--password` with no value (asked for
+  without echo: twice for `backup`, once for `restore`), or the
+  `FELDSPAR_BACKUP_PASSWORD` environment variable. `restore` of a protected
+  file given none of these asks at the terminal, and fails, naming both, when
+  there is no terminal.
+
+```bash
+FELDSPAR_BACKUP_PASSWORD="$(cat /etc/feldspar/backup.pass)" \
+  sudo -E -u feldspar feldspar backup - --environment production \
+  | aws s3 cp - s3://my-bucket/feldspar/site-$(date +%F).zip
+sudo -u feldspar feldspar restore site.zip --password --environment staging   # asks
+7z x -p site.zip -o site/                                                    # inspect by hand
+```
+
+A password on the command line is visible to other users of the machine in
+`ps`. Prefer the prompt or the environment variable.
+
 #### Automated backups off the server
 
 **Settings → Backup → Automated backups** takes a backup every day or every week and
@@ -1592,7 +1630,8 @@ The key is not in the database, so a database dump alone opens nothing.
   table's rows include a Secret field, the zip carries the key as
   `keys/secrets.key` (the manifest says so under `secrets_key`), so a restore
   after a disaster needs no password typed in again. Treat such a backup as
-  being as sensitive as the passwords themselves. That holds for automated
+  being as sensitive as the passwords themselves, or protect it with a
+  password (see "Password-protected backups" above). That holds for automated
   backups to SFTP and S3 too, and on the hosted service for a customer's own S3
   backups.
 - **A restore re-seals.** Each value is decrypted with the backup's key and

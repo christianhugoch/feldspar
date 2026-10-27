@@ -2118,6 +2118,16 @@ async fn every_backup_route_is_admin_only() -> sc_error::Result<()> {
         .send("POST", "/api/backup/restore", Some(json!({ "id": "x" })))
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = server
+        .client
+        .send(
+            "POST",
+            "/api/backup/unlock",
+            Some(json!({ "id": "x", "password": "p" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
@@ -4157,5 +4167,216 @@ async fn a_v1_agent_with_every_skill_is_restored_with_every_trait() -> sc_error:
         .send("GET", "/api/agent-memories?agent=EverySkill", None)
         .await;
     assert_eq!(again.as_array().unwrap().len(), 3, "{again}");
+    Ok(())
+}
+
+/// Whether every file entry of a zip is encrypted — and none can be read
+/// without the password.
+fn all_encrypted(archive: &[u8]) -> bool {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
+    (0..zip.len()).all(|i| {
+        let raw = zip.by_index_raw(i).unwrap();
+        raw.is_dir() || raw.encrypted()
+    })
+}
+
+/// One entry of a protected zip, decrypted with `password`, as text — what
+/// 7-Zip does with the same file.
+fn decrypted_entry(archive: &[u8], path: &str, password: &str) -> String {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("a zip");
+    let mut file = zip
+        .by_name_decrypt(path, password.as_bytes())
+        .unwrap_or_else(|e| panic!("`{path}` would not open with the password: {e}"));
+    let mut text = String::new();
+    file.read_to_string(&mut text).expect("readable text");
+    text
+}
+
+/// A password-protected backup, end to end: the download is a standard
+/// AES-encrypted zip that opens with the password and with nothing else; the
+/// upload of it is held as `locked` until the password is given; a wrong one is
+/// refused and can be retried; the right one says what the file holds and the
+/// restore that follows uses it. The password is not remembered for the next
+/// backup.
+#[tokio::test]
+async fn a_password_protected_backup_restores_with_its_password() -> sc_error::Result<()> {
+    const SECRET: &str = "correct horse battery staple";
+    let mut source = setup().await?;
+    furnish(&mut source).await?;
+
+    let (_, options) = source.client.send("GET", "/api/backup", None).await;
+    // A password that is not text is refused, before anything is written.
+    let (status, bytes, _) = source
+        .client
+        .raw(
+            "POST",
+            "/backup/create",
+            Some((
+                serde_json::to_vec(&json!({ "include": options["include"], "password": 7 }))
+                    .unwrap(),
+                "application/json",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&bytes));
+
+    let (status, archive, _) = source
+        .client
+        .raw(
+            "POST",
+            "/backup/create",
+            Some((
+                serde_json::to_vec(&json!({ "include": options["include"], "password": SECRET }))
+                    .unwrap(),
+                "application/json",
+            )),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&archive));
+    assert!(all_encrypted(&archive));
+    // The names are a zip's directory and readable; the contents are not.
+    {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive[..])).unwrap();
+        assert!(zip.index_for_name("tables/books/rows.ndjson").is_some());
+        assert!(zip.by_name("manifest.json").is_err(), "readable without the password");
+        assert!(zip.by_name_decrypt("manifest.json", b"wrong").is_err());
+    }
+    let manifest: Value =
+        serde_json::from_str(&decrypted_entry(&archive, "manifest.json", SECRET)).unwrap();
+    assert_eq!(manifest["format"], json!("feldspar-backup"));
+    assert_eq!(
+        decrypted_entry(&archive, "file-stores/assets/files/notes/readme.txt", SECRET),
+        "hello from the backup"
+    );
+    // The next backup is not protected unless asked again.
+    assert!(!all_encrypted(&backup_everything(&mut source).await));
+
+    // --- the other server ---------------------------------------------------
+    let mut target = setup().await?;
+    let (status, bytes, _) = target
+        .client
+        .raw("POST", "/backup/upload", Some((archive.clone(), "application/zip")))
+        .await;
+    let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_eq!(status, StatusCode::OK, "{uploaded}");
+    assert_eq!(uploaded["locked"], json!(true));
+    assert_eq!(uploaded["encrypted"], json!(true));
+    assert_eq!(uploaded["available"], Value::Null, "nothing is read without the password");
+    let id = uploaded["id"].clone();
+
+    // Restoring before the password is given is refused, and the file stays
+    // held; so it does after a wrong password.
+    let include_books = json!({
+        "tables": ["books"], "table_data": ["books"], "applications": [],
+        "file_stores": [], "users": false, "agents": false, "triggers": false, "ssl": false,
+    });
+    let (status, body) = target
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": id, "include": include_books })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = target
+        .client
+        .send("POST", "/api/backup/unlock", Some(json!({ "id": id, "password": "nope" })))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("password"), "{body}");
+
+    let (status, unlocked) = target
+        .client
+        .send("POST", "/api/backup/unlock", Some(json!({ "id": id, "password": SECRET })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{unlocked}");
+    assert_eq!(unlocked["locked"], json!(false));
+    assert_eq!(unlocked["encrypted"], json!(true));
+    assert_eq!(unlocked["available"]["tables"][0]["name"], json!("books"));
+    assert_eq!(unlocked["include"]["table_data"], json!(["books"]));
+
+    let (status, report) = target
+        .client
+        .send(
+            "POST",
+            "/api/backup/restore",
+            Some(json!({ "id": id, "include": include_books })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let (status, rows) = target
+        .client
+        .send("GET", "/api/tables/books/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    let titles: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["title"].as_str())
+        .collect();
+    assert_eq!(titles, vec!["Dune", "Solaris"]);
+
+    // The library calls the CLI makes: the same file, by path.
+    let path = temp_dir().join("protected.zip");
+    std::fs::write(&path, &archive).unwrap();
+    assert!(sc_server::backup_is_encrypted(&path)?);
+    assert!(sc_server::inspect_backup(&path, None).is_err());
+    assert!(sc_server::inspect_backup(&path, Some("nope")).is_err());
+    let (contents, _) = sc_server::inspect_backup(&path, Some(SECRET))?;
+    assert_eq!(contents.tables[0].name, "books");
+    Ok(())
+}
+
+/// An automated backup with a password writes every backup encrypted with it;
+/// the password goes out as the mask, the mask handed back keeps it, and an
+/// empty one removes it.
+#[tokio::test]
+async fn an_automated_backup_can_be_password_protected() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    furnish(&mut server).await?;
+    let dest = temp_dir().join("protected-nightly");
+    let created = ok(
+        &mut server,
+        "POST",
+        "/api/backup/schedules",
+        Some(with_include(json!({
+            "destination": local(&dest),
+            "frequency": "daily",
+            "retention_days": 7,
+            "password": "s3cret pass",
+        }))),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["password"], json!(sc_types::SECRET_SENTINEL));
+
+    let scheduler = sc_server::BackupScheduler::new(server.catalog.clone());
+    assert_eq!(scheduler.tick(chrono::Utc::now()).await.len(), 1);
+    let list = ok(&mut server, "GET", "/api/backup/schedules", None).await;
+    let entry = &list.as_array().unwrap()[0];
+    assert_eq!(entry["last_error"], Value::Null, "{entry}");
+    assert_eq!(entry["password"], json!(sc_types::SECRET_SENTINEL));
+    let archive = std::fs::read(entry["last_file"].as_str().unwrap()).unwrap();
+    assert!(all_encrypted(&archive));
+    let manifest: Value =
+        serde_json::from_str(&decrypted_entry(&archive, "manifest.json", "s3cret pass")).unwrap();
+    assert_eq!(manifest["format"], json!("feldspar-backup"));
+
+    // Saved with the mask: kept.
+    let path = format!("/api/backup/schedules/{id}");
+    let mut body = with_include(json!({
+        "destination": local(&dest),
+        "frequency": "daily",
+        "retention_days": 7,
+        "password": sc_types::SECRET_SENTINEL,
+    }));
+    let kept = ok(&mut server, "PUT", &path, Some(body.clone())).await;
+    assert_eq!(kept["password"], json!(sc_types::SECRET_SENTINEL));
+    // Saved empty: removed.
+    body["password"] = json!("");
+    let removed = ok(&mut server, "PUT", &path, Some(body)).await;
+    assert_eq!(removed["password"], Value::Null);
     Ok(())
 }

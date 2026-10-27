@@ -4959,6 +4959,10 @@ pub fn admin_handlers_with(
                     // should get.
                     None => crate::backup::Selection::everything(&available),
                 };
+                // Checked before the selection is remembered, so a refused
+                // password changes nothing. It is not remembered itself: the
+                // next backup is protected only if the admin says so again.
+                let password = crate::backup::password_from_body(&ctx.body)?;
                 let previous = stored_backup_preferences(&catalog).await?;
                 let preferences =
                     crate::backup::BackupPreferences::of(&previous, &available, &selection);
@@ -4969,8 +4973,13 @@ pub fn admin_handlers_with(
                 // archive is never in memory; an error before the first byte is
                 // still the JSON error every other handler gives.
                 let spool = crate::backup::SpoolFile::new("backup");
-                let len =
-                    crate::backup::write_backup_to(&catalog, &selection, spool.create()?).await?;
+                let len = crate::backup::write_backup_to(
+                    &catalog,
+                    &selection,
+                    password.as_deref(),
+                    spool.create()?,
+                )
+                .await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
                     body: crate::handler::DownloadBody::File(crate::handler::SpooledFile::open(
                         spool, len,
@@ -4983,6 +4992,11 @@ pub fn admin_handlers_with(
     });
 
     // Take delivery of a file and say what is in it. Nothing is written.
+    //
+    // A password-protected file cannot say what is in it yet: it is kept all
+    // the same and answered with `locked` and its `id`, and the dialog asks
+    // for the password and hands it to `unlockBackup`, which answers what this
+    // would have.
     reg.register("uploadBackup", {
         let pending = pending.clone();
         move |ctx| {
@@ -4992,24 +5006,51 @@ pub fn admin_handlers_with(
                     .raw_file
                     .clone()
                     .ok_or_else(|| Error::invalid("this handler requires an uploaded file"))?;
-                let (contents, manifest) = crate::backup::inspect(file.path())?;
+                if crate::backup::is_encrypted(file.path())? {
+                    let id = pending.keep(file)?;
+                    return Ok(HandlerResponse::ok(json!({
+                        "id": id.to_string(),
+                        "encrypted": true,
+                        "locked": true,
+                    })));
+                }
+                let (contents, manifest) = crate::backup::inspect(file.path(), None)?;
                 let id = pending.keep(file)?;
-                Ok(HandlerResponse::ok(json!({
-                    "id": id.to_string(),
-                    "created_at": manifest.get("created_at"),
-                    // What wrote the file, in one line — "Feldspar 0.1.0", or
-                    // "Saltcorn 1.7.0, imported" for a v1 archive this server
-                    // translated on the way in. The restore dialog shows it,
-                    // because a v1 import leaves things behind and the admin
-                    // should know which kind of file they picked before they
-                    // press the button.
-                    "source": manifest.get("source"),
-                    "available": contents.to_json(),
-                    // Everything the file holds, ticked: the admin excludes from
-                    // there, which is the same direction the backup dialog works
-                    // in.
-                    "include": crate::backup::Selection::everything(&contents).to_json(),
-                })))
+                Ok(HandlerResponse::ok(uploaded_backup_json(
+                    id, false, &contents, &manifest,
+                )))
+            }
+        }
+    });
+
+    // The password of an uploaded, protected backup: checked against the file,
+    // held with it for the restore, and answered with what the file holds. A
+    // wrong password is refused and the file stays, so the admin can try again.
+    reg.register("unlockBackup", {
+        let pending = pending.clone();
+        move |ctx| {
+            let pending = pending.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let id = parse_uuid(non_empty_str_field(obj, "id")?, "uploaded backup")?;
+                let password = crate::backup::password_from_body(&ctx.body)?
+                    .ok_or_else(|| Error::invalid("`password`: enter the backup's password"))?;
+                let file = pending.file(id)?;
+                let (contents, manifest) = {
+                    let path = file.path().to_owned();
+                    let password = password.clone();
+                    // Decrypting the manifest derives a key (PBKDF2, 1000
+                    // rounds) and reads an entry: off the async threads.
+                    tokio::task::spawn_blocking(move || {
+                        crate::backup::inspect(&path, Some(&password))
+                    })
+                    .await
+                    .map_err(|e| Error::msg(format!("reading the backup: {e}")))??
+                };
+                pending.unlock(id, password)?;
+                Ok(HandlerResponse::ok(uploaded_backup_json(
+                    id, true, &contents, &manifest,
+                )))
             }
         }
     });
@@ -5035,9 +5076,23 @@ pub fn admin_handlers_with(
                 };
                 // Deleted when this is done with it, whichever way the restore
                 // goes.
-                let file = pending.take(id)?;
-                let report =
-                    crate::backup::restore_backup(&catalog, &apps, file.path(), &selection).await?;
+                // Refused, not taken: the file stays for `unlockBackup`.
+                if pending.is_locked(id)? {
+                    return Err(Error::invalid(
+                        "this backup is protected by a password: unlock it with its password \
+                         before restoring",
+                    ));
+                }
+                // The password `unlockBackup` checked, when the file has one.
+                let (file, password) = pending.take(id)?;
+                let report = crate::backup::restore_backup(
+                    &catalog,
+                    &apps,
+                    file.path(),
+                    password.as_deref(),
+                    &selection,
+                )
+                .await?;
                 // A restore can create tables and stores an application's API is
                 // projected from, so the mounted apps are re-projected once at the
                 // end — the same thing a schema change through the admin API does.
@@ -5090,7 +5145,8 @@ pub fn admin_handlers_with(
                 let body = require_object(&ctx.body)?;
                 let available = crate::backup::available(&catalog).await?;
                 let include = include_from_body(body, &available, None)?;
-                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
+                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?
+                    .keep_password(None)?;
                 schedule.destination = schedule.destination.keep_secrets(None)?;
                 let mut schedules = load_schedules(&catalog).await?;
                 check_unique(&schedule, &schedules)?;
@@ -5126,7 +5182,8 @@ pub fn admin_handlers_with(
                 // The previous exclusions are an input, so one naming a table
                 // that is not here today survives the edit.
                 let include = include_from_body(body, &available, Some(&previous.include))?;
-                let mut schedule = BackupSchedule::from_body(id, body, include)?;
+                let mut schedule =
+                    BackupSchedule::from_body(id, body, include)?.keep_password(Some(previous))?;
                 schedule.destination = schedule
                     .destination
                     .keep_secrets(Some(&previous.destination))?;
@@ -11133,6 +11190,34 @@ async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::B
     Ok(match stored {
         Some(value) => crate::backup::BackupPreferences::from_json(&value),
         None => crate::backup::BackupPreferences::default(),
+    })
+}
+
+/// What `uploadBackup` (and `unlockBackup`, for a protected file) answers: the
+/// token that names the held file and what the file holds. `encrypted` says
+/// whether the file is protected by a password; `locked` is false, because
+/// what it holds has been read.
+fn uploaded_backup_json(
+    id: uuid::Uuid,
+    encrypted: bool,
+    contents: &crate::backup::Available,
+    manifest: &Json,
+) -> Json {
+    json!({
+        "id": id.to_string(),
+        "encrypted": encrypted,
+        "locked": false,
+        "created_at": manifest.get("created_at"),
+        // What wrote the file, in one line — "Feldspar 0.1.0", or "Saltcorn
+        // 1.7.0, imported" for a v1 archive this server translated on the way
+        // in. The restore dialog shows it, because a v1 import leaves things
+        // behind and the admin should know which kind of file they picked
+        // before they press the button.
+        "source": manifest.get("source"),
+        "available": contents.to_json(),
+        // Everything the file holds, ticked: the admin excludes from there,
+        // which is the same direction the backup dialog works in.
+        "include": crate::backup::Selection::everything(contents).to_json(),
     })
 }
 

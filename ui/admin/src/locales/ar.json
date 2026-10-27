@@ -1048,5 +1048,16 @@
   "This question is no longer waiting for an answer.": "لم يعد هذا السؤال ينتظر إجابة.",
   "Answer": "أجب",
   "Your answer": "إجابتك",
-  "Decline": "رفض"
+  "Decline": "رفض",
+  "This backup is protected by a password": "هذه النسخة الاحتياطية محمية بكلمة مرور",
+  "Backup password": "كلمة مرور النسخة الاحتياطية",
+  "Enter the password the backup was protected with to see what it contains.": "أدخل كلمة المرور التي حُميت بها النسخة الاحتياطية لعرض محتواها.",
+  "Continue": "متابعة",
+  "Password protection": "الحماية بكلمة مرور",
+  "Optional. Encrypts the backup with AES-256, which 7-Zip and other standard zip tools open with the same password. A lost password cannot be recovered.": "اختياري. يشفّر النسخة الاحتياطية بمعيار AES-256 الذي يفتحه 7-Zip وأدوات zip الشائعة الأخرى بكلمة المرور نفسها. لا يمكن استعادة كلمة مرور مفقودة.",
+  "No password": "بلا كلمة مرور",
+  "Remove password": "إزالة كلمة المرور",
+  "Repeat password": "كرّر كلمة المرور",
+  "The passwords do not match.": "كلمتا المرور غير متطابقتين.",
+  "Password protected": "محمية بكلمة مرور"
 }

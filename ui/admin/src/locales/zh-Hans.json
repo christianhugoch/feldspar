@@ -975,5 +975,16 @@
   "This question is no longer waiting for an answer.": "此问题已不再等待回答。",
   "Answer": "回答",
   "Your answer": "您的回答",
-  "Decline": "拒绝"
+  "Decline": "拒绝",
+  "This backup is protected by a password": "此备份受密码保护",
+  "Backup password": "备份密码",
+  "Enter the password the backup was protected with to see what it contains.": "输入保护该备份的密码以查看其内容。",
+  "Continue": "继续",
+  "Password protection": "密码保护",
+  "Optional. Encrypts the backup with AES-256, which 7-Zip and other standard zip tools open with the same password. A lost password cannot be recovered.": "可选。使用 AES-256 加密备份，7-Zip 等常用 zip 工具可用同一密码打开。密码丢失后无法恢复。",
+  "No password": "无密码",
+  "Remove password": "移除密码",
+  "Repeat password": "重复密码",
+  "The passwords do not match.": "两次输入的密码不一致。",
+  "Password protected": "受密码保护"
 }

@@ -17,6 +17,12 @@
 //! A Saltcorn 1 backup is the exception: [`super::v1::convert`] rewrites it in
 //! memory, as it always has, and the result is an [`Archive::Memory`] read
 //! through the same methods.
+//!
+//! A **password-protected** backup (WinZip AES, as [`super::write`] writes it)
+//! is opened with its password, which travels with the archive and decrypts
+//! each entry as it is read. Opening checks it once, against the first
+//! encrypted entry, so a wrong password is refused before anything else is
+//! read rather than as a damaged entry halfway through a restore.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -115,28 +121,51 @@ fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
 /// A backup to restore from.
 #[derive(Clone)]
 pub(super) enum Archive {
-    /// A zip on disk, read as the restore goes.
-    Zip(ZipArchive<SharedFile>),
+    /// A zip on disk, read as the restore goes, with the password its entries
+    /// are encrypted with when they are.
+    Zip(ZipArchive<SharedFile>, Option<Arc<str>>),
     /// Entries already in memory — a converted Saltcorn 1 backup.
     Memory(Arc<Entries>),
 }
 
 impl Archive {
-    /// Open a zip, refusing a file that is not one.
-    pub(super) fn open_zip(path: &Path) -> Result<Archive> {
-        let file = SharedFile::open(path)?;
-        let zip = ZipArchive::new(file).map_err(|e| {
-            Error::invalid(format!(
-                "this file is not a zip archive, so it is not a Saltcorn backup: {e}"
-            ))
+    /// Open a zip, refusing a file that is not one, and an encrypted one whose
+    /// `password` is missing or wrong. A password for a zip that is not
+    /// encrypted is not needed, and is not an error.
+    pub(super) fn open_zip(path: &Path, password: Option<&str>) -> Result<Archive> {
+        let mut zip = open_zip_archive(path)?;
+        let Some(first) = first_encrypted(&mut zip) else {
+            return Ok(Archive::Zip(zip, None));
+        };
+        // The manifest when there is one (small, and written last, after
+        // everything that might be large), else the first encrypted entry.
+        let check = zip
+            .index_for_name(super::MANIFEST_FILE)
+            .filter(|&i| zip.by_index_raw(i).is_ok_and(|entry| entry.encrypted()))
+            .unwrap_or(first);
+        let Some(password) = password.filter(|p| !p.is_empty()) else {
+            return Err(Error::invalid(PASSWORD_REQUIRED));
+        };
+        // Read to the end, not just opened: the two-byte check AES puts at an
+        // entry's start passes one wrong password in 65,536, and the HMAC at
+        // its end is what settles it.
+        let mut entry = zip
+            .by_index_decrypt(check, password.as_bytes())
+            .map_err(|e| entry_error(super::MANIFEST_FILE, e))?;
+        std::io::copy(&mut entry, &mut std::io::sink()).map_err(|_| {
+            Error::invalid(
+                "the password is not the one this backup was protected with, \
+                 or the file is damaged",
+            )
         })?;
-        Ok(Archive::Zip(zip))
+        drop(entry);
+        Ok(Archive::Zip(zip, Some(Arc::from(password))))
     }
 
     /// Every entry's name, directories left out.
     pub(super) fn names(&self) -> Vec<String> {
         match self {
-            Archive::Zip(zip) => zip
+            Archive::Zip(zip, _) => zip
                 .file_names()
                 .filter(|name| !name.ends_with('/'))
                 .map(str::to_owned)
@@ -157,7 +186,7 @@ impl Archive {
 
     pub(super) fn contains(&self, path: &str) -> bool {
         match self {
-            Archive::Zip(zip) => zip.index_for_name(path).is_some(),
+            Archive::Zip(zip, _) => zip.index_for_name(path).is_some(),
             Archive::Memory(entries) => entries.contains_key(path),
         }
     }
@@ -166,7 +195,7 @@ impl Archive {
     /// out.
     pub(super) fn names_under(&self, prefix: &str) -> Vec<String> {
         let mut names: Vec<String> = match self {
-            Archive::Zip(zip) => zip
+            Archive::Zip(zip, _) => zip
                 .file_names()
                 .filter(|name| name.starts_with(prefix) && !name.ends_with('/'))
                 .map(str::to_owned)
@@ -300,19 +329,58 @@ fn with_entry<T>(
     read: impl FnOnce(&mut dyn Read) -> Result<T>,
 ) -> Result<T> {
     match archive {
-        Archive::Zip(mut zip) => {
-            let mut entry = zip.by_name(path).map_err(|e| match e {
-                zip::result::ZipError::FileNotFound => missing(path),
-                other => {
-                    Error::invalid(format!("`{path}` cannot be read from the backup: {other}"))
-                }
-            })?;
+        Archive::Zip(mut zip, password) => {
+            let entry = match &password {
+                Some(password) => zip.by_name_decrypt(path, password.as_bytes()),
+                None => zip.by_name(path),
+            };
+            let mut entry = entry.map_err(|e| entry_error(path, e))?;
             read(&mut entry)
         }
         Archive::Memory(entries) => {
             let bytes = entries.get(path).ok_or_else(|| missing(path))?;
             read(&mut bytes.as_slice())
         }
+    }
+}
+
+/// What a backup that needs its password says without one — the CLI and the
+/// admin UI ask for it beforehand ([`is_encrypted`]), so this is for a caller
+/// that did not.
+const PASSWORD_REQUIRED: &str = "this backup is protected by a password: give the password to read it";
+
+fn open_zip_archive(path: &Path) -> Result<ZipArchive<SharedFile>> {
+    let file = SharedFile::open(path)?;
+    ZipArchive::new(file).map_err(|e| {
+        Error::invalid(format!(
+            "this file is not a zip archive, so it is not a Saltcorn backup: {e}"
+        ))
+    })
+}
+
+/// The index of the first encrypted entry, if any is.
+fn first_encrypted(zip: &mut ZipArchive<SharedFile>) -> Option<usize> {
+    (0..zip.len()).find(|&i| zip.by_index_raw(i).is_ok_and(|entry| entry.encrypted()))
+}
+
+/// Whether the zip at `path` is protected by a password — asked before
+/// [`Archive::open_zip`], so the password can be asked for. Only the central
+/// directory is read, which is not encrypted.
+pub(super) fn is_encrypted(path: &Path) -> Result<bool> {
+    let mut zip = open_zip_archive(path)?;
+    Ok(first_encrypted(&mut zip).is_some())
+}
+
+fn entry_error(path: &str, e: zip::result::ZipError) -> Error {
+    match e {
+        zip::result::ZipError::FileNotFound => missing(path),
+        zip::result::ZipError::InvalidPassword => {
+            Error::invalid("the password is not the one this backup was protected with")
+        }
+        zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED) => {
+            Error::invalid(PASSWORD_REQUIRED)
+        }
+        other => Error::invalid(format!("`{path}` cannot be read from the backup: {other}")),
     }
 }
 
@@ -415,7 +483,7 @@ mod tests {
             zip.write_all(bytes).unwrap();
         }
         zip.finish().unwrap();
-        let archive = Archive::open_zip(spool.path()).unwrap();
+        let archive = Archive::open_zip(spool.path(), None).unwrap();
         (spool, archive)
     }
 
@@ -495,7 +563,7 @@ mod tests {
         bytes[at + 6] = b'3';
         std::fs::write(spool2.path(), &bytes).unwrap();
 
-        let archive = Archive::open_zip(spool2.path()).unwrap();
+        let archive = Archive::open_zip(spool2.path(), None).unwrap();
         let e = all(&mut archive.rows("rows.ndjson")).await.unwrap_err();
         assert!(e.to_string().contains("`rows.ndjson`"), "{e}");
         assert!(e.to_string().contains("damaged"), "{e}");

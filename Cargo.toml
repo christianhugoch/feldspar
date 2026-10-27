@@ -396,11 +396,14 @@ csv = "1"
 # is not a backup. `default-features = false` drops every compression method but
 # the one a backup wants: `deflate-flate2-zlib-rs` is DEFLATE (what every
 # unarchiver on every desktop reads) through a **pure-Rust** zlib, so §16's
-# no-C-dependencies posture holds here as it does for TLS. No `aes-crypto`, no
+# no-C-dependencies posture holds here as it does for TLS. No
 # bzip2/lzma/zstd: a format only this system writes gains nothing from methods a
-# reader might not have.
+# reader might not have. `aes-crypto` is there for a password-protected backup:
+# WinZip AES-256 (AE-x), what 7-Zip, WinZip, Keka and `7z x` open — the
+# standard, unlike ZipCrypto, which is broken and is never written.
 zip = { version = "8", default-features = false, features = [
     "deflate-flate2-zlib-rs",
+    "aes-crypto",
 ] }
 # A Stan fit's raw run is published with its chains' CSVs gzipped (Stan TODO
 # §14): `chain-1.csv.gz` is what `cmdstanpy.from_csv` and every other Stan tool
