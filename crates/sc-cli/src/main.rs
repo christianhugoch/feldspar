@@ -1685,6 +1685,9 @@ fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, 
 
 /// `feldspar backup FILE [database flags]` — the zip Settings → Backup
 /// downloads, with everything ticked except the TLS settings, written to FILE.
+/// A FILE of `-` writes it to stdout instead, with no file on disk on the way:
+/// `feldspar backup - | aws s3 cp - s3://…` streams it in the memory one page
+/// of rows takes, however large the installation.
 ///
 /// The TLS settings are left out because they belong to the machine rather than
 /// to the installation: a certificate, its private key and the names it covers
@@ -1695,18 +1698,34 @@ fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, 
 /// Nothing is remembered: the dialog's stored selection is the dialog's, and a
 /// script's backup is not the admin saying what the next one should include.
 async fn backup_command(args: &[String]) -> Result<()> {
-    let (file, rest) = file_argument("backup", args)?;
+    let (file, rest) = match args.split_first() {
+        Some((first, rest)) if first == "-" => (None, rest.to_vec()),
+        _ => {
+            let (file, rest) = file_argument("backup", args)?;
+            (Some(file), rest)
+        }
+    };
     let (db, leftover) = DbConfig::extract(rest)?;
     if let Some(unknown) = leftover.first() {
         return Err(sc_error::Error::config(format!(
             "unknown backup argument `{unknown}`"
         )));
     }
+    // gzip's rule: a zip is not something to print on a terminal, and a `-`
+    // whose pipe was forgotten would otherwise do it.
+    if file.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Err(sc_error::Error::config(
+            "backup - writes the zip to stdout, which is a terminal: \
+             redirect or pipe it (feldspar backup - > site.zip)",
+        ));
+    }
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
     }
     let catalog = connect_catalog(&db).await?;
+    // Off whatever Settings → Development says: the echo goes to stdout, which
+    // under `-` is the zip.
     sc_log::set_log_sql(false);
     // A file store's bytes are read through its connection, so a store that is
     // not connected comes out as its definition with no files.
@@ -1717,13 +1736,21 @@ async fn backup_command(args: &[String]) -> Result<()> {
         ssl: false,
         ..sc_server::BackupSelection::everything(&available)
     };
-    let size = write_whole(&file, |out| {
-        sc_server::write_backup_to(&catalog, &selection, out)
-    })
-    .await?;
+    let size = match &file {
+        Some(file) => {
+            write_whole(file, |out| {
+                sc_server::write_backup_to(&catalog, &selection, out)
+            })
+            .await?
+        }
+        None => sc_server::write_backup_stream(&catalog, &selection, std::io::stdout()).await?,
+    };
     eprintln!(
         "feldspar: wrote {} ({} tables, {} applications, {} file stores, {})",
-        file.display(),
+        file.as_ref().map_or_else(
+            || "the backup to stdout".to_owned(),
+            |f| f.display().to_string()
+        ),
         selection.tables.len(),
         selection.applications.len(),
         selection.file_stores.len(),
@@ -2401,7 +2428,7 @@ fn print_usage() {
     eprintln!(
         "  feldspar app triggers (add|remove|list) --app SUBDOMAIN [NAME...] [--json] [database flags]"
     );
-    eprintln!("  feldspar backup FILE [database flags]");
+    eprintln!("  feldspar backup FILE|- [database flags]");
     eprintln!("  feldspar restore FILE [database flags] [server flags]");
     eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
@@ -2495,7 +2522,8 @@ fn print_usage() {
        Settings → Backup downloads with every box ticked but SSL / TLS: the
        certificate, its key and the names it covers belong to this machine.
        The file's directory must exist; a FILE already there is replaced only
-       once the new one is complete.
+       once the new one is complete. A FILE of - writes the zip to stdout
+       instead, with no temporary file (feldspar backup - | aws s3 cp - …).
 
   restore: restores everything in FILE — a backup from `feldspar backup`, from
        Settings → Backup, or from Saltcorn 1 — exactly as the Restore dialog

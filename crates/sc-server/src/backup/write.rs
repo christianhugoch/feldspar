@@ -19,8 +19,10 @@
 //! table, serialise it, add it to a zip in memory — and is what a 43 MB `bytea`
 //! table taking 3.4 GB to back up taught. So:
 //!
-//! - The zip is written to a [`std::fs::File`] ([`write_backup_to`]), never to a
-//!   buffer. The callers spool it to disk and serve, rename or send that file.
+//! - The zip is written to a [`std::fs::File`] ([`write_backup_to`]) or straight
+//!   down a pipe ([`write_backup_stream`]), never to a buffer. The callers
+//!   spool it to disk and serve, rename or send that file — or, for
+//!   `feldspar backup -`, hand it to whatever reads stdout.
 //! - A table's rows are read a **page** at a time ([`write_table_rows`]) and
 //!   written one compact JSON line each as they arrive. The page size adapts to
 //!   the rows, so a table of large blobs is read a few rows at a time.
@@ -239,12 +241,9 @@ pub async fn write_backup_to(
     selection: &Selection,
     file: std::fs::File,
 ) -> Result<u64> {
-    let mut zip = ZipBuilder::new(std::io::BufWriter::with_capacity(256 * 1024, file));
-    let mut source = RowSource::open(catalog).await?;
-    write_entries(catalog, selection, &mut source, &mut zip).await?;
-    source.finish().await;
-    let file = zip
-        .finish()?
+    let zip = ZipBuilder::new(std::io::BufWriter::with_capacity(OUT_BUFFER, file));
+    let file = write_archive(catalog, selection, zip)
+        .await?
         .into_inner()
         .map_err(|e| zip_error("the archive", &e.error().to_string()))?;
     // On disk before anyone is told it is there: the CLI and the scheduler
@@ -254,6 +253,44 @@ pub async fn write_backup_to(
     file.metadata()
         .map(|m| m.len())
         .map_err(|e| zip_error("the archive", &e.to_string()))
+}
+
+/// Write the zip for `selection` into `out`, which need not seek — a pipe,
+/// stdout — returning its length. `feldspar backup -` is this, for a caller
+/// that streams the backup on to S3 without a copy on disk.
+///
+/// The same entries and the same bounded memory as [`write_backup_to`]. What
+/// a writer that cannot go back changes is only where each entry's CRC and
+/// sizes go: into a data descriptor after its bytes rather than into its local
+/// header, which every unzip reads through the central directory anyway.
+pub async fn write_backup_stream<W: Write>(
+    catalog: &Catalog,
+    selection: &Selection,
+    out: W,
+) -> Result<u64> {
+    let zip = ZipBuilder::new_stream(std::io::BufWriter::with_capacity(OUT_BUFFER, out));
+    let mut out = write_archive(catalog, selection, zip).await?;
+    let length = out
+        .stream_position()
+        .map_err(|e| zip_error("the archive", &e.to_string()))?;
+    out.flush()
+        .map_err(|e| zip_error("the archive", &e.to_string()))?;
+    Ok(length)
+}
+
+/// The buffer between the zip writer and the file or pipe it writes to.
+const OUT_BUFFER: usize = 256 * 1024;
+
+/// Every entry of `selection` into `zip`, returning the writer it finished.
+async fn write_archive<W: Write + Seek>(
+    catalog: &Catalog,
+    selection: &Selection,
+    mut zip: ZipBuilder<W>,
+) -> Result<W> {
+    let mut source = RowSource::open(catalog).await?;
+    write_entries(catalog, selection, &mut source, &mut zip).await?;
+    source.finish().await;
+    zip.finish()
 }
 
 async fn write_entries<W: Write + Seek>(
@@ -1113,6 +1150,16 @@ struct ZipBuilder<W: Write + Seek> {
     line: Vec<u8>,
 }
 
+impl<W: Write> ZipBuilder<zip::write::StreamWriter<W>> {
+    /// A zip written straight through to `out`, never seeking back.
+    fn new_stream(out: W) -> ZipBuilder<zip::write::StreamWriter<W>> {
+        ZipBuilder {
+            zip: zip::ZipWriter::new_stream(out).set_auto_large_file(),
+            line: Vec::new(),
+        }
+    }
+}
+
 impl<W: Write + Seek> ZipBuilder<W> {
     fn new(out: W) -> ZipBuilder<W> {
         ZipBuilder {
@@ -1313,5 +1360,60 @@ mod tests {
             zip.by_name(NOTE).unwrap().compression(),
             zip::CompressionMethod::Deflated
         );
+    }
+
+    /// A writer that cannot seek, as stdout piped to `aws s3 cp -` is.
+    struct Pipe(Vec<u8>);
+
+    impl Write for Pipe {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zip_streamed_down_a_pipe_reads_back_like_one_written_to_a_file() {
+        const VIDEO: &str = "file-stores/s/files/clip.mp4";
+        let mut zip = ZipBuilder::new_stream(Pipe(Vec::new()));
+        zip.json("manifest.json", &json!({ "a": 1 })).unwrap();
+        zip.start_rows("tables/t/rows.ndjson").unwrap();
+        for i in 0..3 {
+            zip.row(&json!({ "id": i })).unwrap();
+        }
+        // A size the store did not know, and one it did.
+        zip.start_file(VIDEO, "clip.mp4", None).unwrap();
+        zip.write_chunk(VIDEO, b"not really a video").unwrap();
+        zip.start_file("file-stores/s/files/a.txt", "a.txt", Some(5))
+            .unwrap();
+        zip.write_chunk("file-stores/s/files/a.txt", b"hello")
+            .unwrap();
+        let mut out = zip.finish().unwrap();
+        let length = out.stream_position().unwrap();
+        let bytes = out.into_inner().0;
+        assert_eq!(length, bytes.len() as u64, "the length is what was written");
+        // Bit 3: the sizes follow each entry, as they must without a seek.
+        assert_ne!(flags_of(&bytes, VIDEO) & 0x0008, 0, "a data descriptor");
+
+        let spool = SpoolFile::new("backup");
+        std::fs::write(spool.path(), &bytes).unwrap();
+        let archive = Archive::open_zip(spool.path()).unwrap();
+        assert_eq!(archive.json("manifest.json").unwrap()["a"], 1);
+        let mut reader = archive.rows("tables/t/rows.ndjson");
+        let batch = reader.next_batch().await.unwrap().unwrap();
+        assert_eq!(
+            batch.rows,
+            vec![json!({ "id": 0 }), json!({ "id": 1 }), json!({ "id": 2 })]
+        );
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("file-stores/s/files/a.txt").unwrap(),
+            &mut text,
+        )
+        .unwrap();
+        assert_eq!(text, "hello");
     }
 }

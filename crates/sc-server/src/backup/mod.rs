@@ -123,7 +123,7 @@ pub fn start_backup_scheduler(
     let handle = scheduler.start();
     (scheduler, handle)
 }
-pub use write::{available, write_backup_to};
+pub use write::{available, write_backup_stream, write_backup_to};
 
 /// Where a browser posts a selection and gets a zip back.
 ///

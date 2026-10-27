@@ -1512,6 +1512,20 @@ provider is restored only where the target's file supplies a provider of that na
 them. The file is written beside its final name and renamed into place, so an
 interrupted backup leaves the previous file whole.
 
+A file name of `-` writes the zip to **stdout** instead, with no temporary file, so
+it can be streamed straight to object storage:
+
+```bash
+sudo -u feldspar feldspar backup - --environment production \
+  | aws s3 cp - s3://my-bucket/feldspar/site-$(date +%F).zip
+```
+
+Memory stays bounded the same way in this mode (one page of rows plus a 256 KB
+buffer), however large the installation. Messages go to stderr, so stdout holds
+only the zip, and the command refuses to run when stdout is a terminal. A failed
+or interrupted backup exits non-zero. The reader has already received part of the
+zip by then, so check the exit status (`set -o pipefail`) before you keep the upload.
+
 `restore` restores everything the file holds. The file can come from `feldspar
 backup`, from the dialog, or from Saltcorn 1. It behaves like the Restore dialog with
 nothing unticked: it adds to what is there and does not drop, delete or replace.

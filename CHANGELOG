@@ -2,6 +2,24 @@
 
 Changes in reverse chronological order.
 
+## `feldspar backup -` streams the backup to stdout
+
+`feldspar backup -` (the Unix convention for "stdout" in place of a file) writes the zip
+straight to stdout with no `.partial` file on disk, for a caller that pipes it to S3
+(`feldspar backup - | aws s3 cp - s3://…`).
+
+- `sc_server::write_backup_stream` takes any `Write`, not just a seekable file. It uses
+  `zip::ZipWriter::new_stream`, which puts each entry's CRC and sizes in a data descriptor
+  after the entry instead of seeking back to its local header. The entries are the same,
+  and so is the memory bound (one page of rows plus a 256 KB buffer).
+  `write_backup_to` and the new function share `write_archive`.
+- Messages stay on stderr, and the SQL echo is forced off, so stdout holds only the zip. The command
+  refuses to write to a terminal, as gzip does.
+- Tests: a unit test streams a zip into a non-seekable writer and reads it back.
+  `sc-cli`'s backup test now pipes `backup -`, checks that no file appears on disk,
+  and restores *that* zip into the second database.
+- `docs/OPERATIONS.md` and the CLI help describe the mode.
+
 ## `users.email_verified` added at startup; password links redeemed in one transaction
 
 A production instance upgraded on 2026-10-26 without running the `users.email_verified` line of
