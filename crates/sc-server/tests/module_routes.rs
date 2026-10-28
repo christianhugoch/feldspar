@@ -163,8 +163,13 @@ async fn setup() -> sc_error::Result<Server> {
     let agents = install_agents(&catalog).await?;
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
-    let root = std::env::temp_dir().join(format!("sc-module-routes-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    // One directory per test, not per process: the tests run side by side, and
+    // each one's `Drop` removes its directory.
+    let root = std::env::temp_dir().join(format!(
+        "sc-module-routes-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let registries = crate::module_registries().read().await;
     let modules = ModuleServices::install(
         &catalog,

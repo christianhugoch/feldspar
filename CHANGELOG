@@ -2,6 +2,16 @@
 
 Changes in reverse chronological order.
 
+## Test fixes after "All tables / applications / files"
+
+- `sc-cli` tests: `inspect_backup` takes a password now; the backup test passes `None`.
+- `sc-server` backup tests that check one particular selection now send `include_all` with all
+  three kinds off (`no_include_all()`), and the schedule edits send back the `include_all` they
+  read. Without it, the new default (everything) overrode the lists the tests check.
+- `module_routes` tests: each test has its own module directory. They shared one per process,
+  so whichever test finished first deleted it while the other was still running. That showed
+  up as "no module here serves `routes/facts`" (404) or a failed `statvfs` (500).
+
 ## Automated backups: "All tables", "All applications" and "All files"
 
 An automated backup can now include every table, application or file store there is when it

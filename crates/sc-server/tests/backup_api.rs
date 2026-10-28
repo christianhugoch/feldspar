@@ -3469,10 +3469,17 @@ fn schedule_include() -> Value {
     })
 }
 
-/// `body` with [`schedule_include`] as its `include`.
+/// `body` with [`schedule_include`] as its `include`, and `include_all` off so
+/// the lists decide what is in each backup.
 fn with_include(mut body: Value) -> Value {
     body["include"] = schedule_include();
+    body["include_all"] = no_include_all();
     body
+}
+
+/// An `include_all` with every kind left to `include`'s lists.
+fn no_include_all() -> Value {
+    json!({ "tables": false, "applications": false, "file_stores": false })
 }
 
 /// A destination in a directory on the server.
@@ -3627,6 +3634,7 @@ async fn an_automated_backup_writes_and_prunes_its_directory() -> sc_error::Resu
             "frequency": "weekly",
             "retention_days": 30,
             "include": include,
+            "include_all": no_include_all(),
         })),
     )
     .await;
