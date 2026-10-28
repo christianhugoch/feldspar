@@ -217,6 +217,31 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Rename a table: the table page's "Rename table". The rows, fields and
+    // settings stay; what names the table — keys, views, triggers, an
+    // application's subset — follows (`schema_edit::Operation::RenameTable`).
+    // Answers the table under its new name, and the notes the rename made:
+    // chiefly that code naming the old name was not rewritten.
+    set.register(
+        Endpoint::new(
+            "renameTable",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rename"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "name",
+            TypeSchema::text(),
+        )]))
+        .output(TypeSchema::struct_of([
+            StructField::new("table", table_schema()),
+            StructField::new("notes", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- metadata tables ------------------------------------------------------
     //
     // One of Saltcorn's own `_fd_*` tables, added to the tables list so that its

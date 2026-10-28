@@ -703,7 +703,13 @@ async fn a_conversation_follows_its_owner_to_every_application_exposing_the_agen
     );
 
     // Deleting it there deletes it everywhere.
-    assert!(in_library.send("DELETE", &path, None).await.status.is_success());
+    assert!(
+        in_library
+            .send("DELETE", &path, None)
+            .await
+            .status
+            .is_success()
+    );
     assert_eq!(
         in_shop.send("GET", &path, None).await.status,
         StatusCode::NOT_FOUND

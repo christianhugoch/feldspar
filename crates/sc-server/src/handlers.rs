@@ -138,6 +138,10 @@ pub fn admin_handlers_with(
     // has both handles: a caller that assembles the admin API gets live
     // re-projection by construction rather than by remembering to ask for it.
     catalog.set_schema_observer(Arc::clone(&apps) as Arc<dyn sc_catalog::SchemaObserver>);
+    // And what follows a table rename into the views, triggers, applications
+    // and other definitions that name the table (`table_rename`), for the same
+    // reason: the editor that renames it cannot name the crates that own them.
+    catalog.set_table_rename_hook(Arc::clone(&apps) as Arc<dyn sc_catalog::TableRenameHook>);
     // And the same for the trigger set, installed on the dispatcher rather than
     // the catalog because that is what holds it: a saved, renamed or deleted
     // trigger re-projects every app exposing one, whether the save came from
@@ -396,6 +400,32 @@ pub fn admin_handlers_with(
                 )
                 .await?;
                 Ok(HandlerResponse::ok(json!({ "dropped": table })))
+            }
+        }
+    });
+
+    reg.register("renameTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = ctx.path_param("table")?.to_owned();
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let applied = schema_edit::apply(
+                    &catalog,
+                    &[schema_edit::Operation::RenameTable {
+                        table,
+                        to: name.clone(),
+                    }],
+                    &schema_edit::ApplyOptions::default(),
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(json!({
+                    "table": table_json(&catalog, &catalog.require(&name)?, rls, &ctx.locale),
+                    "notes": applied.notes,
+                })))
             }
         }
     });

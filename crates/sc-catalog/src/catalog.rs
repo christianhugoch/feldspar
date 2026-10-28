@@ -107,6 +107,9 @@ pub struct Catalog {
     /// the schema editor (layer 8) and the mount registry (layer 10) cannot name
     /// each other, and the catalog is what they both already hold.
     schema_observer: RwLock<Option<Arc<dyn crate::observer::SchemaObserver>>>,
+    /// What follows a table being renamed into the rows other crates own; see
+    /// [`TableRenameHook`](crate::TableRenameHook).
+    rename_hook: RwLock<Option<Arc<dyn crate::observer::TableRenameHook>>>,
     /// The **module functions** a formula may hoist and a code body may call
     /// (TODO "Modules in-process", §4a) — `None` in a process with no modules
     /// installed, or none at all.
@@ -316,6 +319,7 @@ impl Catalog {
             file_store_errors: RwLock::new(HashMap::new()),
             field_overlay_issues: RwLock::new(Vec::new()),
             schema_observer: RwLock::new(None),
+            rename_hook: RwLock::new(None),
             module_functions: RwLock::new(None),
             live_host: RwLock::new(None),
             code_libraries: RwLock::new(None),
@@ -1021,6 +1025,31 @@ impl Catalog {
     pub fn set_schema_observer(&self, observer: Arc<dyn crate::observer::SchemaObserver>) {
         if let Ok(mut guard) = self.schema_observer.write() {
             *guard = Some(observer);
+        }
+    }
+
+    /// Install what follows a table rename into the rows other crates own —
+    /// `sc-server`'s, once, at boot.
+    pub fn set_table_rename_hook(&self, hook: Arc<dyn crate::observer::TableRenameHook>) {
+        if let Ok(mut guard) = self.rename_hook.write() {
+            *guard = Some(hook);
+        }
+    }
+
+    /// Tell the installed rename hook, if any, that `from` is now `to`, and hand
+    /// back its notes. A process with none rewrites nothing beyond the catalog's
+    /// own rows and says nothing.
+    pub async fn notify_table_renamed(&self, from: &str, to: &str) -> Result<Vec<String>> {
+        let hook = {
+            let guard = self
+                .rename_hook
+                .read()
+                .map_err(|_| Error::msg("catalog rename-hook lock poisoned"))?;
+            guard.clone()
+        };
+        match hook {
+            Some(hook) => hook.table_renamed(self, from, to).await,
+            None => Ok(Vec::new()),
         }
     }
 

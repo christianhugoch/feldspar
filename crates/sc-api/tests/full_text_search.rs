@@ -372,3 +372,38 @@ async fn rest_and_graphql_take_a_search() -> Result<()> {
     );
     Ok(())
 }
+
+/// SQLite's FTS5 table reads its content from the table by name, which a
+/// rename does not follow, so a rename rebuilds the index under the new name —
+/// and there and back again, search and writes still reach it.
+#[tokio::test]
+async fn sqlite_rebuilds_the_index_of_a_renamed_table() -> Result<()> {
+    let catalog = posts(Arc::new(SqliteDriver::open_in_memory()?), true).await?;
+    let rename = |table: &str, to: &str| Operation::RenameTable {
+        table: table.into(),
+        to: to.into(),
+    };
+    apply(&catalog, rename("posts", "articles")).await?;
+    let articles = catalog.require("articles")?;
+    assert!(
+        articles
+            .constraints
+            .iter()
+            .any(|c| c.name == "sc_fts_articles"),
+        "{:?}",
+        articles.constraints
+    );
+    assert!(
+        articles
+            .constraints
+            .iter()
+            .all(|c| c.name != "sc_fts_posts")
+    );
+
+    apply(&catalog, rename("articles", "posts")).await?;
+    assert_eq!(titles(&catalog, &[("search", "run")]).await?, ["Gardening"]);
+    let table = catalog.require("posts")?;
+    rows::update_row(&catalog, &table, "4", &json!({ "body": "Baking bread." })).await?;
+    assert_eq!(titles(&catalog, &[("search", "bread")]).await?, ["Cooking"]);
+    Ok(())
+}

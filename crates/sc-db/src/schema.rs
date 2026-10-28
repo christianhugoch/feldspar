@@ -234,6 +234,14 @@ pub enum SchemaChange {
         #[serde(default)]
         if_exists: bool,
     },
+    /// Rename a table, keeping its columns, rows, keys and indexes. Foreign
+    /// keys in other tables that reference it follow the new name.
+    RenameTable {
+        /// The table's current name.
+        from: String,
+        /// Its new name.
+        to: String,
+    },
     /// Rename a column, keeping its data, type and constraints.
     RenameColumn {
         /// The table to alter.

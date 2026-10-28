@@ -579,8 +579,13 @@ async fn a_backup_carries_the_libraries_to_a_second_installation() -> sc_error::
     let mut selection = BackupSelection::everything(&available);
     selection.code_libraries = true;
     let archive = tmp.path().join("backup.zip");
-    sc_server::write_backup_to(&first.catalog, &selection, None, std::fs::File::create(&archive)?)
-        .await?;
+    sc_server::write_backup_to(
+        &first.catalog,
+        &selection,
+        None,
+        std::fs::File::create(&archive)?,
+    )
+    .await?;
     let (contents, _) = sc_server::inspect_backup(&archive, None)?;
     assert_eq!(contents.code_libraries, 6);
 
@@ -607,7 +612,8 @@ async fn a_backup_carries_the_libraries_to_a_second_installation() -> sc_error::
         code_libraries: true,
         ..BackupSelection::default()
     };
-    let report = sc_server::restore_backup(&second.catalog, &second.apps, &archive, None, &only).await?;
+    let report =
+        sc_server::restore_backup(&second.catalog, &second.apps, &archive, None, &only).await?;
     let text = format!("{report:?}");
     assert!(text.contains("its code was kept"), "{text}");
     let restored = sc_catalog::list_code_libraries(&second.catalog).await?;

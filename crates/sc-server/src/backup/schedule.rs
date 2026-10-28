@@ -731,15 +731,26 @@ mod tests {
         };
         let stored = with(json!("correct horse")).keep_password(None).unwrap();
         assert_eq!(stored.password.as_deref(), Some("correct horse"));
-        assert_eq!(BackupSchedule::from_json(&stored.to_json()), Some(stored.clone()));
+        assert_eq!(
+            BackupSchedule::from_json(&stored.to_json()),
+            Some(stored.clone())
+        );
         let sent = schedule_json(&stored, None, &Available::default());
         assert_eq!(sent["password"], json!(SECRET_SENTINEL));
 
-        let kept = with(json!(SECRET_SENTINEL)).keep_password(Some(&stored)).unwrap();
+        let kept = with(json!(SECRET_SENTINEL))
+            .keep_password(Some(&stored))
+            .unwrap();
         assert_eq!(kept.password.as_deref(), Some("correct horse"));
         assert!(with(json!(SECRET_SENTINEL)).keep_password(None).is_err());
         // Empty or null is no password: an edit can remove it.
-        assert_eq!(with(json!("")).keep_password(Some(&stored)).unwrap().password, None);
+        assert_eq!(
+            with(json!(""))
+                .keep_password(Some(&stored))
+                .unwrap()
+                .password,
+            None
+        );
         assert_eq!(with(Json::Null).password, None);
         let unprotected = schedule_json(&schedule(Frequency::Daily), None, &Available::default());
         assert_eq!(unprotected["password"], Json::Null);

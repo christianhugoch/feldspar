@@ -245,8 +245,8 @@ pub async fn write_backup_to(
     password: Option<&str>,
     file: std::fs::File,
 ) -> Result<u64> {
-    let zip = ZipBuilder::new(std::io::BufWriter::with_capacity(OUT_BUFFER, file))
-        .encrypted(password)?;
+    let zip =
+        ZipBuilder::new(std::io::BufWriter::with_capacity(OUT_BUFFER, file)).encrypted(password)?;
     let file = write_archive(catalog, selection, zip)
         .await?
         .into_inner()
@@ -1468,7 +1468,8 @@ mod tests {
     /// a file, and a pipe — returning its bytes.
     fn protected_archive(streamed: bool, password: &str) -> Vec<u8> {
         fn fill<W: Write + Seek>(zip: &mut ZipBuilder<W>) {
-            zip.json("manifest.json", &json!({ "format": "x" })).unwrap();
+            zip.json("manifest.json", &json!({ "format": "x" }))
+                .unwrap();
             zip.start_rows("tables/t/rows.ndjson").unwrap();
             zip.row(&json!({ "id": 1 })).unwrap();
             zip.start_file("file-stores/s/files/clip.mp4", "clip.mp4", None)
@@ -1501,7 +1502,10 @@ mod tests {
             let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
             for i in 0..zip.len() {
                 let name = zip.by_index_raw(i).unwrap().name().to_owned();
-                assert!(zip.by_index_raw(i).unwrap().encrypted(), "{name} is not encrypted");
+                assert!(
+                    zip.by_index_raw(i).unwrap().encrypted(),
+                    "{name} is not encrypted"
+                );
                 // AES, not ZipCrypto: the method is AES's 99, wrapping the real one.
                 assert_eq!(method_of(&bytes, &name), 99, "{name}");
             }
@@ -1512,7 +1516,9 @@ mod tests {
             assert!(super::super::is_encrypted(spool.path()).unwrap());
             let missing = Archive::open_zip(spool.path(), None).err().unwrap();
             assert!(missing.to_string().contains("password"), "{missing}");
-            let wrong = Archive::open_zip(spool.path(), Some("password")).err().unwrap();
+            let wrong = Archive::open_zip(spool.path(), Some("password"))
+                .err()
+                .unwrap();
             assert!(wrong.to_string().contains("password"), "{wrong}");
 
             let archive = Archive::open_zip(spool.path(), Some("pässwörd")).unwrap();

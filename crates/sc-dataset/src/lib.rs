@@ -52,7 +52,7 @@ pub use read::{
 pub use shape::{ColType, ForeignKey, Grain, Schema, StageColumn, StageShape, TableInfo};
 pub use snapshot::Snapshot;
 pub use store::{
-    DATASETS_TABLE, bootstrap_datasets, clone_dataset, dataset_sharing, datasets_using,
-    delete_dataset, list_dataset_sharing, list_datasets, load_dataset, load_dataset_by_name,
-    load_library, require_dataset, save_dataset, set_dataset_sharing,
+    COL_BASE, COL_OPERATIONS, DATASETS_TABLE, bootstrap_datasets, clone_dataset, dataset_sharing,
+    datasets_using, delete_dataset, list_dataset_sharing, list_datasets, load_dataset,
+    load_dataset_by_name, load_library, require_dataset, save_dataset, set_dataset_sharing,
 };

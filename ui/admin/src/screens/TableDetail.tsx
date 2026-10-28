@@ -445,6 +445,40 @@ function TableData({
   };
 
   /**
+   * Rename the table, after asking for the new name in a dialog. The server
+   * moves what names the table along with it (keys, views, triggers, an
+   * application's tables) and leaves code alone, which the dialog says before
+   * anything is done. The page is then the table's under its new name.
+   */
+  const [renaming, setRenaming] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const openRename = () => {
+    setNewName(table);
+    setRenameError(null);
+    setRenaming(true);
+  };
+  const renameTable = async (event: FormEvent) => {
+    event.preventDefault();
+    const name = newName.trim();
+    if (!name || name === table) {
+      setRenameError(t("Give the table a new name."));
+      return;
+    }
+    setBusy(true);
+    setRenameError(null);
+    try {
+      await api.renameTable(table, { name });
+      setRenaming(false);
+      navigate(`/tables/${encodeURIComponent(name)}`);
+    } catch (err) {
+      setRenameError(errorMessage(err, "Could not rename the table."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
    * Delete every row, keeping the table, its fields and its settings.
    *
    * Confirmed with the number that is about to go, because the count is the
@@ -544,6 +578,12 @@ function TableData({
               {/* Not on a metadata table: its rows are Saltcorn's own — the
                   users table among them — and emptying one in a click would
                   lock the admin out. Row by row, in the data grid, it still can. */}
+              {/* Not on a metadata table: Saltcorn names its own tables. */}
+              {!metadata && (
+                <Dropdown.Item disabled={busy} onClick={openRename}>
+                  <T text="Rename table" />
+                </Dropdown.Item>
+              )}
               {allowed.delete && !metadata && (
                 <Dropdown.Item
                   className="text-danger"
@@ -560,6 +600,39 @@ function TableData({
           </Dropdown>
         </div>
       </Card.Body>
+      <Modal show={renaming} onHide={() => setRenaming(false)}>
+        <Form onSubmit={(event) => void renameTable(event)}>
+          <Modal.Header closeButton>
+            <Modal.Title className="h4">
+              <T text="Rename table" />
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            {renameError && <Alert variant="danger">{renameError}</Alert>}
+            <Form.Group controlId="rename-table-name">
+              <Form.Label>
+                <T text="New name" />
+              </Form.Label>
+              <Form.Control
+                value={newName}
+                autoFocus
+                onChange={(event) => setNewName(event.target.value)}
+              />
+              <Form.Text>
+                <T text="The rows, fields and settings stay. Keys, views, triggers, workflows, agents, datasets and applications that name the table are updated. Code that names it is not." />
+              </Form.Text>
+            </Form.Group>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button variant="secondary" onClick={() => setRenaming(false)}>
+              <T text="Cancel" />
+            </Button>
+            <Button type="submit" disabled={busy}>
+              <T text="Rename" />
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
     </Card>
   );
 }

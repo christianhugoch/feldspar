@@ -2,6 +2,45 @@
 
 Changes in reverse chronological order.
 
+## Rename a table
+
+A table can now be renamed, from the table page, the admin API and `edit_schema` (MCP and the admin
+copilot). The table keeps its rows, fields and settings, and what names it follows. Code is not
+rewritten.
+
+- **Table page**: the data menu beside **Delete all rows** and **Drop table** has **Rename table**.
+  It asks for the new name in a dialog, then opens the table under that name. It is not offered on
+  a metadata table.
+- **Admin API**: `renameTable` (`POST /api/tables/{table}/rename`, body `{name}`) answers
+  `{table, notes}`. The notes say what was rewritten and that code naming the old name was not.
+- **MCP / agents**: `edit_schema` has `op: "rename_table"`, with the new name in `rename_to`. It
+  needs the edit grant and must be the only operation in its batch. The result lists
+  `tables_renamed`.
+- `sc_api::schema_edit::Operation::RenameTable` issues `ALTER TABLE … RENAME TO`
+  (`sc_db::SchemaChange::RenameTable`). On Postgres it also renames the `<table>_pkey` constraint,
+  so a later primary-key change still finds it. On SQLite it moves the driver's
+  `_fd_object_comments` rows, regenerates the change-log triggers under the new name
+  (`apply_keeping_triggers`), and rebuilds the full-text index, whose virtual table reads its
+  content by table name. The change-log entries, sync's key pairs and changesets' `undo_table`
+  move in the same transaction.
+- **The catalog's rows follow** (`sc_catalog::rename_table_meta`): the `_fd_tables` row and edit
+  time, the table's `_fd_fields` rows, every key onto the table, and every calculated-field,
+  default and ownership formula that aggregates over it (`booksↃauthor`, rewritten with the new
+  `sc_expr::rename_relation_table`).
+- **Everything else that names the table follows** through a new catalog seam,
+  `TableRenameHook`, implemented in `sc-server` (`table_rename.rs`):
+  - applications' table subsets and Saltcorn UI's `exttables_min_role_read`;
+  - views' table, and the relations in view configurations and page and library layouts
+    (`ChildList:…`, `agg_relation`);
+  - triggers' channel, `only_if` and action `table`;
+  - workflow steps, agent traits, stream configurations, and dataset bases and joins;
+  - models' table.
+  The rows are rewritten in place. The trigger set and the streams are then reloaded, and the
+  affected applications are mounted again.
+- Refused: the built-in tables (users, roles, role grants, the credits ledger), metadata tables,
+  tables a module declared, and a new name that is taken by a table or by a leftover settings row.
+- No stored-data migration is needed.
+
 ## Password-protected backups (AES-256, opens in 7-Zip)
 
 A backup can now be protected by a password. Every entry in the zip is encrypted with WinZip

@@ -155,6 +155,24 @@ fn statements(dialect: &SqliteDialect, change: &SchemaChange) -> Result<Option<V
                 dialect.quote_ident(column)
             )]
         }
+        // SQLite (3.26 on, with `legacy_alter_table` off) rewrites the foreign
+        // keys, triggers and views that name the table too.
+        // The comments kept for its triggers are keyed by the table's name, and
+        // follow it.
+        SchemaChange::RenameTable { from, to } => vec![
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                dialect.quote_ident(from),
+                dialect.quote_ident(to)
+            ),
+            create_comments_table(),
+            format!(
+                "UPDATE {t} SET \"table\" = {} WHERE \"table\" = {}",
+                dialect.quote_literal(to),
+                dialect.quote_literal(from),
+                t = dialect.quote_ident(COMMENTS_TABLE),
+            ),
+        ],
         // SQLite (3.25 on) rewrites the indexes, triggers and views that name
         // the column too.
         SchemaChange::RenameColumn { table, from, to } => {
@@ -758,6 +776,7 @@ fn change_name(change: &SchemaChange) -> &'static str {
         SchemaChange::DropTable { .. } => "drop table",
         SchemaChange::AddColumn { .. } => "add column",
         SchemaChange::DropColumn { .. } => "drop column",
+        SchemaChange::RenameTable { .. } => "rename table",
         SchemaChange::RenameColumn { .. } => "rename column",
         SchemaChange::SetPrimaryKey { .. } => "set primary key",
         SchemaChange::SetColumnGenerator { .. } => "set column generator",
@@ -900,6 +919,22 @@ mod tests {
                 if_exists: true,
             }),
             "DROP INDEX IF EXISTS \"book_title_author\""
+        );
+    }
+
+    #[test]
+    fn a_renamed_table_keeps_its_comments() {
+        let sql = render_change(&SchemaChange::RenameTable {
+            from: "books".into(),
+            to: "titles".into(),
+        });
+        assert!(
+            sql.starts_with("ALTER TABLE \"books\" RENAME TO \"titles\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("SET \"table\" = 'titles' WHERE \"table\" = 'books'"),
+            "{sql}"
         );
     }
 

@@ -115,6 +115,18 @@ impl ModuleTables {
         }
     }
 
+    /// Refuse renaming a table a module declared: the module's code names it.
+    pub fn refuse_table_rename(&self, table: &str) -> Result<()> {
+        match self.claims.get(table) {
+            Some(claim) => Err(Error::invalid(format!(
+                "`{table}` is a table of the module {}, and its code names it: it cannot be \
+                 renamed while the module is installed",
+                claim.module
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Refuse renaming a field a module declared, for the reason it may not be
     /// dropped: the module's code names it.
     pub fn refuse_rename(&self, table: &str, field: &str) -> Result<()> {

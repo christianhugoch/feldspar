@@ -347,7 +347,8 @@ fn with_entry<T>(
 /// What a backup that needs its password says without one — the CLI and the
 /// admin UI ask for it beforehand ([`is_encrypted`]), so this is for a caller
 /// that did not.
-const PASSWORD_REQUIRED: &str = "this backup is protected by a password: give the password to read it";
+const PASSWORD_REQUIRED: &str =
+    "this backup is protected by a password: give the password to read it";
 
 fn open_zip_archive(path: &Path) -> Result<ZipArchive<SharedFile>> {
     let file = SharedFile::open(path)?;

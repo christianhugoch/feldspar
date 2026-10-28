@@ -37,8 +37,10 @@ pub const DATASETS_TABLE: &str = "_fd_datasets";
 const COL_ID: &str = "id";
 const COL_NAME: &str = "name";
 const COL_DESCRIPTION: &str = "description";
-const COL_BASE: &str = "base";
-const COL_OPERATIONS: &str = "operations";
+/// The dataset's base: a table or another dataset.
+pub const COL_BASE: &str = "base";
+/// The dataset's operations, in order.
+pub const COL_OPERATIONS: &str = "operations";
 const COL_ATTRIBUTES: &str = "attributes";
 const COL_OWNER: &str = "owner";
 const COL_SHARE_ROLE: &str = "share_role";

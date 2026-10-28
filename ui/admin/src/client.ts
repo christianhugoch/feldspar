@@ -22,6 +22,8 @@ export type CreateTableFromGeoFileResponse = { table: { name: string; label: str
 export type UpdateTableRequest = { label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null };
 export type UpdateTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
 export type DropTableResponse = { dropped: string };
+export type RenameTableRequest = { name: string };
+export type RenameTableResponse = { table: { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null }; notes: Array<string> };
 export type ListMetadataTablesResponse = Array<string>;
 export type CreateMetadataTableRequest = { name: string };
 export type CreateMetadataTableResponse = { name: string; label: string; description: string; min_role_read: number; min_role_write: number; ownership_formula: string; rls_enabled: boolean; sync_enabled: boolean; history_enabled: boolean; history_min_role?: number | null; history_keep_days?: number | null; configured: boolean; ownership_error?: string | null; rls_available: boolean; sync_available: boolean; history_available: boolean; database: string; metadata: boolean; module?: string | null; module_fields: Array<string>; provider?: { module: string; provider: string; configuration: unknown; config_spec: Array<{ name: string; label: string; type: string; required: boolean; default?: unknown | null; options: Array<unknown>; multiline: boolean; secret: boolean; create_only: boolean; code_language?: string | null; section?: string | null; sublabel?: string | null; pattern?: string | null; pattern_error?: string | null; env_fallback?: { name: string; value?: string | null } | null; show_if: Array<{ name: string; values: Array<unknown> }> }>; writes: { insert: boolean; update: boolean; delete: boolean }; issues: Array<string> } | null };
@@ -463,6 +465,7 @@ export interface ApiClient {
   createTableFromGeoFile(body: CreateTableFromGeoFileRequest): Promise<CreateTableFromGeoFileResponse>;
   updateTable(table: string, body: UpdateTableRequest): Promise<UpdateTableResponse>;
   dropTable(table: string): Promise<DropTableResponse>;
+  renameTable(table: string, body: RenameTableRequest): Promise<RenameTableResponse>;
   listMetadataTables(): Promise<ListMetadataTablesResponse>;
   createMetadataTable(body: CreateMetadataTableRequest): Promise<CreateMetadataTableResponse>;
   listTableProviders(): Promise<ListTableProvidersResponse>;
@@ -851,6 +854,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("dropTable", res);
       return (await res.json()) as DropTableResponse;
+    },
+    async renameTable(table, body) {
+      const res = await doFetch(`${baseUrl}/api/tables/${encodeURIComponent(table)}/rename`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("renameTable", res);
+      return (await res.json()) as RenameTableResponse;
     },
     async listMetadataTables() {
       const res = await doFetch(`${baseUrl}/api/metadata-tables`, {

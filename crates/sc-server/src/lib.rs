@@ -62,6 +62,7 @@ mod security;
 mod serve;
 mod streams;
 mod systemd;
+mod table_rename;
 // Build targets as background jobs the admin UI polls (§13.3).
 pub mod public_datasets;
 pub mod target_builds;

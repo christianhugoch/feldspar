@@ -4218,7 +4218,12 @@ async fn a_password_protected_backup_restores_with_its_password() -> sc_error::R
             )),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
 
     let (status, archive, _) = source
         .client
@@ -4232,20 +4237,32 @@ async fn a_password_protected_backup_restores_with_its_password() -> sc_error::R
             )),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&archive));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&archive)
+    );
     assert!(all_encrypted(&archive));
     // The names are a zip's directory and readable; the contents are not.
     {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&archive[..])).unwrap();
         assert!(zip.index_for_name("tables/books/rows.ndjson").is_some());
-        assert!(zip.by_name("manifest.json").is_err(), "readable without the password");
+        assert!(
+            zip.by_name("manifest.json").is_err(),
+            "readable without the password"
+        );
         assert!(zip.by_name_decrypt("manifest.json", b"wrong").is_err());
     }
     let manifest: Value =
         serde_json::from_str(&decrypted_entry(&archive, "manifest.json", SECRET)).unwrap();
     assert_eq!(manifest["format"], json!("feldspar-backup"));
     assert_eq!(
-        decrypted_entry(&archive, "file-stores/assets/files/notes/readme.txt", SECRET),
+        decrypted_entry(
+            &archive,
+            "file-stores/assets/files/notes/readme.txt",
+            SECRET
+        ),
         "hello from the backup"
     );
     // The next backup is not protected unless asked again.
@@ -4255,13 +4272,21 @@ async fn a_password_protected_backup_restores_with_its_password() -> sc_error::R
     let mut target = setup().await?;
     let (status, bytes, _) = target
         .client
-        .raw("POST", "/backup/upload", Some((archive.clone(), "application/zip")))
+        .raw(
+            "POST",
+            "/backup/upload",
+            Some((archive.clone(), "application/zip")),
+        )
         .await;
     let uploaded: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     assert_eq!(status, StatusCode::OK, "{uploaded}");
     assert_eq!(uploaded["locked"], json!(true));
     assert_eq!(uploaded["encrypted"], json!(true));
-    assert_eq!(uploaded["available"], Value::Null, "nothing is read without the password");
+    assert_eq!(
+        uploaded["available"],
+        Value::Null,
+        "nothing is read without the password"
+    );
     let id = uploaded["id"].clone();
 
     // Restoring before the password is given is refused, and the file stays
@@ -4281,14 +4306,22 @@ async fn a_password_protected_backup_restores_with_its_password() -> sc_error::R
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let (status, body) = target
         .client
-        .send("POST", "/api/backup/unlock", Some(json!({ "id": id, "password": "nope" })))
+        .send(
+            "POST",
+            "/api/backup/unlock",
+            Some(json!({ "id": id, "password": "nope" })),
+        )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("password"), "{body}");
 
     let (status, unlocked) = target
         .client
-        .send("POST", "/api/backup/unlock", Some(json!({ "id": id, "password": SECRET })))
+        .send(
+            "POST",
+            "/api/backup/unlock",
+            Some(json!({ "id": id, "password": SECRET })),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{unlocked}");
     assert_eq!(unlocked["locked"], json!(false));

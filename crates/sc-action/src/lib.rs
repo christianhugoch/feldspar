@@ -80,8 +80,9 @@ pub use scope::{
     template_shape, typed_value,
 };
 pub use store::{
-    COL_ACTION, COL_BODY, TRIGGERS_TABLE, bootstrap_triggers, delete_trigger, list_triggers,
-    load_trigger, load_trigger_by_name, record_trigger_run, save_trigger, touch_trigger,
+    COL_ACTION, COL_BODY, COL_CHANNEL, COL_CONFIGURATION, COL_EVENT, COL_ONLY_IF, TRIGGERS_TABLE,
+    bootstrap_triggers, delete_trigger, list_triggers, load_trigger, load_trigger_by_name,
+    record_trigger_run, save_trigger, touch_trigger,
 };
 pub use trigger::{ATTR_ENABLED, Trigger, TriggerBody, TriggerId};
 pub use triggers::{TriggerIssue, Triggers};
