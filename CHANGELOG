@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## Claude Code in the IDE: the terminal bridge
+
+The server can now run Claude Code (or any terminal program) for the file-store IDE: an
+admin-only WebSocket at `/ide/terminal/{store}` on a real pseudo-terminal, started at the store's
+root or, with `?app=<name>`, in that application's source directory. Nothing in the IDE opens it
+yet (TODO-claude-terminal CT2).
+
+- **Off by default**: Settings → Development → "Claude Code in the IDE" (`ide_terminal_enabled`),
+  read per request. Only stores on this machine's disk can have a terminal.
+- `--claude-cli PATH` names the executable (default `claude` on `PATH`). At most four terminals
+  run at once. Every refusal (off, unknown store or app, not on disk, not installed, too many)
+  reaches the terminal as a sentence.
+- The program gets an allow-listed environment, not the server's (which holds the database
+  credentials). Closing the socket ends it and everything it started, including background jobs
+  and children in a session of their own.
+- Tests: `sc-server/tests/ide_terminal.rs`.
+
 ## Test suite green again: drifted docs, a v1 table name, and unreadable i18n call sites
 
 A full `cargo test --workspace` failed only in `sc-cli`'s `it` target (four hygiene checks), and
