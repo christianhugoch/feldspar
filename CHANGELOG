@@ -2,6 +2,20 @@
 
 Changes in reverse chronological order.
 
+## Fix: add `sc-help` to the design's crate graph
+
+The new `sc-help` crate was not in §2 of `docs/TECHNICAL_DESIGN.md`, so
+`repo_hygiene::the_design_crate_diagram_matches_the_workspace_manifests` failed. Added it to the
+crate tree (layer 0), the mermaid diagram (`sc-server --> sc-help --> sc-error`) and the
+direct-dependency table (its own row, and in `sc-server`'s list).
+
+## Fix: regenerate the IDE, builder and analytics copies of the admin client
+
+The help-topic endpoints were added to `sc_api::admin_endpoints()` and `ui/admin/src/client.ts`
+was regenerated, but the other three copies (`ui/ide`, `ui/builder`, `ui/analytics`) were not,
+so `admin_client_sync::committed_admin_clients_match_generator` failed. Regenerated them with
+`emit_admin_client`; all four are now identical and type-check.
+
 ## Help topics: a question-mark beside a setting opens a popup with more help (v1's help system)
 
 v1 put a question-mark next to a field's sublabel (or its label, without one) that opened a
