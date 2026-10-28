@@ -43,6 +43,7 @@ import {
   destinationKindLabel,
   editScheduleForm,
   frequencyLabel,
+  includeAllNote,
   isStoredSecret,
   newScheduleForm,
   scheduleBody,
@@ -51,6 +52,7 @@ import {
   type BackupSchedule,
   type DestinationKind,
   type Frequency,
+  type IncludeAll,
   type ScheduleField,
   type ScheduleForm,
 } from "../backupSchedules";
@@ -560,16 +562,45 @@ function IncludeFields({
   contents,
   selection,
   onChange,
+  includeAll,
+  onIncludeAllChange,
 }: {
   idPrefix: string;
   contents: BackupContents;
   selection: BackupSelection;
   onChange: (selection: BackupSelection) => void;
+  /** An automated backup's "all" choices: given, each kind gets an "All …"
+   * box, and its pickers are hidden while that box is ticked. Shown even when
+   * there is nothing of the kind yet, since what it covers may come later. */
+  includeAll?: IncludeAll;
+  onIncludeAllChange?: (includeAll: IncludeAll) => void;
 }) {
   const { t } = useT();
+  const allBox = (kind: keyof IncludeAll, label: string, help: string) =>
+    includeAll &&
+    onIncludeAllChange && (
+      <Form.Check
+        type="checkbox"
+        id={`${idPrefix}-all-${kind}`}
+        className="mb-3"
+        checked={includeAll[kind]}
+        onChange={(e) => onIncludeAllChange({ ...includeAll, [kind]: e.target.checked })}
+        label={
+          <>
+            <span className="fw-semibold">{label}</span>
+            <div className="text-muted small">{help}</div>
+          </>
+        }
+      />
+    );
   return (
     <>
-      {contents.tables.length > 0 && (
+      {allBox(
+        "tables",
+        t("All tables, definitions and data"),
+        t("Every table there is when the backup runs, including tables created later."),
+      )}
+      {!includeAll?.tables && contents.tables.length > 0 && (
         <>
           <Form.Group className="mb-3" controlId={`${idPrefix}-tables`}>
             <Form.Label><T text="Table definitions" /></Form.Label>
@@ -604,7 +635,12 @@ function IncludeFields({
         </>
       )}
 
-      {contents.applications.length > 0 && (
+      {allBox(
+        "applications",
+        t("All applications"),
+        t("Every application there is when the backup runs, including applications created later."),
+      )}
+      {!includeAll?.applications && contents.applications.length > 0 && (
         <Form.Group className="mb-3" controlId={`${idPrefix}-applications`}>
           <Form.Label><T text="Applications" /></Form.Label>
           <MultiSelect
@@ -620,7 +656,12 @@ function IncludeFields({
         </Form.Group>
       )}
 
-      {contents.file_stores.length > 0 && (
+      {allBox(
+        "file_stores",
+        t("All files"),
+        t("Every file store there is when the backup runs, including file stores created later."),
+      )}
+      {!includeAll?.file_stores && contents.file_stores.length > 0 && (
         <Form.Group className="mb-3" controlId={`${idPrefix}-file-stores`}>
           <Form.Label><T text="Files" /></Form.Label>
           <MultiSelect
@@ -1119,6 +1160,9 @@ function AutomatedBackups({
                       {t("Includes: {summary}", {
                         summary: summarise(schedule.include, contents),
                       })}
+                      {includeAllNote(schedule.include_all) && (
+                        <span className="ms-1">{includeAllNote(schedule.include_all)}</span>
+                      )}
                       {schedule.password && (
                         <span className="ms-2">· <T text="Password protected" /></span>
                       )}
@@ -1211,7 +1255,7 @@ function AutomatedBackups({
 
               <h4 className="mb-1"><T text="What each backup includes" /></h4>
               <p className="text-secondary small mb-3">
-                <T text="Anything created later, such as a new table, is included unless you untick it here." />
+                <T text="With an All box ticked, every one of that kind is included, including any created later. Otherwise anything created later is included unless you untick it here." />
               </p>
               {errors.include && (
                 <Alert variant="danger">
@@ -1223,6 +1267,8 @@ function AutomatedBackups({
                 contents={contents}
                 selection={editing.include}
                 onChange={(include) => setEditing({ ...editing, include })}
+                includeAll={editing.includeAll}
+                onIncludeAllChange={(includeAll) => setEditing({ ...editing, includeAll })}
               />
 
               <div className="mt-4">

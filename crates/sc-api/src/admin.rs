@@ -4997,6 +4997,18 @@ fn backup_schedule_input_fields() -> Vec<StructField> {
         StructField::new("frequency", TypeSchema::text()),
         StructField::new("retention_days", TypeSchema::int()),
         StructField::new("include", backup_selection_schema()),
+        // Kinds included whole: every table (definition and rows), application
+        // or file store there is when the backup runs, including ones created
+        // after the schedule was saved. Absent is all three on; a flag set
+        // false leaves that kind to `include`'s lists.
+        StructField::new(
+            "include_all",
+            TypeSchema::optional(TypeSchema::struct_of([
+                StructField::new("tables", TypeSchema::bool()),
+                StructField::new("applications", TypeSchema::bool()),
+                StructField::new("file_stores", TypeSchema::bool()),
+            ])),
+        ),
         // The password each backup is protected with (WinZip AES-256, which
         // 7-Zip opens); null or empty for none. Sent as the mask when one is
         // stored, and handing the mask back on an update keeps it.

@@ -1607,6 +1607,12 @@ HTTPS to the endpoint.
   - for S3, a key limited to the one bucket, with `s3:PutObject`, `s3:ListBucket`
     and `s3:DeleteObject`;
   - for SFTP, a chrooted account.
+- **What is included** is chosen per schedule. **All tables, definitions and data**,
+  **All applications** and **All files** (ticked for a new schedule) include every
+  table, application or file store there is when the backup runs, so one created
+  after the schedule was set up is in the next backup. Untick one to choose from
+  the list instead; a table created later is then still included unless it is
+  unticked.
 - **Retention** deletes only files named `feldspar-backup-YYYY-MM-DD-HHMMSS.zip`,
   and judges their age by the time in the name. Two schedules may not share a
   directory or a bucket, because each would prune the other's backups.

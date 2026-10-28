@@ -8,9 +8,12 @@ import { describe, expect, it } from "vitest";
 import { NO_CONTENTS, everything, type BackupSelection } from "./backup";
 import {
   FREQUENCIES,
+  INCLUDE_ALL,
+  INCLUDE_LISTED,
   destinationKindLabel,
   editScheduleForm,
   frequencyLabel,
+  includeAllNote,
   newScheduleForm,
   scheduleBody,
   scheduleFormErrors,
@@ -169,9 +172,34 @@ describe("the schedule form", () => {
   });
 
   it("wants something to include", () => {
-    const form = { ...local, include: nothing };
+    const form = { ...local, include: nothing, includeAll: INCLUDE_LISTED };
     expect(scheduleFormErrors(form).include).toBeDefined();
     expect(scheduleFormErrors({ ...form, include: all })).toEqual({});
+    // "All files" is something even with no file store yet: one may come later.
+    expect(
+      scheduleFormErrors({ ...form, includeAll: { ...INCLUDE_LISTED, file_stores: true } }),
+    ).toEqual({});
+  });
+
+  it("includes all tables, applications and files, now and later, unless told otherwise", () => {
+    expect(newScheduleForm(all).includeAll).toEqual(INCLUDE_ALL);
+    // A schedule without the choice opens on all three too.
+    expect(editScheduleForm(schedule).includeAll).toEqual(INCLUDE_ALL);
+    const chosen = { tables: true, applications: false, file_stores: true };
+    const edit = editScheduleForm({ ...schedule, include_all: chosen });
+    expect(edit.includeAll).toEqual(chosen);
+    expect(scheduleBody(edit).include_all).toEqual(chosen);
+  });
+
+  it("says which kinds pick up what is created later", () => {
+    expect(includeAllNote(undefined)).toBeNull();
+    expect(includeAllNote(INCLUDE_LISTED)).toBeNull();
+    expect(includeAllNote({ ...INCLUDE_LISTED, tables: true })).toBe(
+      "New tables are included automatically.",
+    );
+    expect(includeAllNote(INCLUDE_ALL)).toBe(
+      "New tables, applications and file stores are included automatically.",
+    );
   });
 
   it("sends the chosen kind's fields, trimmed, a number of days and the selection", () => {
@@ -182,6 +210,7 @@ describe("the schedule form", () => {
       frequency: "weekly",
       retention_days: 14,
       include: all,
+      include_all: INCLUDE_ALL,
       password: null,
     });
     expect(

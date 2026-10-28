@@ -11,6 +11,11 @@
 //! selection, so a nightly schema-only backup and a weekly full one can sit
 //! side by side.
 //!
+//! Tables, applications and file stores can each be included **all** of them
+//! ([`IncludeAll`]): every one there is when the backup runs, whatever the
+//! lists say, so one created after the schedule was set up is in it and no
+//! later edit of the lists can drop it.
+//!
 //! The selection is stored the way the Backup card's is: as
 //! [`BackupPreferences`], what was *left out*. A table added next week is in
 //! next week's automated backup unless somebody unticks it, for the reason the
@@ -124,12 +129,83 @@ pub struct BackupSchedule {
     pub retention_days: i64,
     /// What each backup includes, as what is left out.
     pub include: BackupPreferences,
+    /// The kinds included whole, overriding `include`'s lists for them.
+    pub include_all: IncludeAll,
     /// The password each backup is protected with, if any. Stored as the
     /// destination's credentials are, and sent to the admin UI as the mask.
     pub password: Option<String>,
 }
 
+/// Which kinds a schedule includes every one of — those there are when it
+/// runs, not when it was saved. `tables` is both their definitions and their
+/// rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncludeAll {
+    pub tables: bool,
+    pub applications: bool,
+    pub file_stores: bool,
+}
+
+impl Default for IncludeAll {
+    /// All three: what a schedule that never said otherwise includes.
+    fn default() -> IncludeAll {
+        IncludeAll {
+            tables: true,
+            applications: true,
+            file_stores: true,
+        }
+    }
+}
+
+impl IncludeAll {
+    /// Read a body's or a stored record's `include_all`; anything missing is
+    /// on — the default is everything, now and later — and only an explicit
+    /// `false` leaves that kind to the lists.
+    pub fn from_json(value: Option<&Json>) -> IncludeAll {
+        let on = |key: &str| {
+            value
+                .and_then(|v| v.get(key))
+                .and_then(Json::as_bool)
+                .unwrap_or(true)
+        };
+        IncludeAll {
+            tables: on("tables"),
+            applications: on("applications"),
+            file_stores: on("file_stores"),
+        }
+    }
+
+    pub fn to_json(self) -> Json {
+        json!({
+            "tables": self.tables,
+            "applications": self.applications,
+            "file_stores": self.file_stores,
+        })
+    }
+}
+
 impl BackupSchedule {
+    /// What a backup taken now includes: `include` over what is on offer, with
+    /// every table (definition and rows), application or file store there is
+    /// for each kind [`IncludeAll`] covers.
+    pub fn selection(&self, available: &Available) -> super::Selection {
+        let mut selection = self.include.selection(available);
+        let names = |items: &[super::Item]| -> Vec<String> {
+            items.iter().map(|i| i.name.clone()).collect()
+        };
+        if self.include_all.tables {
+            selection.tables = names(&available.tables);
+            selection.table_data = names(&available.tables);
+        }
+        if self.include_all.applications {
+            selection.applications = names(&available.applications);
+        }
+        if self.include_all.file_stores {
+            selection.file_stores = names(&available.file_stores);
+        }
+        selection
+    }
+
     /// Read a schedule from an admin's request body (`destination`,
     /// `frequency`, `retention_days`), with the id it is to have and what it
     /// includes (which the caller works out from the body's `include`
@@ -177,6 +253,7 @@ impl BackupSchedule {
             frequency,
             retention_days,
             include,
+            include_all: IncludeAll::from_json(body.get("include_all")),
             password,
         })
     }
@@ -203,6 +280,7 @@ impl BackupSchedule {
             "frequency": self.frequency.as_str(),
             "retention_days": self.retention_days,
             "include": self.include.to_json(),
+            "include_all": self.include_all.to_json(),
             "password": self.password,
         })
     }
@@ -357,7 +435,7 @@ pub fn schedule_json(
     if let Some(obj) = out.as_object_mut() {
         obj.insert(
             "include".to_owned(),
-            schedule.include.selection(available).to_json(),
+            schedule.selection(available).to_json(),
         );
         obj.insert(
             "destination".to_owned(),
@@ -463,7 +541,7 @@ pub async fn run_schedule(
     };
     super::write_backup_to(
         catalog,
-        &schedule.include.selection(&available),
+        &schedule.selection(&available),
         schedule.password.as_deref(),
         spool.create()?,
     )
@@ -602,6 +680,7 @@ mod tests {
             frequency,
             retention_days: 7,
             include: BackupPreferences::default(),
+            include_all: IncludeAll::default(),
             password: None,
         }
     }
@@ -754,6 +833,74 @@ mod tests {
         assert_eq!(with(Json::Null).password, None);
         let unprotected = schedule_json(&schedule(Frequency::Daily), None, &Available::default());
         assert_eq!(unprotected["password"], Json::Null);
+    }
+
+    /// "All" covers what exists when the backup runs — a table, application
+    /// or file store created after the schedule was saved, and one the lists
+    /// left out — and survives being stored.
+    #[test]
+    fn include_all_covers_what_was_created_later() {
+        use crate::backup::Item;
+        let s = BackupSchedule {
+            include: BackupPreferences {
+                exclude_tables: vec!["secrets".into()],
+                exclude_table_data: vec!["books".into()],
+                exclude_applications: vec!["old".into()],
+                exclude_file_stores: vec!["tmp".into()],
+                ..BackupPreferences::default()
+            },
+            include_all: IncludeAll {
+                tables: true,
+                applications: true,
+                file_stores: false,
+            },
+            ..schedule(Frequency::Daily)
+        };
+        assert_eq!(BackupSchedule::from_json(&s.to_json()), Some(s.clone()));
+        // Later: a new table, application and store, beside the excluded ones.
+        let later = Available {
+            tables: vec![Item::new("books"), Item::new("secrets"), Item::new("new")],
+            applications: vec![Item::new("old"), Item::new("shop")],
+            file_stores: vec![Item::new("tmp"), Item::new("uploads")],
+            ..Available::default()
+        };
+        let sel = s.selection(&later);
+        assert_eq!(sel.tables, vec!["books", "secrets", "new"]);
+        assert_eq!(sel.table_data, vec!["books", "secrets", "new"]);
+        assert_eq!(sel.applications, vec!["old", "shop"]);
+        // Not "all": the lists decide, and a new store is still in.
+        assert_eq!(sel.file_stores, vec!["uploads"]);
+        let sent = schedule_json(&s, None, &later);
+        assert_eq!(sent["include_all"]["tables"], json!(true));
+        assert_eq!(sent["include"]["applications"], json!(["old", "shop"]));
+
+        // On unless the body says otherwise, and on for a body without it.
+        let body = json!({
+            "destination": { "kind": "local", "directory": "/srv/b" },
+            "frequency": "daily",
+            "retention_days": 7,
+            "include_all": { "tables": false, "applications": false },
+        });
+        let read = BackupSchedule::from_body(
+            Uuid::nil(),
+            body.as_object().unwrap(),
+            BackupPreferences::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            read.include_all,
+            IncludeAll {
+                tables: false,
+                applications: false,
+                file_stores: true
+            }
+        );
+        let mut bare = body.as_object().unwrap().clone();
+        bare.remove("include_all");
+        let read =
+            BackupSchedule::from_body(Uuid::nil(), &bare, BackupPreferences::default()).unwrap();
+        assert_eq!(read.include_all, IncludeAll::default());
+        assert!(read.include_all.tables && read.include_all.file_stores);
     }
 
     #[test]

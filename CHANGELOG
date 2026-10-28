@@ -2,6 +2,31 @@
 
 Changes in reverse chronological order.
 
+## Automated backups: "All tables", "All applications" and "All files"
+
+An automated backup can now include every table, application or file store there is when it
+runs, so one created after the schedule was set up is always in it — whatever the lists say.
+
+- **Admin UI** (Settings → Backup → Automated backups): the schedule dialog has three new boxes,
+  **All tables, definitions and data**, **All applications** and **All files**, each above its
+  pickers, which are hidden while the box is ticked. They are shown even when there is nothing of
+  that kind yet, and a new schedule starts with all three ticked. Ticking one counts as something
+  to include. A schedule's line says "New tables, applications and file stores are included
+  automatically." for the boxes it has ticked.
+- **Server**: `BackupSchedule` has `include_all` (`IncludeAll { tables, applications,
+  file_stores }`), stored with the schedule in `backup_schedules`. `BackupSchedule::selection`
+  is what a run backs up: the stored exclusions over what is on offer, then every table (with its
+  rows), application or file store for each kind `include_all` covers. `listBackupSchedules`
+  answers `include` the same way.
+- **Admin API**: `createBackupSchedule` / `updateBackupSchedule` take an optional `include_all:
+  {tables, applications, file_stores}`, and the schedule answers carry it. Absent (or a flag
+  missing from it) means on; only `false` leaves that kind to `include`'s lists. A schedule stored
+  before this therefore includes all tables, applications and files, and its dialog opens with
+  the three boxes ticked. Clients regenerated in all four UIs.
+- Tests: `include_all_covers_what_was_created_later` (sc-server unit) and the form model's
+  tests in `backupSchedules.test.ts`.
+- Docs: OPERATIONS "Automated backups off the server".
+
 ## Map settings moved into the Analytics UI
 
 The admin UI's settings screen no longer has a **Maps** tab. The base map settings are now on the
