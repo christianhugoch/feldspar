@@ -2,6 +2,23 @@
 
 Changes in reverse chronological order.
 
+## `feldspar api add-query` adds code queries, from a file
+
+`add-query` only added SQL queries, so a JavaScript or Python query could only be saved through
+MCP `save_api_query`, with the whole body in the call each time.
+
+- **CLI**: `add-query` takes `--language sql|javascript|python` (also `js`, `py`; default `sql`)
+  and `--code TEXT|@FILE`. `--code` is the same flag as `--sql`; giving both is refused. A code
+  query is saved through the same `save_application` path (endpoint rules apply, SQL rules and
+  preparing do not), and the command prints `NAME: a javascript query` instead of the
+  columns. The usage text says so.
+- **Generated README**: the custom-query section says how to add a code query with the
+  command.
+- Tests: `api::tests::a_code_query_takes_its_language_and_its_body_from_a_file` (parsing,
+  defaults, short names, unknown language, `--sql` and `--code` together), and
+  `api_queries::a_javascript_query_is_added_from_a_file` (real binary and Postgres: stored as
+  JavaScript with the file's body, client method generated).
+
 ## The coding agent keeps working when an application moves to `@` (or any other subdomain)
 
 Changing an existing application's subdomain left its builder agent behind: its `coding` trait
