@@ -2634,6 +2634,27 @@ pub fn admin_handlers_with(
         }
     });
 
+    reg.register("getHelp", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let topic = ctx.path_param("topic")?.to_owned();
+                let context = help_context(
+                    &catalog,
+                    ctx.user.as_ref(),
+                    ctx.query_get("table"),
+                    ctx.query_get("event"),
+                )
+                .await?;
+                let page = sc_help::render(&topic, &context)?;
+                Ok(HandlerResponse::ok(
+                    json!({ "title": say(&page.title, &ctx.locale), "html": page.html }),
+                ))
+            }
+        }
+    });
+
     reg.register("searchFiles", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -7550,6 +7571,107 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
     })
 }
 
+/// What a help topic is filled in with (`sc-help`'s module docs list the keys):
+/// the screen's table with its key fields' targets and the keys pointing back
+/// at it, the trigger's event, the admin's own user object, the users table's
+/// fields, and the tables and triggers a code body can reach.
+///
+/// A `table` that does not exist is left out rather than refused: the form the
+/// help was opened from may be about a table that is still being named.
+async fn help_context(
+    catalog: &Catalog,
+    user: Option<&User>,
+    table: Option<&str>,
+    event: Option<&str>,
+) -> Result<Json> {
+    let field_summary = |f: &DataField| json!({ "name": f.base.name, "label": f.base.label, "type": f.base.type_.name() });
+    let tables = catalog.tables()?;
+    let mut context = serde_json::Map::new();
+    if let Some(table) = table
+        .filter(|t| !t.is_empty())
+        .and_then(|t| tables.iter().find(|candidate| candidate.name == t))
+    {
+        let fields: Vec<Json> = table
+            .fields
+            .iter()
+            .filter(|f| !sc_auth::is_api_hidden_column(&table.name, &f.base.name))
+            .map(|f| {
+                let key_to = match &f.kind {
+                    DataFieldKind::Key { target_table, .. } => {
+                        let target = tables.iter().find(|t| t.name == target_table.0);
+                        json!({
+                            "table": target_table.0,
+                            "fields": target.map_or_else(Vec::new, |t| {
+                                t.fields
+                                    .iter()
+                                    .filter(|f| !sc_auth::is_api_hidden_column(&t.name, &f.base.name))
+                                    .map(field_summary)
+                                    .collect()
+                            }),
+                        })
+                    }
+                    _ => Json::Null,
+                };
+                json!({
+                    "name": f.base.name,
+                    "label": f.base.label,
+                    "type": f.base.type_.name(),
+                    "required": f.required,
+                    "key_to": key_to,
+                })
+            })
+            .collect();
+        let inbound: Vec<Json> = SchemaProjection::new(tables.clone())
+            .referencing_fields(&table.name)
+            .into_iter()
+            .map(|(t, f)| json!({ "table": t, "field": f }))
+            .collect();
+        context.insert(
+            "table".into(),
+            json!({ "name": table.name, "label": table.label, "fields": fields, "inbound": inbound }),
+        );
+    }
+    if let Some(event) = event.filter(|e| !e.is_empty()) {
+        context.insert("event".into(), json!(event));
+    }
+    if let Some(user) = user {
+        let mut object: serde_json::Map<String, Json> = user
+            .extra
+            .iter()
+            .map(|(k, v)| (k.clone(), sc_types::value_to_json(v)))
+            .collect();
+        object.insert("id".into(), json!(user.id));
+        object.insert("role".into(), json!(user.role));
+        context.insert("user".into(), Json::Object(object));
+    }
+    if let Some(users) = tables.iter().find(|t| t.name == USERS_TABLE) {
+        let fields: Vec<Json> = users
+            .fields
+            .iter()
+            .filter(|f| !sc_auth::is_api_hidden_column(USERS_TABLE, &f.base.name))
+            .filter(|f| f.base.name != "id" && f.base.name != "role")
+            .map(field_summary)
+            .collect();
+        context.insert("user_fields".into(), Json::Array(fields));
+    }
+    let reachable: Vec<Json> = tables
+        .iter()
+        .filter(|t| !t.is_hidden())
+        .map(|t| json!({ "name": t.name, "label": t.label }))
+        .collect();
+    context.insert("tables".into(), Json::Array(reachable));
+    // Only once a trigger has been saved: the table is created by the first.
+    if catalog.get(sc_action::TRIGGERS_TABLE)?.is_some() {
+        let triggers: Vec<Json> = list_triggers(catalog)
+            .await?
+            .into_iter()
+            .map(|t| json!(t.name))
+            .collect();
+        context.insert("triggers".into(), Json::Array(triggers));
+    }
+    Ok(Json::Object(context))
+}
+
 /// One constraint on the wire. Every kind uses one shape, with the fields that
 /// do not apply left null — which is what lets the screen render a list of four
 /// different things without four branches for the data and four for the display.
@@ -12220,6 +12342,7 @@ fn form_field_json(field: &FormField) -> Json {
         "code_language": field.code_language,
         "section": field.section,
         "sublabel": field.sublabel,
+        "help_topic": field.help_topic,
         "pattern": field.pattern,
         "pattern_error": field.pattern_error,
         "env_fallback": env_fallback_json(field),
