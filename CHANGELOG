@@ -2,6 +2,30 @@
 
 Changes in reverse chronological order.
 
+## The coding agent keeps working when an application moves to `@` (or any other subdomain)
+
+Changing an existing application's subdomain left its builder agent behind: its `coding` trait
+still named the old subdomain, so `check` and `view_app` failed with "no application is served
+at `…`", and the admin sidebar (which finds the builder by that setting) no longer offered it.
+For `@` the preview pane was broken too: its URL became `//@.{host}`.
+
+- **Server** (`updateApplication`): when the subdomain changes, `retarget_builder_agent` finds
+  the builder by its `coding` trait's `application` and points it at the new subdomain. The
+  preview pane URL and the system prompt move with it only while they are still what the
+  framework declared (an admin's own stays). The agent is renamed (`build-todo` → `build-@`)
+  only while it has the derived name, the new name is free, and no application exposes it. The
+  response says which agent moved in `agent`, or why it could not in `agent_error`, as on create.
+- **Preview pane URL**: builders are now created with `//<subdomain>.{base}`, and `//{base}` for
+  the application on `@`. The admin resolves `{base}` to the base domain the server reports
+  (with the admin's port), falling back to its own host, the way it builds app links. `{host}`
+  is still accepted. It is no longer used for builders because once the admin UI is on a
+  subdomain of its own, which `@` needs, the admin's host is not where applications are served.
+- **Prompts**: the application on `@` is described as "served on the base domain (subdomain
+  `@`)" instead of "at the `@` subdomain".
+- Tests: `app_builder_agent::moving_an_application_to_another_subdomain_takes_its_builder_along`
+  (todo → `@` → shop, with an admin-edited pane URL kept), a unit test for the `@` pane URL, and
+  an `agentChat` test for `{base}`.
+
 ## Test fixes after "All tables / applications / files"
 
 - `sc-cli` tests: `inspect_backup` takes a password now; the backup test passes `None`.
