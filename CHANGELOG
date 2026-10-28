@@ -2,22 +2,25 @@
 
 Changes in reverse chronological order.
 
-## Claude Code in the IDE: the terminal bridge
+## Claude Code in the IDE
 
-The server can now run Claude Code (or any terminal program) for the file-store IDE: an
-admin-only WebSocket at `/ide/terminal/{store}` on a real pseudo-terminal, started at the store's
-root or, with `?app=<name>`, in that application's source directory. Nothing in the IDE opens it
-yet (TODO-claude-terminal CT2).
+An admin can run Claude Code on the server in a terminal tab of the file-store IDE. Opening
+`/ide/?store=<store>&claude=1&app=<name>` starts a session in that application's source
+directory, in an editor tab named "Claude · <name>". The "Claude" status-bar button and the
+terminal panel's "New Terminal" open more sessions. The admin UI's "Build with Claude" link is
+still to come (TODO-claude-terminal CT4).
 
-- **Off by default**: Settings → Development → "Claude Code in the IDE" (`ide_terminal_enabled`),
-  read per request. Only stores on this machine's disk can have a terminal.
-- `--claude-cli PATH` names the executable (default `claude` on `PATH`). At most four terminals
-  run at once. Every refusal (off, unknown store or app, not on disk, not installed, too many)
-  reaches the terminal as a sentence.
+- **Off by default**: Settings → Development → "Claude Code in the IDE" (`ide_terminal_enabled`).
+  While it is off the IDE has no terminal at all. Only stores on this machine's disk can have one.
+- `--claude-cli PATH` names the executable (default `claude` on `PATH`). At most four sessions
+  run at once. A refusal (off, unknown store or app, not on disk, not installed, too many) is
+  printed in the tab, which stays open until a key is pressed.
+- Output that comes faster than the browser can draw it slows the program down rather than
+  filling the page's memory.
 - The program gets an allow-listed environment, not the server's (which holds the database
-  credentials). Closing the socket ends it and everything it started, including background jobs
-  and children in a session of their own.
-- Tests: `sc-server/tests/ide_terminal.rs`.
+  credentials). Closing the tab or the page ends it and everything it started, including
+  background jobs and children in a session of their own.
+- Tests: `sc-server/tests/ide_terminal.rs`, `ui/ide/src/terminal.test.ts`.
 
 ## Test suite green again: drifted docs, a v1 table name, and unreadable i18n call sites
 

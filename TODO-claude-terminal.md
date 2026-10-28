@@ -28,16 +28,16 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
 ## CT2 — The terminal in the IDE
 
-- [ ] CT2.1 `@codingame/monaco-vscode-terminal-service-override` in `ui/ide`, and a
-      `Pseudoterminal` bridged to the CT1 socket (bytes, resize, a close reason printed into
-      the terminal).
-- [ ] CT2.2 `claude=1&app=<name>` on the IDE URL opens "Claude · <app>" as an editor-area tab
+- [x] CT2.1 `@codingame/monaco-vscode-terminal-service-override` in `ui/ide`, loaded only when
+      `ide_terminal_enabled` is on, and a terminal process bridged to the CT1 socket (bytes,
+      resize, a close reason printed into the terminal).
+- [x] CT2.2 `claude=1&app=<name>` on the IDE URL opens "Claude · <app>" as an editor-area tab
       once the workbench is up, then removes the parameter with `history.replaceState`. A
       status-bar item opens another session.
-- [ ] CT2.3 Flow control: `{"pause": true}` / `{"pause": false}` text frames, on which the
-      bridge stops and resumes reading the PTY; the pseudoterminal sends them when xterm's
-      pending writes pass a high and fall below a low mark.
-- [ ] CT2.4 Tests: the pseudoterminal against a fake socket (input, output, resize, close
+- [x] CT2.3 Flow control: `{"pause": true}` / `{"pause": false}` text frames, on which the
+      bridge stops and resumes reading the PTY; the IDE sends them from VS Code's own
+      acknowledgements of drawn output, past a high and at a low mark.
+- [x] CT2.4 Tests: the terminal connection against a fake socket (input, output, resize, close
       reason, pause and resume); the URL handling (opens once, parameter removed).
 
 ## CT3 — Wiring Claude Code to this server

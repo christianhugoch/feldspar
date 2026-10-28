@@ -5514,11 +5514,11 @@ with no local path gets no terminal, and the link to it says why.
 **How it is opened.** Wherever the admin UI links an application to the IDE ("Edit code" in the
 application sidebar, "(edit code)" in the applications list), a **Build with Claude** link sits
 beside it: `ideUrl(store)` plus `&app=<name>&claude=1`. When the workbench is up, `main.ts` reads
-`claude=1`, opens a terminal with `vscode.window.createTerminal({ name: "Claude · <app>", pty,
-location: TerminalLocation.Editor })`, so it is a tab in the editor area rather than in the
-small bottom panel, and removes the parameter with `history.replaceState` so a reload does not
-open a second one. A status-bar item in the IDE opens another session at any time, including
-for an admin who came in through "Edit code".
+`claude=1`, opens a terminal named "Claude · <app>" as a tab in the editor area rather than in
+the small bottom panel, and removes the parameter with `history.replaceState` so a reload does
+not open a second one. A status-bar item in the IDE opens another session at any time, including
+for an admin who came in through "Edit code", and the terminal panel's own "New Terminal" opens
+one at the store's root.
 
 The link is **disabled, with the reason as its tooltip**, when the session could not start: the
 feature is off, the store has no local path, the `claude` executable is not installed, or the
@@ -5526,11 +5526,20 @@ application has no source directory. `listApplications` reports this per applica
 `listAgents` already reports an agent's `error`. A click that is known to fail is worse than a
 link that says why it would.
 
-**The terminal is an extension `Pseudoterminal`, not a terminal backend.** The workbench's
-terminal service needs a backend only for terminals it starts itself. `createTerminal({ pty })`
-hands it an object that writes bytes in and receives keystrokes and resizes out, and that object
-is about fifty lines bridging to a WebSocket. No backend, no `.vsix`, and the same route gives a
-plain shell terminal for free (`?shell=1`) if that is ever wanted.
+**The terminal is VS Code's, over a terminal process of ours.** The plan was an extension
+`Pseudoterminal`, and it cannot do flow control: VS Code tells a terminal *process* how much of
+its output xterm has drawn, and drops that for an extension terminal. So the IDE gives the
+terminal service its own process object, one class used both for the tabs it opens and for the
+backend behind "New Terminal", bridging bytes, resizes and those acknowledgements to the socket.
+
+- **Only where the operator turned it on.** The terminal service contributes its panel and
+  commands as soon as it is loaded, so the IDE reads the setting before the workbench starts and
+  loads the service only when it is on, as it does for the chat. With it off there is no
+  terminal anywhere in the IDE, and a `claude=1` link says it is turned off.
+- **A session that ends stays on screen** with the server's reason or the exit status until a
+  key is pressed, so a refusal ("not installed", "maximum of 4 terminals") is read, not lost.
+- **Leaving the page asks first** while a session is running, which is VS Code's own default for
+  terminal tabs: leaving ends the program on the server.
 
 **The server side is `crates/sc-server/src/terminal.rs`**, a sibling of `lsp.rs` with the same
 shape:

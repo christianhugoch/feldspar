@@ -14,9 +14,11 @@
 //! - **Binary frames** are the terminal's bytes, in both directions: what the
 //!   admin typed going in, what the program drew coming out.
 //! - **Text frames** from the browser are control messages, one JSON object each.
-//!   The only one today is `{"resize": {"cols": 120, "rows": 40}}`. A text frame
-//!   that is not a control message is ignored rather than typed, so a client bug
-//!   cannot become keystrokes.
+//!   `{"resize": {"cols": 120, "rows": 40}}` sets the terminal's size;
+//!   `{"pause": true}` and `{"pause": false}` stop and restart reading what the
+//!   program writes, which is how the browser keeps up (flow control, as ttyd has
+//!   it). A text frame that is not a control message is ignored rather than
+//!   typed, so a client bug cannot become keystrokes.
 //! - When the program exits the socket is closed normally, with its exit status
 //!   in the reason.
 //!
@@ -100,21 +102,39 @@ pub(crate) struct TerminalSize {
     pub(crate) rows: u16,
 }
 
-/// A control message: a text frame from the browser.
+/// A text frame from the browser, as sent.
 #[derive(Debug, Deserialize)]
-struct Control {
+struct ControlFrame {
     resize: Option<TerminalSize>,
+    pause: Option<bool>,
 }
 
-/// The size a control message asks for, if it is a resize with a usable size.
+/// What a text frame from the browser asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Control {
+    /// Set the terminal's size.
+    Resize(TerminalSize),
+    /// Stop (`true`) or restart (`false`) reading what the program writes.
+    ///
+    /// While reading is stopped the program's output waits in the kernel's
+    /// buffer, and once that is full the program blocks on its next write: a
+    /// build printing faster than the browser draws slows down rather than
+    /// filling the page's memory.
+    Pause(bool),
+}
+
+/// The control message `text` is, if it is one.
 ///
-/// Zero is refused (the kernel accepts it, and a program asked to draw into no
-/// columns divides by it); anything above a thousand cells is a client bug
-/// rather than a monitor.
-fn resize_request(text: &str) -> Option<TerminalSize> {
-    let size = serde_json::from_str::<Control>(text).ok()?.resize?;
-    let usable = |n: u16| (1..=1000).contains(&n);
-    (usable(size.cols) && usable(size.rows)).then_some(size)
+/// A size of zero is refused (the kernel accepts it, and a program asked to
+/// draw into no columns divides by it); anything above a thousand cells is a
+/// client bug rather than a monitor.
+fn control_message(text: &str) -> Option<Control> {
+    let frame = serde_json::from_str::<ControlFrame>(text).ok()?;
+    if let Some(size) = frame.resize {
+        let usable = |n: u16| (1..=1000).contains(&n);
+        return (usable(size.cols) && usable(size.rows)).then_some(Control::Resize(size));
+    }
+    frame.pause.map(Control::Pause)
 }
 
 /// Why this store cannot have a terminal, or the directory to start one in.
@@ -283,6 +303,9 @@ async fn bridge(
 
     let (mut sender, mut receiver) = socket.split();
     let (mut from_pty, mut to_pty) = session.pty.split();
+    // Whether the browser has asked for a pause: set by the loop that reads the
+    // socket, waited on by the loop that reads the terminal.
+    let (pause, mut paused) = tokio::sync::watch::channel(false);
 
     // Browser → program: keystrokes, and resizes on the side.
     let to_program = async {
@@ -293,11 +316,15 @@ async fn bridge(
                         break;
                     }
                 }
-                Message::Text(text) => {
-                    if let Some(size) = resize_request(&text) {
+                Message::Text(text) => match control_message(&text) {
+                    Some(Control::Resize(size)) => {
                         let _ = to_pty.resize(pty_process::Size::new(size.rows, size.cols));
                     }
-                }
+                    Some(Control::Pause(on)) => {
+                        pause.send_replace(on);
+                    }
+                    None => {}
+                },
                 Message::Close(_) => break,
                 // Ping/Pong are answered by axum itself.
                 Message::Ping(_) | Message::Pong(_) => {}
@@ -311,7 +338,18 @@ async fn bridge(
     let to_browser = async {
         let mut buf = vec![0_u8; 16 * 1024];
         loop {
-            match from_pty.read(&mut buf).await {
+            // The sender lives in the other loop, so neither wait can fail
+            // while the bridge runs.
+            let _ = paused.wait_for(|on| !*on).await;
+            // A pause also cuts short a read already waiting, so nothing more
+            // is sent once it has arrived. `biased`: when both are ready, the
+            // pause wins; dropping the read loses nothing, as it is cancel-safe.
+            let read = tokio::select! {
+                biased;
+                _ = paused.wait_for(|on| *on) => continue,
+                read = from_pty.read(&mut buf) => read,
+            };
+            match read {
                 Ok(0) | Err(_) => return true,
                 Ok(n) => {
                     if sender
@@ -519,21 +557,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_resize_is_the_only_control_message() {
+    fn a_resize_and_a_pause_are_the_only_control_messages() {
         assert_eq!(
-            resize_request(r#"{"resize":{"cols":120,"rows":40}}"#),
-            Some(TerminalSize {
+            control_message(r#"{"resize":{"cols":120,"rows":40}}"#),
+            Some(Control::Resize(TerminalSize {
                 cols: 120,
                 rows: 40
-            })
+            }))
         );
-        assert_eq!(resize_request(r#"{"resize":{"cols":0,"rows":40}}"#), None);
+        assert_eq!(control_message(r#"{"resize":{"cols":0,"rows":40}}"#), None);
         assert_eq!(
-            resize_request(r#"{"resize":{"cols":80,"rows":5000}}"#),
+            control_message(r#"{"resize":{"cols":80,"rows":5000}}"#),
             None
         );
-        assert_eq!(resize_request("ls -la"), None, "text is not typed");
-        assert_eq!(resize_request(r#"{"other":1}"#), None);
+        assert_eq!(
+            control_message(r#"{"pause":true}"#),
+            Some(Control::Pause(true))
+        );
+        assert_eq!(
+            control_message(r#"{"pause":false}"#),
+            Some(Control::Pause(false))
+        );
+        assert_eq!(control_message(r#"{"pause":"yes"}"#), None);
+        assert_eq!(control_message("ls -la"), None, "text is not typed");
+        assert_eq!(control_message(r#"{"other":1}"#), None);
     }
 
     #[test]

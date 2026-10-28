@@ -301,6 +301,35 @@ async fn bytes_and_resizes_cross_the_bridge() -> Result<()> {
     Ok(())
 }
 
+/// While the browser has paused the terminal nothing reaches it; on resuming,
+/// what the program wrote meanwhile does.
+#[tokio::test]
+async fn a_paused_terminal_holds_its_output_until_resumed() -> Result<()> {
+    let server = serve(&sh(), true).await?;
+    let mut socket = server.open("").await;
+    type_line(&mut socket, "echo ready-$((1+1))").await;
+    read_until(&mut socket, "ready-2").await;
+
+    let pause = |on: bool| Message::text(json!({ "pause": on }).to_string());
+    socket.send(pause(true)).await.unwrap();
+    type_line(&mut socket, "echo held-$((40+2))").await;
+    let mut while_paused = String::new();
+    let quiet_until = tokio::time::Instant::now() + Duration::from_millis(600);
+    while let Ok(Some(Ok(message))) = tokio::time::timeout_at(quiet_until, socket.next()).await {
+        if let Message::Binary(bytes) = message {
+            while_paused.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    assert!(
+        !while_paused.contains("held-42"),
+        "output arrived while paused: {while_paused:?}"
+    );
+
+    socket.send(pause(false)).await.unwrap();
+    read_until(&mut socket, "held-42").await;
+    Ok(())
+}
+
 /// With `?app=`, the program starts in that application's source directory.
 #[tokio::test]
 async fn an_application_terminal_starts_in_its_source_directory() -> Result<()> {
