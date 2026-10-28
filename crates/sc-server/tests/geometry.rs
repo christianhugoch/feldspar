@@ -718,7 +718,25 @@ async fn a_map_panel_is_suggested_drawn_and_its_base_map_allowed() -> sc_error::
     assert_eq!(
         settings,
         json!({ "style": sc_config::DEFAULT_MAP_STYLE, "style_dark": sc_config::DEFAULT_MAP_STYLE_DARK,
-                "hosts": ["https://tiles.openfreemap.org"] })
+                "hosts": ["https://tiles.openfreemap.org"],
+                "values": { "map_style": sc_config::DEFAULT_MAP_STYLE,
+                            "map_style_dark": sc_config::DEFAULT_MAP_STYLE_DARK,
+                            "map_hosts": "" } })
+    );
+    // The base maps are the Analytics UI's settings, not the settings screen's:
+    // that refuses the keys as ones it does not have.
+    let (status, body) = h
+        .admin
+        .send(
+            "POST",
+            "/api/settings",
+            Some(json!({ "values": { "map_style": "https://maps.example.org/light.json" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("not a setting on this screen"),
+        "{body}"
     );
     assert!(
         policy(&mut h)
@@ -729,7 +747,7 @@ async fn a_map_panel_is_suggested_drawn_and_its_base_map_allowed() -> sc_error::
         .admin
         .send(
             "POST",
-            "/api/settings",
+            "/api/maps/settings",
             Some(json!({ "values": {
                 "map_style": "https://maps.example.org/light.json",
                 "map_style_dark": "",
@@ -738,13 +756,15 @@ async fn a_map_panel_is_suggested_drawn_and_its_base_map_allowed() -> sc_error::
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let expected = json!({ "style": "https://maps.example.org/light.json",
+            "style_dark": "https://maps.example.org/light.json",
+            "hosts": ["https://maps.example.org", "https://glyphs.example.net"],
+            "values": { "map_style": "https://maps.example.org/light.json",
+                        "map_style_dark": "",
+                        "map_hosts": "https://glyphs.example.net" } });
+    assert_eq!(body, expected);
     let (_, settings) = h.admin.send("GET", "/api/maps/settings", None).await;
-    assert_eq!(
-        settings,
-        json!({ "style": "https://maps.example.org/light.json",
-                "style_dark": "https://maps.example.org/light.json",
-                "hosts": ["https://maps.example.org", "https://glyphs.example.net"] })
-    );
+    assert_eq!(settings, expected);
     let served = policy(&mut h).await;
     assert!(
         served.contains("connect-src 'self' https://maps.example.org https://glyphs.example.net;"),
@@ -763,12 +783,30 @@ async fn a_map_panel_is_suggested_drawn_and_its_base_map_allowed() -> sc_error::
         .admin
         .send(
             "POST",
-            "/api/settings",
+            "/api/maps/settings",
             Some(json!({ "values": { "map_hosts": "https://ok.org; script-src *" } })),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("map host"), "{body}");
+    // A key left out is kept; one that is not a map setting is refused.
+    let (status, body) = h
+        .admin
+        .send(
+            "POST",
+            "/api/maps/settings",
+            Some(json!({ "values": { "map_style_dark": "https://maps.example.org/dark.json" } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["values"]["map_hosts"],
+        json!("https://glyphs.example.net")
+    );
+    assert_eq!(
+        body["style_dark"],
+        json!("https://maps.example.org/dark.json")
+    );
     assert!(!policy(&mut h).await.contains("script-src *"));
     Ok(())
 }
@@ -1154,7 +1192,7 @@ async fn the_map_workspace_selects_saves_runs_tools_and_is_a_panel() -> sc_error
         json!([0.0, 1.0, 3.0, 3.0])
     );
 
-    // A reference layer's host, allowed: in Settings → Maps and the policy.
+    // A reference layer's host, allowed: in Analytics → Settings → Base maps and the policy.
     assert!(
         !analytics_policy(&h)
             .await

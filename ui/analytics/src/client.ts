@@ -415,9 +415,11 @@ export type SelectFeaturesRequest = { layer: unknown; by: unknown };
 export type SelectFeaturesResponse = { error?: string | null; ids?: Array<unknown> | null; count?: number | null; truncated?: boolean | null; condition?: string | null };
 export type SaveSelectionRequest = { layer: unknown; name: string; ids?: Array<unknown> | null; condition?: string | null };
 export type SaveSelectionResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown } };
-export type MapSettingsResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string> };
+export type MapSettingsResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string>; values: { map_style: string; map_style_dark: string; map_hosts: string } };
+export type SaveMapSettingsRequest = { values: { map_style?: string | null; map_style_dark?: string | null; map_hosts?: string | null } };
+export type SaveMapSettingsResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string>; values: { map_style: string; map_style_dark: string; map_hosts: string } };
 export type AllowMapHostRequest = { url: string };
-export type AllowMapHostResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string> };
+export type AllowMapHostResponse = { style?: string | null; style_dark?: string | null; hosts: Array<string>; values: { map_style: string; map_style_dark: string; map_hosts: string } };
 export type ListMapToolsResponse = Array<{ id: string; group: string; label: string; description: string; params: Array<unknown>; module?: string | null }>;
 export type RunMapToolRequest = { tool: string; params: unknown; name?: string | null };
 export type RunMapToolResponse = { dataset: unknown; report: { base: unknown; operations: Array<unknown>; tables: unknown; children: unknown }; layer: unknown };
@@ -725,6 +727,7 @@ export interface ApiClient {
   selectFeatures(body: SelectFeaturesRequest): Promise<SelectFeaturesResponse>;
   saveSelection(body: SaveSelectionRequest): Promise<SaveSelectionResponse>;
   mapSettings(): Promise<MapSettingsResponse>;
+  saveMapSettings(body: SaveMapSettingsRequest): Promise<SaveMapSettingsResponse>;
   allowMapHost(body: AllowMapHostRequest): Promise<AllowMapHostResponse>;
   listMapTools(): Promise<ListMapToolsResponse>;
   runMapTool(body: RunMapToolRequest): Promise<RunMapToolResponse>;
@@ -3137,6 +3140,15 @@ export function createClient(options: ClientOptions = {}): ApiClient {
       });
       if (!res.ok) throw await clientError("mapSettings", res);
       return (await res.json()) as MapSettingsResponse;
+    },
+    async saveMapSettings(body) {
+      const res = await doFetch(`${baseUrl}/api/maps/settings`, {
+        method: "POST",
+        headers: requestHeaders("POST", true),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw await clientError("saveMapSettings", res);
+      return (await res.json()) as SaveMapSettingsResponse;
     },
     async allowMapHost(body) {
       const res = await doFetch(`${baseUrl}/api/maps/hosts`, {

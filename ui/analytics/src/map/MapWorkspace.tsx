@@ -34,6 +34,8 @@ import { mapToolText } from "../labels";
 import { mapPanel } from "../panels/panel";
 import { DragHandle } from "../panels/PanelView";
 import { useAnnounce, useChanges, usePane } from "../panes";
+import { baseMapLabel } from "../settings/mapSettings";
+import { useShell } from "../shell";
 import { useDocumentTheme } from "../theme";
 import type { WorkspaceProps, WorkspaceState } from "../workspaces/WorkspaceFrame";
 import { AttributeTable } from "./AttributeTable";
@@ -90,6 +92,10 @@ export function MapWorkspace({ state: raw, setState, name }: WorkspaceProps) {
   const [datasets, setDatasets] = useState<DatasetItem[]>([]);
   const [tools, setTools] = useState<ToolItem[]>([]);
   const [hosts, setHosts] = useState<string[]>([]);
+  // The base map in use, light and dark, for the line under the reference
+  // layers; `undefined` until asked.
+  const [baseMaps, setBaseMaps] = useState<{ style?: string | null; style_dark?: string | null }>();
+  const { application } = useShell();
   const [problem, setProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; dataset?: string } | null>(null);
   // Bumped when a dataset changes on the other side of a split view: every
@@ -115,7 +121,11 @@ export function MapWorkspace({ state: raw, setState, name }: WorkspaceProps) {
       .catch(() => live && setTools([]));
     api
       .mapSettings()
-      .then((s) => live && setHosts(s.hosts))
+      .then((s) => {
+        if (!live) return;
+        setHosts(s.hosts);
+        setBaseMaps(s);
+      })
       .catch(() => live && setHosts([]));
     return () => {
       live = false;
@@ -488,6 +498,24 @@ export function MapWorkspace({ state: raw, setState, name }: WorkspaceProps) {
           onRemove={(id) => update((s) => removeReference(s, id))}
           onHostsChanged={setHosts}
         />
+        {/* The base map is the installation's, set on the Analytics UI's
+            Settings page: said here, and linked for the admin who sets it. */}
+        {baseMaps && (
+          <div className="small text-secondary mt-3">
+            {(() => {
+              const label = baseMapLabel(theme === "dark" ? baseMaps.style_dark : baseMaps.style);
+              return label ? t("Base map: {name}", { name: label }) : t("No base map");
+            })()}
+            {!application && (
+              <>
+                {" · "}
+                <a href={pane.href({ name: "settings" })}>
+                  <T text="change" />
+                </a>
+              </>
+            )}
+          </div>
+        )}
       </aside>
 
       <section className="an-mapws-main">

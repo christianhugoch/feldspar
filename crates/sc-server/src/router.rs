@@ -3451,7 +3451,7 @@ async fn serve_analytics(
 }
 
 /// The origins the Analytics UI's maps may load a base map from (analytics
-/// TODO A5.6): Settings → Maps, read per response as the MCP switches are, so a
+/// TODO A5.6): Analytics → Settings → Base maps, read per response as the MCP switches are, so a
 /// changed base map is served on the next page load rather than after a
 /// restart. A server without a catalog, or one whose settings do not read,
 /// uses the default base map's.

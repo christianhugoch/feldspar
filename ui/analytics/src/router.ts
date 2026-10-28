@@ -16,6 +16,8 @@
 //   #/models/compare?ids=a,b  the models' key outputs side by side
 //   #/model-instances/<id>    a fit: the editor of its model, the fit selected
 //                             — where the admin UI's old links lead
+//   #/settings                the Analytics UI's own settings (the base maps);
+//                             the admin's, not an application's
 //
 // **Split view** (A4.1) is any of these with `side=<hash>` added: the other
 // side's whole route, encoded as one parameter, so a reload or a bookmark
@@ -32,6 +34,7 @@ export type Route =
   | { name: "newModel"; dataset: string | null }
   | { name: "compareModels"; ids: string[] }
   | { name: "fit"; id: string }
+  | { name: "settings" }
   | { name: "notFound"; path: string };
 
 /** The route a hash names. */
@@ -57,6 +60,7 @@ export function parseRoute(hash: string): Route {
     return fit ? { name: "model", id: parts[1], fit } : { name: "model", id: parts[1] };
   }
   if (parts[0] === "model-instances" && parts.length === 2) return { name: "fit", id: parts[1] };
+  if (parts[0] === "settings" && parts.length === 1) return { name: "settings" };
   return { name: "notFound", path: `/${parts.join("/")}` };
 }
 
@@ -81,6 +85,8 @@ export function routeHash(route: Route): string {
       return `#/models/compare${query({ ids: route.ids.join(",") })}`;
     case "fit":
       return `#/model-instances/${encodeURIComponent(route.id)}`;
+    case "settings":
+      return "#/settings";
     case "notFound":
       return `#${route.path}`;
   }

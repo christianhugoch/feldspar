@@ -2,6 +2,33 @@
 
 Changes in reverse chronological order.
 
+## Map settings moved into the Analytics UI
+
+The admin UI's settings screen no longer has a **Maps** tab. The base map settings are now on the
+Analytics UI's own **Settings** page, so everything about the Analytics UI is set in the Analytics
+UI.
+
+- **Analytics UI**: a **Settings** button in the header (admin host only) opens `#/settings`. Its
+  **Base maps** card has the same three fields as before (light style, dark style, other map
+  hosts) and lists every host maps may load from. Save sends only what changed; a URL that is not
+  one is refused by name and nothing is saved. An Analytics application's shell has no Settings
+  button and does not show the page.
+- **Map workspace**: under the reference layers it says which base map it draws ("Base map:
+  tiles.openfreemap.org · positron"), with a **change** link to the Settings page for the admin.
+- **Admin API**: new `saveMapSettings` (`POST /api/maps/settings`, body `{values: {map_style?,
+  map_style_dark?, map_hosts?}}`), the admin's only and not reachable from an Analytics
+  application. `mapSettings` also answers `values`, the three settings as the form shows them.
+  `POST /api/settings` (`updateSettings`) now refuses any key that is not on the settings form
+  ("`map_style` is not a setting on this screen"). Before, it would store any declared key,
+  internal ones included (backup selection, OAuth providers, …), without the checks their own
+  screens run. Clients regenerated in all four UIs.
+- **Config**: `map_style`, `map_style_dark` and `map_hosts` are internal keys
+  (`sc_config::map_defs`, in `internal_defs`) instead of a settings section. The stored keys are
+  unchanged, so no migration is needed. `sc_config::save_map_settings` checks all three together
+  before writing; `map_settings` reads them with `config_value`, since `all_config` covers only
+  the settings screen's keys.
+- Docs: OPERATIONS §10.4, TECHNICAL_DESIGN and the analytics tutorial point at the new page.
+
 ## Rename a table
 
 A table can now be renamed, from the table page, the admin API and `edit_schema` (MCP and the admin

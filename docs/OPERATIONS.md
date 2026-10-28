@@ -2006,7 +2006,9 @@ the map demo's test in `sc-cli` and milestone A5's definition of done in `sc-ser
 ### 10.4 The base map
 
 The Analytics UI draws map layers over a base map: a [MapLibre style](https://maplibre.org/maplibre-style-spec/)
-fetched by the browser. **Settings → Maps** names it:
+fetched by the browser. It is set on the Analytics UI's own **Settings** page (the **Settings**
+button in its header, `/analytics/#/settings`), under **Base maps** — not on the admin UI's
+settings screen. Only an admin on the admin host sees the page:
 
 | setting | default | |
 |---|---|---|

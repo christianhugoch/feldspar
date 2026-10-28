@@ -331,7 +331,7 @@ export function removeReference(state: MapState, id: string): MapState {
   return { ...state, reference: state.reference.filter((r) => r.id !== id) };
 }
 
-/** The origin of an http(s) URL, as Settings → Maps lists them; `null` for
+/** The origin of an http(s) URL, as Analytics → Settings → Base maps lists them; `null` for
  * anything else. A tile template's braces are in its path, which an origin
  * does not have. */
 export function originOf(url: string): string | null {
@@ -343,7 +343,7 @@ export function originOf(url: string): string | null {
   return `${m[1].toLowerCase()}://${host}`;
 }
 
-/** Whether a map may load from `url`: its origin is one Settings → Maps
+/** Whether a map may load from `url`: its origin is one Analytics → Settings → Base maps
  * names. */
 export function hostAllowed(url: string, hosts: string[]): boolean {
   const origin = originOf(url);

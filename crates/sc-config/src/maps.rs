@@ -1,6 +1,12 @@
 //! The Maps settings: the base map the Analytics UI draws its layers over
 //! (analytics TODO A5.6).
 //!
+//! They are the Analytics UI's own: edited on its Settings page
+//! (`saveMapSettings`), not on the admin UI's settings screen. So the keys are
+//! declared as [`internal_defs`](crate::internal_defs) — stored and type-checked,
+//! but on no generic settings form — and [`save_map_settings`] is the one way a
+//! form writes them, checked as one act.
+//!
 //! A base map is a **MapLibre style**: a JSON document at a URL naming the
 //! tiles, the glyphs and the sprites a basemap is drawn from. Two of them,
 //! because the Analytics UI follows the admin's light or dark theme and a
@@ -27,7 +33,7 @@ use sc_error::{Error, Result};
 use sc_types::{Attrs, BasicType, FormField};
 use serde_json::Value as Json;
 
-use crate::defs::{ConfigDef, ConfigSection};
+use crate::defs::ConfigDef;
 
 /// The style URL of the basemap under a light page.
 pub const MAP_STYLE: &str = "map_style";
@@ -41,37 +47,31 @@ pub const DEFAULT_MAP_STYLE: &str = "https://tiles.openfreemap.org/styles/positr
 /// The dark basemap when none is set.
 pub const DEFAULT_MAP_STYLE_DARK: &str = "https://tiles.openfreemap.org/styles/dark";
 
-/// The Maps settings, as one section of the settings screen.
-pub fn maps_section() -> ConfigSection {
-    ConfigSection {
-        name: "maps",
-        label: "Maps",
-        description: "The base map the Analytics UI draws map layers over. The Analytics UI \
-                      may load map tiles only from the hosts named here.",
-        fields: vec![
-            ConfigDef::help(
-                FormField::new(MAP_STYLE, BasicType::Text)
-                    .label("Base map style")
-                    .default_value(DEFAULT_MAP_STYLE),
-                "The URL of a MapLibre style, for a light page. Leave it empty for no base map: \
-                 layers are then drawn on a plain background.",
-            ),
-            ConfigDef::help(
-                FormField::new(MAP_STYLE_DARK, BasicType::Text)
-                    .label("Base map style (dark)")
-                    .default_value(DEFAULT_MAP_STYLE_DARK),
-                "The URL of a MapLibre style, for a dark page. Leave it empty to use the light \
-                 one.",
-            ),
-            ConfigDef::help(
-                FormField::new(MAP_HOSTS, BasicType::Text)
-                    .label("Other map hosts")
-                    .default_value(""),
-                "Comma-separated origins (https://tiles.example.com) the style's tiles, fonts or \
-                 icons come from, when they are not on the style's own host.",
-            ),
-        ],
-    }
+/// The Maps settings' declarations, for [`internal_defs`](crate::internal_defs).
+pub fn map_defs() -> Vec<ConfigDef> {
+    vec![
+        ConfigDef::help(
+            FormField::new(MAP_STYLE, BasicType::Text)
+                .label("Base map style")
+                .default_value(DEFAULT_MAP_STYLE),
+            "The URL of a MapLibre style, for a light page. Leave it empty for no base map: \
+             layers are then drawn on a plain background.",
+        ),
+        ConfigDef::help(
+            FormField::new(MAP_STYLE_DARK, BasicType::Text)
+                .label("Base map style (dark)")
+                .default_value(DEFAULT_MAP_STYLE_DARK),
+            "The URL of a MapLibre style, for a dark page. Leave it empty to use the light \
+             one.",
+        ),
+        ConfigDef::help(
+            FormField::new(MAP_HOSTS, BasicType::Text)
+                .label("Other map hosts")
+                .default_value(""),
+            "Comma-separated origins (https://tiles.example.com) the style's tiles, fonts or \
+             icons come from, when they are not on the style's own host.",
+        ),
+    ]
 }
 
 /// The base maps, read and checked.
@@ -117,6 +117,20 @@ impl MapSettings {
             }
         }
         out
+    }
+
+    /// The settings as a form shows them, keyed as stored: each style's URL,
+    /// empty for none, and the further hosts comma-separated — what
+    /// [`save_map_settings`] takes back.
+    pub fn form_values(&self) -> Attrs {
+        [
+            (MAP_STYLE, self.style.clone().unwrap_or_default()),
+            (MAP_STYLE_DARK, self.style_dark.clone().unwrap_or_default()),
+            (MAP_HOSTS, self.extra_hosts.join(", ")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), Json::String(v)))
+        .collect()
     }
 }
 
@@ -226,9 +240,47 @@ pub fn map_settings_from(config: &Attrs) -> Result<MapSettings> {
     })
 }
 
+/// The three keys as the server acts on them (pinned, stored or default).
+/// Not [`all_config`](crate::all_config): that is the settings screen's, and
+/// these are on none of its tabs.
+async fn map_config(catalog: &Catalog) -> Result<Attrs> {
+    let mut out = Attrs::new();
+    for key in [MAP_STYLE, MAP_STYLE_DARK, MAP_HOSTS] {
+        out.insert(
+            key.to_owned(),
+            crate::store::config_value(catalog, key).await?,
+        );
+    }
+    Ok(out)
+}
+
 /// Read the Maps settings from the configuration table.
 pub async fn map_settings(catalog: &Catalog) -> Result<MapSettings> {
-    map_settings_from(&crate::store::all_config(catalog).await?)
+    map_settings_from(&map_config(catalog).await?)
+}
+
+/// Save the Maps settings from a form: `values` keyed as
+/// [`MapSettings::form_values`] answers them, a key left out kept as stored.
+/// All three are checked together before any is written, so a URL that is not
+/// one is refused by name and nothing changes. Answers the settings after.
+pub async fn save_map_settings(catalog: &Catalog, values: &Attrs) -> Result<MapSettings> {
+    let mut written = Attrs::new();
+    for (key, value) in values {
+        if ![MAP_STYLE, MAP_STYLE_DARK, MAP_HOSTS].contains(&key.as_str()) {
+            return Err(Error::invalid(format!("`{key}` is not a map setting")));
+        }
+        let Json::String(text) = value else {
+            return Err(Error::invalid(format!(
+                "`{key}` should be text, got {value}"
+            )));
+        };
+        written.insert(key.clone(), Json::String(text.trim().to_owned()));
+    }
+    let mut merged = map_config(catalog).await?;
+    merged.extend(written.clone());
+    map_settings_from(&merged)?;
+    crate::store::set_config_many(catalog, &written).await?;
+    map_settings(catalog).await
 }
 
 /// The further hosts with `url`'s origin added, comma-separated — or `None`
@@ -373,9 +425,47 @@ mod tests {
     }
 
     #[test]
-    fn the_section_declares_the_three_keys() {
-        let section = maps_section();
-        let keys: Vec<&str> = section.fields.iter().map(ConfigDef::key).collect();
+    fn the_keys_are_internal_and_on_no_settings_tab() {
+        let defs = map_defs();
+        let keys: Vec<&str> = defs.iter().map(ConfigDef::key).collect();
         assert_eq!(keys, [MAP_STYLE, MAP_STYLE_DARK, MAP_HOSTS]);
+        for key in keys {
+            assert!(
+                crate::internal_defs().iter().any(|d| d.key() == key),
+                "{key} is not declared"
+            );
+            assert!(
+                crate::config_sections()
+                    .iter()
+                    .all(|s| s.fields.iter().all(|d| d.key() != key)),
+                "{key} is on a settings tab"
+            );
+        }
+        assert!(crate::config_sections().iter().all(|s| s.name != "maps"));
+    }
+
+    #[test]
+    fn form_values_read_back_as_the_same_settings() {
+        for settings in [
+            MapSettings::default(),
+            map_settings_from(&attrs(&[
+                (MAP_STYLE, json!("")),
+                (MAP_STYLE_DARK, json!("")),
+                (
+                    MAP_HOSTS,
+                    json!("https://a.example.com, https://b.example.com:8443"),
+                ),
+            ]))
+            .unwrap(),
+        ] {
+            assert_eq!(
+                map_settings_from(&settings.form_values()).unwrap(),
+                settings
+            );
+        }
+        assert_eq!(
+            MapSettings::default().form_values().get(MAP_STYLE_DARK),
+            Some(&json!(DEFAULT_MAP_STYLE_DARK))
+        );
     }
 }

@@ -676,7 +676,7 @@ Under **Reference layers**, press **Add reference layer**. Choose *Tiles*, call 
 `OpenStreetMap` and give the address `https://tile.openstreetmap.org/{z}/{x}/{y}.png`, with the
 attribution `© OpenStreetMap contributors`. A browser may only load images from hosts the
 server allows. So the layer first says its host is blocked, and **Allow it** adds the host to
-Settings → Maps and reloads the page. A Web Map Service and an ArcGIS map service work the same
+Analytics → Settings → Base maps and reloads the page. A Web Map Service and an ArcGIS map service work the same
 way. Reference layers are drawn under your data. Lower their opacity with their slider, and the
 incidents' opacity with theirs, until both can be read.
 

@@ -413,7 +413,7 @@ impl ReferenceService {
         }
     }
 
-    /// The origin its images come from — what Settings → Maps must name for
+    /// The origin its images come from — what Analytics → Settings → Base maps must name for
     /// the browser to load them.
     pub fn origin(&self) -> std::result::Result<String, String> {
         sc_config::origin_of(self.url())

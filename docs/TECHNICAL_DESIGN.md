@@ -10246,7 +10246,10 @@ a map classifies by its style (§14.7), not by binning. A **Geometry** picker li
 is dragged into a report as a `map` panel, and **Open in map** makes a Map workspace of it
 (§14.7).
 
-**The base map** is a setting: Settings → Maps (`sc_config::maps`) holds a MapLibre style URL
+**The base map** is a setting of the Analytics UI's own, not a tab of the admin UI's settings
+screen: its Settings page (`#/settings`, the admin host's admin only) edits it through
+`mapSettings`/`saveMapSettings`, and `sc_config::maps` declares the keys as internal (on no
+generic settings form) and checks a save as one act (`save_map_settings`). It holds a MapLibre style URL
 for a light page, one for a dark page, and further hosts. The default is OpenFreeMap's Positron
 and Dark, which need no key and serve style, tiles, glyphs and sprites from one host. An empty
 style means no base map: the layers are drawn on the page's background. `MapView` fetches the
@@ -10255,11 +10258,11 @@ fonts the style's glyphs have (the first plain `text-font` among its layers). An
 cannot be reached should leave the data on a plain background with a sentence, not a grey box.
 
 **The policy.** MapLibre fetches a style, its tiles, glyphs and sprites, so the Analytics UI's
-`connect-src` and `img-src` name the hosts of Settings → Maps (`MapSettings::hosts`). They are
+`connect-src` and `img-src` name the hosts of Analytics → Settings → Base maps (`MapSettings::hosts`). They are
 read per response, as the MCP switches are, so a changed base map is allowed on the next page
 load. Because a host goes into a header, it is parsed, not trusted. `origin_of` accepts an
 `http` or `https` origin of letters, digits, dots and hyphens (or a bracketed IPv6 address)
-with a numeric port. `updateSettings` refuses anything else by name, and
+with a numeric port. `saveMapSettings` refuses anything else by name, and
 `analytics_content_security_policy` leaves out any entry that is not exactly such an origin.
 The one other relaxation is `blob:` in `img-src`, where MapLibre decodes images through object
 URLs. **The worker** is not a `blob:`. MapLibre 6 builds one from its own module file unless
@@ -10365,7 +10368,7 @@ with a sentence pointing at a condition. Two `Geo` functions arrived for this:
 given, a WMS as a `GetMap` in EPSG:3857 with `{bbox-epsg-3857}`, an ArcGIS map service as
 `…/tile/{z}/{y}/{x}`. The browser may load images only from the hosts the policy names
 (§14.6), so a service on another host is shown with a warning and **Allow it**, which calls
-`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Settings → Maps' further
+`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Analytics → Settings → Base maps' further
 hosts (`sc_config::allow_map_host`), and the page is reloaded for the new policy. The admin is
 the only one who can call it: it is not one of the endpoints an Analytics application exposes
 (§14.9). `mapSettings` answers
@@ -10747,7 +10750,7 @@ before the framework, whose document would otherwise answer. The dispatch is the
 dispatcher's, with three differences:
 
 1. **Only `APP_ENDPOINTS`.** These are the Analytics UI's endpoints minus what is the admin's
-   alone: models and their outputs, public datasets, Settings → Maps (`allowMapHost`). Anything
+   alone: models and their outputs, public datasets, Analytics → Settings → Base maps (`allowMapHost`). Anything
    else under `/api/` is a 404 there, as any endpoint an application does not expose is.
 2. **The application's role floor** replaces the admin's. The endpoints are declared admin-only
    for the admin host, and here the floor is `min_role`. `authStatus`, `login` and `logout` keep

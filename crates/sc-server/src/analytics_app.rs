@@ -39,7 +39,7 @@ use sc_types::{Attrs, FormField};
 
 /// The endpoints an Analytics application's browser may call: signing in and
 /// out, the shell, and the Analytics UI's own minus what is the admin's alone —
-/// models and their outputs, public datasets, Settings → Maps.
+/// models and their outputs, public datasets, changing the base maps.
 pub const APP_ENDPOINTS: &[&str] = &[
     // Who is looking, and signing in and out.
     "authStatus",
@@ -254,6 +254,7 @@ mod tests {
         for name in [
             "getModelOutputs",
             "allowMapHost",
+            "saveMapSettings",
             "installPublicDataset",
             "listModels",
         ] {

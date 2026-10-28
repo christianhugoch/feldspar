@@ -4613,6 +4613,18 @@ pub fn admin_handlers_with(
                 };
                 let stored = sc_config::all_config(&catalog).await?;
                 let spec = sc_config::config_spec();
+                // Only the form's own keys. An internal one (the base maps, the
+                // backup selection, …) is declared, so the store would take it,
+                // but it is written by the screen that owns it, through checks
+                // this save does not run.
+                if let Some(key) = submitted
+                    .keys()
+                    .find(|key| !spec.iter().any(|f| f.name() == key.as_str()))
+                {
+                    return Err(Error::invalid(format!(
+                        "`{key}` is not a setting on this screen"
+                    )));
+                }
                 // The secret the form sent back untouched is the sentinel it was
                 // shown, not the key: restore what is stored.
                 let mut values = sc_types::merge_secrets(&spec, &stored, &submitted);
@@ -4657,10 +4669,6 @@ pub fn admin_handlers_with(
                 // tag that is not a language tag is refused here, where the
                 // admin can see which box they typed it into (§16.1).
                 let localisation = sc_config::localisation_settings_from(&merged)?;
-                // The Maps section's, on the same footing: a base map URL is a
-                // host the Analytics UI's policy will name, so one that is not
-                // an http or https origin is refused here (analytics A5.6).
-                sc_config::map_settings_from(&merged)?;
                 // Where the admin UI is served: a move is checked against what
                 // is served there before anything is written, because the
                 // router would otherwise have to choose between the admin UI

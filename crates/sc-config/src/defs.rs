@@ -112,7 +112,6 @@ pub fn config_sections() -> &'static [ConfigSection] {
             crate::development::development_section(),
             crate::authentication::authentication_section(),
             crate::localisation::localisation_section(),
-            crate::maps::maps_section(),
         ]
     })
 }
@@ -163,6 +162,10 @@ pub fn internal_defs() -> &'static [ConfigDef] {
                 .label("External identity providers"),
             ),
         ]
+        .into_iter()
+        // The base maps: the Analytics UI's Settings page edits them, not a tab.
+        .chain(crate::maps::map_defs())
+        .collect()
     })
 }
 

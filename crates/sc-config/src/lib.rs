@@ -22,9 +22,9 @@
 //! - [`localisation`] is the fourth: which languages this installation serves
 //!   (§16.1). Two keys, and a server that has never opened the section runs
 //!   exactly as it did before there was one.
-//! - [`maps`] is the fifth: the base map the Analytics UI draws its map
+//! - [`maps`] is not a section: the base map the Analytics UI draws its map
 //!   layers over, and with it the hosts its Content-Security-Policy lets a map
-//!   load from (analytics A5.6).
+//!   load from (analytics A5.6). The Analytics UI's own Settings page edits it.
 //! - [`authentication`] follows Development: whether a sign-in is shared
 //!   between applications, how long a session lasts, and the external
 //!   identity providers (OAuth 2.0) people may sign in with.
@@ -78,7 +78,8 @@ pub use localisation::{
 };
 pub use maps::{
     DEFAULT_MAP_STYLE, DEFAULT_MAP_STYLE_DARK, MAP_HOSTS, MAP_STYLE, MAP_STYLE_DARK, MapSettings,
-    allow_map_host, hosts_with, map_settings, map_settings_from, maps_section, origin_of,
+    allow_map_host, hosts_with, map_defs, map_settings, map_settings_from, origin_of,
+    save_map_settings,
 };
 pub use ssl::{
     ACME_CONTACT_EMAIL, ACME_DIRECTORY_URL, HOST_KEYS, LETSENCRYPT_PRODUCTION, LETSENCRYPT_STAGING,

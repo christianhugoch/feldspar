@@ -2,7 +2,7 @@
 // the data for context — satellite imagery, a cadastral map. They are not
 // datasets, so nothing can be selected, styled or analysed in them.
 //
-// The Analytics UI may load images only from the hosts Settings → Maps names
+// The Analytics UI may load images only from the hosts Analytics → Settings → Base maps names
 // (its Content-Security-Policy), so a service on another host is said to be
 // blocked, with a button that adds its host there. The policy is the page's,
 // so the page is reloaded for it to apply.
@@ -118,7 +118,7 @@ export function ReferenceLayers({
             />
             {blocked && (
               <Alert variant="warning" className="small p-2 mb-1">
-                {t("{host} is not among the map hosts in Settings → Maps, so its images are not loaded.", {
+                {t("{host} is not among the map hosts in the Analytics settings, so its images are not loaded.", {
                   host: originOf(r.url) ?? r.url,
                 })}
                 <div className="mt-1">

@@ -1,6 +1,6 @@
 // A drawn map (analytics TODO A5.6, A5.8–A5.13): a map spec and its data
 // compiled to MapLibre sources and layers (`maplibre.ts`) over the base map of
-// Settings → Maps, in a box that fills its parent, with a legend and a tooltip
+// Analytics → Settings → Base maps, in a box that fills its parent, with a legend and a tooltip
 // showing the row under the pointer. Loaded lazily, so MapLibre is fetched
 // only when a map is shown.
 //

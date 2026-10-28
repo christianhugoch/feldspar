@@ -132,7 +132,7 @@ frame-ancestors 'none'; \
 object-src 'none'";
 
 /// [`ANALYTICS_CONTENT_SECURITY_POLICY`], with the origins a map may load its
-/// base map from (Settings → Maps, `sc_config::MapSettings::hosts`) in
+/// base map from (Analytics → Settings → Base maps, `sc_config::MapSettings::hosts`) in
 /// `connect-src` — MapLibre fetches a style, its tiles, glyphs and sprites —
 /// and in `img-src`.
 ///
