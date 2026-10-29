@@ -17,6 +17,7 @@ describe("the Analytics UI's routes", () => {
       { name: "newModel", dataset: null },
       { name: "compareModels", ids: ["m1", "m2"] },
       { name: "fit", id: "f1" },
+      { name: "settings" },
     ];
     for (const route of routes) {
       expect(parseRoute(routeHash(route))).toEqual(route);

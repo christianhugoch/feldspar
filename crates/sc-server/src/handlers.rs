@@ -74,7 +74,7 @@ use sc_llm::{
     load_llm_model, load_llm_provider, model_config_spec, provider_config_spec, save_llm_model,
     save_llm_provider,
 };
-use sc_module::{load_module, load_module_by_name, save_module};
+use sc_module::load_module;
 use sc_query::{Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use sc_types::{
     FormField, Operation, OperationScope, SECRET_SENTINEL, registered_rich_types,
@@ -138,6 +138,10 @@ pub fn admin_handlers_with(
     // has both handles: a caller that assembles the admin API gets live
     // re-projection by construction rather than by remembering to ask for it.
     catalog.set_schema_observer(Arc::clone(&apps) as Arc<dyn sc_catalog::SchemaObserver>);
+    // And what follows a table rename into the views, triggers, applications
+    // and other definitions that name the table (`table_rename`), for the same
+    // reason: the editor that renames it cannot name the crates that own them.
+    catalog.set_table_rename_hook(Arc::clone(&apps) as Arc<dyn sc_catalog::TableRenameHook>);
     // And the same for the trigger set, installed on the dispatcher rather than
     // the catalog because that is what holds it: a saved, renamed or deleted
     // trigger re-projects every app exposing one, whether the save came from
@@ -396,6 +400,32 @@ pub fn admin_handlers_with(
                 )
                 .await?;
                 Ok(HandlerResponse::ok(json!({ "dropped": table })))
+            }
+        }
+    });
+
+    reg.register("renameTable", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let table = ctx.path_param("table")?.to_owned();
+                let obj = require_object(&ctx.body)?;
+                let name = non_empty_str_field(obj, "name")?.trim().to_owned();
+                let applied = schema_edit::apply(
+                    &catalog,
+                    &[schema_edit::Operation::RenameTable {
+                        table,
+                        to: name.clone(),
+                    }],
+                    &schema_edit::ApplyOptions::default(),
+                )
+                .await?;
+                let rls = catalog.primary().capabilities().row_level_security;
+                Ok(HandlerResponse::ok(json!({
+                    "table": table_json(&catalog, &catalog.require(&name)?, rls, &ctx.locale),
+                    "notes": applied.notes,
+                })))
             }
         }
     });
@@ -2113,15 +2143,12 @@ pub fn admin_handlers_with(
     });
 
     reg.register("installModule", {
-        let catalog = catalog.clone();
         let apps = apps.clone();
         move |ctx| {
-            let catalog = catalog.clone();
             let apps = apps.clone();
             async move {
                 let services = modules_of(&apps)?;
-                let installed =
-                    install_module_json(&catalog, &services, &ctx.body, &ctx.locale).await?;
+                let installed = install_module_json(&services, &ctx.body, &ctx.locale).await?;
                 Ok(HandlerResponse::ok(installed).with_status(201))
             }
         }
@@ -2172,13 +2199,11 @@ pub fn admin_handlers_with(
                     // not discovered as a module that stopped working.
                     module.permissions = sc_module::ModulePermissions::from_json(submitted)?;
                 }
-                save_module(&catalog, &module).await?;
-
                 // The configuration is what v1's `actions(cfg)` is called with,
                 // so it only takes effect when the module is loaded again — and
                 // a permission change moves the module onto a worker built with
                 // the new set, which the same reload does.
-                services.reload().await?;
+                services.update_module(&module).await?;
                 let set = services.modules();
                 let loaded = set
                     .get(&module.name)
@@ -2205,36 +2230,7 @@ pub fn admin_handlers_with(
                 let Some(module) = load_module(&catalog, id).await? else {
                     return Ok(HandlerResponse::ok(json!({ "deleted": false })));
                 };
-                // The host first, so a restarted one does not reload a package
-                // that is about to go; then npm; then the row, which is what
-                // makes the module exist at all. npm failing must not leave a
-                // module nobody can delete, so its complaint is logged rather
-                // than returned.
-                //
-                // Whichever host has it: a module is loaded by the host its
-                // language names, and unloading is what stops this server
-                // answering for a package that is about to leave the disk. Both
-                // are best effort — Python's cannot unload at all in the sense
-                // the word implies (§11), which is why it returns nothing to
-                // check.
-                match module.language {
-                    sc_module::ModuleLanguage::JavaScript => {
-                        services.host().unload(&module.name).await;
-                    }
-                    sc_module::ModuleLanguage::Python => {
-                        services.python_host().unload(&module.name).await;
-                    }
-                }
-                if let Err(e) = services.uninstall_package(&module).await {
-                    sc_log::log_error!(
-                        "feldspar: the module `{}` was removed but its package could not be \
-                         uninstalled: {}",
-                        module.name,
-                        sc_error::format_chain(&e)
-                    );
-                }
-                let deleted = sc_module::delete_module(&catalog, id).await?;
-                services.reload().await?;
+                let deleted = services.remove_module(&module).await?;
                 Ok(HandlerResponse::ok(json!({ "deleted": deleted })))
             }
         }
@@ -2600,6 +2596,27 @@ pub fn admin_handlers_with(
                     "paths": found.entries.into_iter().map(|e| e.path).collect::<Vec<_>>(),
                     "truncated": found.truncated,
                 })))
+            }
+        }
+    });
+
+    reg.register("getHelp", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                let topic = ctx.path_param("topic")?.to_owned();
+                let context = help_context(
+                    &catalog,
+                    ctx.user.as_ref(),
+                    ctx.query_get("table"),
+                    ctx.query_get("event"),
+                )
+                .await?;
+                let page = sc_help::render(&topic, &context)?;
+                Ok(HandlerResponse::ok(
+                    json!({ "title": say(&page.title, &ctx.locale), "html": page.html }),
+                ))
             }
         }
     });
@@ -4583,6 +4600,18 @@ pub fn admin_handlers_with(
                 };
                 let stored = sc_config::all_config(&catalog).await?;
                 let spec = sc_config::config_spec();
+                // Only the form's own keys. An internal one (the base maps, the
+                // backup selection, …) is declared, so the store would take it,
+                // but it is written by the screen that owns it, through checks
+                // this save does not run.
+                if let Some(key) = submitted
+                    .keys()
+                    .find(|key| !spec.iter().any(|f| f.name() == key.as_str()))
+                {
+                    return Err(Error::invalid(format!(
+                        "`{key}` is not a setting on this screen"
+                    )));
+                }
                 // The secret the form sent back untouched is the sentinel it was
                 // shown, not the key: restore what is stored.
                 let mut values = sc_types::merge_secrets(&spec, &stored, &submitted);
@@ -4627,10 +4656,6 @@ pub fn admin_handlers_with(
                 // tag that is not a language tag is refused here, where the
                 // admin can see which box they typed it into (§16.1).
                 let localisation = sc_config::localisation_settings_from(&merged)?;
-                // The Maps section's, on the same footing: a base map URL is a
-                // host the Analytics UI's policy will name, so one that is not
-                // an http or https origin is refused here (analytics A5.6).
-                sc_config::map_settings_from(&merged)?;
                 // Where the admin UI is served: a move is checked against what
                 // is served there before anything is written, because the
                 // router would otherwise have to choose between the admin UI
@@ -4959,6 +4984,10 @@ pub fn admin_handlers_with(
                     // should get.
                     None => crate::backup::Selection::everything(&available),
                 };
+                // Checked before the selection is remembered, so a refused
+                // password changes nothing. It is not remembered itself: the
+                // next backup is protected only if the admin says so again.
+                let password = crate::backup::password_from_body(&ctx.body)?;
                 let previous = stored_backup_preferences(&catalog).await?;
                 let preferences =
                     crate::backup::BackupPreferences::of(&previous, &available, &selection);
@@ -4969,8 +4998,13 @@ pub fn admin_handlers_with(
                 // archive is never in memory; an error before the first byte is
                 // still the JSON error every other handler gives.
                 let spool = crate::backup::SpoolFile::new("backup");
-                let len =
-                    crate::backup::write_backup_to(&catalog, &selection, spool.create()?).await?;
+                let len = crate::backup::write_backup_to(
+                    &catalog,
+                    &selection,
+                    password.as_deref(),
+                    spool.create()?,
+                )
+                .await?;
                 Ok(HandlerResponse::download(crate::handler::Download {
                     body: crate::handler::DownloadBody::File(crate::handler::SpooledFile::open(
                         spool, len,
@@ -4983,6 +5017,11 @@ pub fn admin_handlers_with(
     });
 
     // Take delivery of a file and say what is in it. Nothing is written.
+    //
+    // A password-protected file cannot say what is in it yet: it is kept all
+    // the same and answered with `locked` and its `id`, and the dialog asks
+    // for the password and hands it to `unlockBackup`, which answers what this
+    // would have.
     reg.register("uploadBackup", {
         let pending = pending.clone();
         move |ctx| {
@@ -4992,24 +5031,51 @@ pub fn admin_handlers_with(
                     .raw_file
                     .clone()
                     .ok_or_else(|| Error::invalid("this handler requires an uploaded file"))?;
-                let (contents, manifest) = crate::backup::inspect(file.path())?;
+                if crate::backup::is_encrypted(file.path())? {
+                    let id = pending.keep(file)?;
+                    return Ok(HandlerResponse::ok(json!({
+                        "id": id.to_string(),
+                        "encrypted": true,
+                        "locked": true,
+                    })));
+                }
+                let (contents, manifest) = crate::backup::inspect(file.path(), None)?;
                 let id = pending.keep(file)?;
-                Ok(HandlerResponse::ok(json!({
-                    "id": id.to_string(),
-                    "created_at": manifest.get("created_at"),
-                    // What wrote the file, in one line — "Feldspar 0.1.0", or
-                    // "Saltcorn 1.7.0, imported" for a v1 archive this server
-                    // translated on the way in. The restore dialog shows it,
-                    // because a v1 import leaves things behind and the admin
-                    // should know which kind of file they picked before they
-                    // press the button.
-                    "source": manifest.get("source"),
-                    "available": contents.to_json(),
-                    // Everything the file holds, ticked: the admin excludes from
-                    // there, which is the same direction the backup dialog works
-                    // in.
-                    "include": crate::backup::Selection::everything(&contents).to_json(),
-                })))
+                Ok(HandlerResponse::ok(uploaded_backup_json(
+                    id, false, &contents, &manifest,
+                )))
+            }
+        }
+    });
+
+    // The password of an uploaded, protected backup: checked against the file,
+    // held with it for the restore, and answered with what the file holds. A
+    // wrong password is refused and the file stays, so the admin can try again.
+    reg.register("unlockBackup", {
+        let pending = pending.clone();
+        move |ctx| {
+            let pending = pending.clone();
+            async move {
+                let obj = require_object(&ctx.body)?;
+                let id = parse_uuid(non_empty_str_field(obj, "id")?, "uploaded backup")?;
+                let password = crate::backup::password_from_body(&ctx.body)?
+                    .ok_or_else(|| Error::invalid("`password`: enter the backup's password"))?;
+                let file = pending.file(id)?;
+                let (contents, manifest) = {
+                    let path = file.path().to_owned();
+                    let password = password.clone();
+                    // Decrypting the manifest derives a key (PBKDF2, 1000
+                    // rounds) and reads an entry: off the async threads.
+                    tokio::task::spawn_blocking(move || {
+                        crate::backup::inspect(&path, Some(&password))
+                    })
+                    .await
+                    .map_err(|e| Error::msg(format!("reading the backup: {e}")))??
+                };
+                pending.unlock(id, password)?;
+                Ok(HandlerResponse::ok(uploaded_backup_json(
+                    id, true, &contents, &manifest,
+                )))
             }
         }
     });
@@ -5035,9 +5101,23 @@ pub fn admin_handlers_with(
                 };
                 // Deleted when this is done with it, whichever way the restore
                 // goes.
-                let file = pending.take(id)?;
-                let report =
-                    crate::backup::restore_backup(&catalog, &apps, file.path(), &selection).await?;
+                // Refused, not taken: the file stays for `unlockBackup`.
+                if pending.is_locked(id)? {
+                    return Err(Error::invalid(
+                        "this backup is protected by a password: unlock it with its password \
+                         before restoring",
+                    ));
+                }
+                // The password `unlockBackup` checked, when the file has one.
+                let (file, password) = pending.take(id)?;
+                let report = crate::backup::restore_backup(
+                    &catalog,
+                    &apps,
+                    file.path(),
+                    password.as_deref(),
+                    &selection,
+                )
+                .await?;
                 // A restore can create tables and stores an application's API is
                 // projected from, so the mounted apps are re-projected once at the
                 // end — the same thing a schema change through the admin API does.
@@ -5090,7 +5170,8 @@ pub fn admin_handlers_with(
                 let body = require_object(&ctx.body)?;
                 let available = crate::backup::available(&catalog).await?;
                 let include = include_from_body(body, &available, None)?;
-                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?;
+                let mut schedule = BackupSchedule::from_body(uuid::Uuid::new_v4(), body, include)?
+                    .keep_password(None)?;
                 schedule.destination = schedule.destination.keep_secrets(None)?;
                 let mut schedules = load_schedules(&catalog).await?;
                 check_unique(&schedule, &schedules)?;
@@ -5126,7 +5207,8 @@ pub fn admin_handlers_with(
                 // The previous exclusions are an input, so one naming a table
                 // that is not here today survives the edit.
                 let include = include_from_body(body, &available, Some(&previous.include))?;
-                let mut schedule = BackupSchedule::from_body(id, body, include)?;
+                let mut schedule =
+                    BackupSchedule::from_body(id, body, include)?.keep_password(Some(previous))?;
                 schedule.destination = schedule
                     .destination
                     .keep_secrets(Some(&previous.destination))?;
@@ -5452,6 +5534,16 @@ pub fn admin_handlers_with(
                 framable_by_the_admin(&mut updated, &ctx.body, &apps);
                 sc_app::check_exposed_agents(&catalog, &updated).await?;
                 let app = save_application(&catalog, &updated).await?;
+                // A new subdomain is a new address for the builder too: left
+                // alone, it would `check` and look at an application that is
+                // no longer served there, and the admin would no longer find
+                // it as this application's. Reported beside the saved
+                // application rather than instead of it, as on create.
+                let agent = if stored.subdomain.trim() != app.subdomain.trim() {
+                    retarget_builder_agent(&catalog, &apps, &stored, &app).await
+                } else {
+                    Ok(None)
+                };
                 // A save is an API-definition change: a table added to the
                 // subset, an endpoint's role, a custom query. The generated
                 // client has to describe what the app now serves (decision 10),
@@ -5460,6 +5552,17 @@ pub fn admin_handlers_with(
                 // reason to report that it was not.
                 reemit_app_client(&catalog, &app, apps.triggers()).await;
                 let mut body = application_api_json(&app);
+                if let Some(obj) = body.as_object_mut() {
+                    match &agent {
+                        Ok(Some(name)) => {
+                            obj.insert("agent".to_owned(), json!(name));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            obj.insert("agent_error".to_owned(), json!(e.causes()));
+                        }
+                    }
+                }
                 refresh_mounted_app(&apps, &app, &mut body).await;
                 Ok(HandlerResponse::ok(body))
             }
@@ -7434,6 +7537,107 @@ pub(crate) fn field_json(field: &DataField, description: &str) -> Json {
     })
 }
 
+/// What a help topic is filled in with (`sc-help`'s module docs list the keys):
+/// the screen's table with its key fields' targets and the keys pointing back
+/// at it, the trigger's event, the admin's own user object, the users table's
+/// fields, and the tables and triggers a code body can reach.
+///
+/// A `table` that does not exist is left out rather than refused: the form the
+/// help was opened from may be about a table that is still being named.
+async fn help_context(
+    catalog: &Catalog,
+    user: Option<&User>,
+    table: Option<&str>,
+    event: Option<&str>,
+) -> Result<Json> {
+    let field_summary = |f: &DataField| json!({ "name": f.base.name, "label": f.base.label, "type": f.base.type_.name() });
+    let tables = catalog.tables()?;
+    let mut context = serde_json::Map::new();
+    if let Some(table) = table
+        .filter(|t| !t.is_empty())
+        .and_then(|t| tables.iter().find(|candidate| candidate.name == t))
+    {
+        let fields: Vec<Json> = table
+            .fields
+            .iter()
+            .filter(|f| !sc_auth::is_api_hidden_column(&table.name, &f.base.name))
+            .map(|f| {
+                let key_to = match &f.kind {
+                    DataFieldKind::Key { target_table, .. } => {
+                        let target = tables.iter().find(|t| t.name == target_table.0);
+                        json!({
+                            "table": target_table.0,
+                            "fields": target.map_or_else(Vec::new, |t| {
+                                t.fields
+                                    .iter()
+                                    .filter(|f| !sc_auth::is_api_hidden_column(&t.name, &f.base.name))
+                                    .map(field_summary)
+                                    .collect()
+                            }),
+                        })
+                    }
+                    _ => Json::Null,
+                };
+                json!({
+                    "name": f.base.name,
+                    "label": f.base.label,
+                    "type": f.base.type_.name(),
+                    "required": f.required,
+                    "key_to": key_to,
+                })
+            })
+            .collect();
+        let inbound: Vec<Json> = SchemaProjection::new(tables.clone())
+            .referencing_fields(&table.name)
+            .into_iter()
+            .map(|(t, f)| json!({ "table": t, "field": f }))
+            .collect();
+        context.insert(
+            "table".into(),
+            json!({ "name": table.name, "label": table.label, "fields": fields, "inbound": inbound }),
+        );
+    }
+    if let Some(event) = event.filter(|e| !e.is_empty()) {
+        context.insert("event".into(), json!(event));
+    }
+    if let Some(user) = user {
+        let mut object: serde_json::Map<String, Json> = user
+            .extra
+            .iter()
+            .map(|(k, v)| (k.clone(), sc_types::value_to_json(v)))
+            .collect();
+        object.insert("id".into(), json!(user.id));
+        object.insert("role".into(), json!(user.role));
+        context.insert("user".into(), Json::Object(object));
+    }
+    if let Some(users) = tables.iter().find(|t| t.name == USERS_TABLE) {
+        let fields: Vec<Json> = users
+            .fields
+            .iter()
+            .filter(|f| !sc_auth::is_api_hidden_column(USERS_TABLE, &f.base.name))
+            .filter(|f| f.base.name != "id" && f.base.name != "role")
+            .map(field_summary)
+            .collect();
+        context.insert("user_fields".into(), Json::Array(fields));
+    }
+    let reachable: Vec<Json> = tables
+        .iter()
+        .filter(|t| !t.is_hidden())
+        .map(|t| json!({ "name": t.name, "label": t.label }))
+        .collect();
+    context.insert("tables".into(), Json::Array(reachable));
+    // Only once a trigger has been saved: the table is created by the first.
+    if catalog.get(sc_action::TRIGGERS_TABLE)?.is_some() {
+        let triggers: Vec<Json> = list_triggers(catalog)
+            .await?
+            .into_iter()
+            .map(|t| json!(t.name))
+            .collect();
+        context.insert("triggers".into(), Json::Array(triggers));
+    }
+    Ok(Json::Object(context))
+}
+
 /// One constraint on the wire. Every kind uses one shape, with the fields that
 /// do not apply left null — which is what lets the screen render a list of four
 /// different things without four branches for the data and four for the display.
@@ -8174,6 +8378,110 @@ async fn delete_builder_agent(catalog: &Catalog, app: &Application) -> Result<Op
     }
     sc_agent::delete_agent(catalog, agent.id).await?;
     Ok(Some(name))
+}
+
+/// Point the agent that builds `before` at `after`'s subdomain, returning its
+/// (possibly new) name.
+///
+/// Found the way the admin finds it (`builderAgentFor`): by a `coding` trait
+/// naming the old subdomain, preferring the one under the derived name. What
+/// moves with the subdomain:
+///
+/// - **the `coding` trait's application**, which is what `check` builds and
+///   `view_app` looks at — the part that stops the agent working otherwise;
+/// - **the preview pane and the system prompt**, but only where they are still
+///   what the framework declared for the old subdomain: an admin's own URL or
+///   prompt is theirs;
+/// - **the name**, but only while it is still the derived one, the new derived
+///   name is free, and no application exposes it by name (a rename would leave
+///   that application exposing nothing, which `updateAgent` refuses too).
+async fn retarget_builder_agent(
+    catalog: &Catalog,
+    apps: &AppMounts,
+    before: &Application,
+    after: &Application,
+) -> Result<Option<String>> {
+    if catalog.get(sc_agent::AGENTS_TABLE)?.is_none() {
+        return Ok(None);
+    }
+    let Some(services) = apps.agents() else {
+        return Ok(None);
+    };
+    let old = before.subdomain.trim();
+    let builds = |agent: &sc_agent::Agent| {
+        agent.traits.iter().any(|t| {
+            t.trait_ == sc_app::TRAIT_CODING
+                && t.config
+                    .get(sc_app::TRAIT_CFG_APPLICATION)
+                    .and_then(Json::as_str)
+                    .map(str::trim)
+                    == Some(old)
+        })
+    };
+    let old_name = builder_agent_name(before);
+    let candidates: Vec<sc_agent::Agent> = sc_agent::list_agents(catalog)
+        .await?
+        .into_iter()
+        .filter(|a| builds(a))
+        .collect();
+    let Some(mut agent) = candidates
+        .iter()
+        .find(|a| a.name == old_name)
+        .or_else(|| candidates.first())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+
+    let old_pane = sc_app::preview_pane_url(before);
+    for enabled in &mut agent.traits {
+        if enabled.trait_ == sc_app::TRAIT_CODING
+            && enabled
+                .config
+                .get(sc_app::TRAIT_CFG_APPLICATION)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                == Some(old)
+        {
+            enabled.config.insert(
+                sc_app::TRAIT_CFG_APPLICATION.to_owned(),
+                json!(after.subdomain.trim()),
+            );
+        }
+        if enabled.trait_ == sc_app::TRAIT_PREVIEW_PANE
+            && enabled
+                .config
+                .get(sc_app::TRAIT_CFG_PREVIEW_URL)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                == Some(old_pane.as_str())
+        {
+            enabled.config.insert(
+                sc_app::TRAIT_CFG_PREVIEW_URL.to_owned(),
+                json!(sc_app::preview_pane_url(after)),
+            );
+        }
+    }
+    if let (Some(was), Some(now)) = (
+        framework_builder_agent(&before.framework, before),
+        framework_builder_agent(&after.framework, after),
+    ) && agent.system_prompt == was.system_prompt
+    {
+        agent.system_prompt = now.system_prompt;
+    }
+    let new_name = builder_agent_name(after);
+    if agent.name == old_name
+        && sc_agent::load_agent_by_name(catalog, &new_name)
+            .await?
+            .is_none()
+        && sc_app::applications_exposing_agent(catalog, &old_name)
+            .await?
+            .is_empty()
+    {
+        agent.name = new_name;
+    }
+    sc_agent::save_agent(catalog, services.registry(), &agent).await?;
+    Ok(Some(agent.name))
 }
 
 /// Parse an [`Application`] from a create/update body (matching
@@ -9575,7 +9883,6 @@ pub(crate) async fn list_modules_json(services: &crate::ModuleServices, locale: 
 /// Shared by the admin handler (and so its MCP tool) and the agents'
 /// [`sc_agent::ModuleManager`], so an install from any of them is the same act.
 pub(crate) async fn install_module_json(
-    catalog: &Catalog,
     services: &crate::ModuleServices,
     body: &Json,
     locale: &Locale,
@@ -9593,62 +9900,12 @@ pub(crate) async fn install_module_json(
         )?,
         None => sc_module::ModuleLanguage::JavaScript,
     };
-    // A **bundled** module is described by the catalog and not by
-    // the request: the id is the only thing the button had to send,
-    // and the language and the permissions are the server's own
-    // answer. Resolved before the install so a wrong id costs
-    // nothing, and so the permission set is on the row the first
-    // time it is written — a module that has to be reloaded to be
-    // allowed to work is not one click.
-    let bundled = match source {
-        sc_module::ModuleSource::Bundled => Some(services.bundled().require(&location)?),
-        _ => None,
-    };
-    let language = bundled.map_or(language, |entry| entry.language);
-    if !language.allows(source) {
-        return Err(Error::invalid(format!(
-            "a {} module cannot be installed from `{}`",
-            language.as_str(),
-            source.as_str()
-        )));
-    }
-
-    let package = services
-        .install_package(language, source, &location)
+    // A **bundled** module's language and permissions are the catalog's,
+    // not the request's — see `ModuleServices::install_module`, which is
+    // also what `feldspar module install` runs.
+    let module = services
+        .install_module(language, source, &location, |_| Ok(()))
         .await?;
-    // A package name that is already installed is an **upgrade**,
-    // not a collision: reinstalling is how a module is upgraded
-    // (TODO, out of scope: an upgrade UI), and the admin who typed
-    // `@saltcorn/mqtt@0.3.0` over a 0.2.0 install means exactly
-    // that. The row keeps its id and its configuration.
-    let stored = load_module_by_name(catalog, &package.name).await?;
-    let first_install = stored.is_none();
-    let mut module = match stored {
-        Some(existing) => existing,
-        None => sc_module::Module::new(&package.name, source, &location),
-    };
-    module.language = language;
-    module.source = source;
-    module.location = location;
-    module.version = Some(package.version);
-    // The catalog card's permissions, granted by the click that
-    // installed it — the card printed them, which is what makes
-    // this an admin granting a permission rather than a package
-    // granting itself one (`sc_module::bundled`).
-    //
-    // **Only on a first install.** A reinstall is how a bundled
-    // module is upgraded after a new release, and an admin who has
-    // since narrowed what it may reach — to a list of feed hosts,
-    // or to nothing at all — must not have that quietly undone by
-    // an upgrade. From the second install on, the row's set wins.
-    if let Some(entry) = bundled
-        && first_install
-    {
-        module.permissions = entry.permissions.clone();
-    }
-    save_module(catalog, &module).await?;
-
-    services.reload().await?;
     let set = services.modules();
     let loaded = set
         .get(&module.name)
@@ -9787,6 +10044,25 @@ fn module_json(
                             "name": webhook.name,
                             "description": webhook.description,
                             "path": sc_module::hook_path(&module.name, &webhook.name),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        // The v1 routes it serves, each with its path on the admin host —
+        // where they are served, so the tab puts its own origin in front.
+        "routes": loaded
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .routes
+                    .iter()
+                    .map(|route| {
+                        json!({
+                            "method": route.method,
+                            "url": route.url,
+                            "path": sc_module::route_path(&module.name, &route.url),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -11117,6 +11393,34 @@ async fn stored_backup_preferences(catalog: &Catalog) -> Result<crate::backup::B
     })
 }
 
+/// What `uploadBackup` (and `unlockBackup`, for a protected file) answers: the
+/// token that names the held file and what the file holds. `encrypted` says
+/// whether the file is protected by a password; `locked` is false, because
+/// what it holds has been read.
+fn uploaded_backup_json(
+    id: uuid::Uuid,
+    encrypted: bool,
+    contents: &crate::backup::Available,
+    manifest: &Json,
+) -> Json {
+    json!({
+        "id": id.to_string(),
+        "encrypted": encrypted,
+        "locked": false,
+        "created_at": manifest.get("created_at"),
+        // What wrote the file, in one line — "Feldspar 0.1.0", or "Saltcorn
+        // 1.7.0, imported" for a v1 archive this server translated on the way
+        // in. The restore dialog shows it, because a v1 import leaves things
+        // behind and the admin should know which kind of file they picked
+        // before they press the button.
+        "source": manifest.get("source"),
+        "available": contents.to_json(),
+        // Everything the file holds, ticked: the admin excludes from there,
+        // which is the same direction the backup dialog works in.
+        "include": crate::backup::Selection::everything(contents).to_json(),
+    })
+}
+
 /// What a downloaded backup is called: the date and time it was taken, to the
 /// second, so a directory of them sorts chronologically and two taken the same
 /// afternoon do not overwrite each other.
@@ -11953,6 +12257,7 @@ fn form_field_json(field: &FormField) -> Json {
         "code_language": field.code_language,
         "section": field.section,
         "sublabel": field.sublabel,
+        "help_topic": field.help_topic,
         "pattern": field.pattern,
         "pattern_error": field.pattern_error,
         "env_fallback": env_fallback_json(field),

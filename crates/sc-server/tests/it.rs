@@ -169,6 +169,8 @@ mod model_handle;
 mod models_without_actions;
 #[path = "module_consent.rs"]
 mod module_consent;
+#[path = "module_routes.rs"]
+mod module_routes;
 #[path = "module_seams.rs"]
 mod module_seams;
 #[path = "modules_api.rs"]

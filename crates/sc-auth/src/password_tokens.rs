@@ -44,19 +44,23 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
-use sc_catalog::{Catalog, DataField, Table};
+use sc_catalog::{Catalog, DataField, SharedTx, Table};
 use sc_db::Row;
 use sc_error::{Error, Result};
-use sc_query::{BinOp, Delete, Expr, Insert, Projection, Select, Source, Statement, Value};
+use sc_query::{
+    Assignment, BinOp, Delete, Expr, Insert, Projection, Select, Source, Statement, Update, Value,
+};
 use sc_types::{BasicType, TypeRef};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::create::{NewUser, insert_user};
 use crate::lookup::{load_user, load_user_by_email};
-use crate::manage::set_user_password;
+use crate::password::hash_password;
 use crate::user::User;
-use crate::users::{COL_EMAIL, COL_ID, COL_PASSWORD_HASH, ROLE_PUBLIC, USERS_TABLE};
+use crate::users::{
+    COL_EMAIL, COL_EMAIL_VERIFIED, COL_ID, COL_PASSWORD_HASH, ROLE_PUBLIC, USERS_TABLE,
+};
 
 /// Name of the password token table in the primary database.
 pub const PASSWORD_TOKENS_TABLE: &str = "_fd_password_tokens";
@@ -216,6 +220,34 @@ pub async fn redeem_password_token(
     if token.is_empty() {
         return Ok(None);
     }
+    let tx = SharedTx::begin_primary(catalog)?;
+    match spend_in(catalog, &tx, token, password).await {
+        Ok(outcome) => {
+            tx.commit().await?;
+            let Some(user_id) = outcome else {
+                return Ok(None);
+            };
+            crate::session::delete_sessions_for_user(catalog, user_id).await?;
+            load_user(catalog, user_id).await
+        }
+        Err(e) => {
+            let _ = tx.rollback().await;
+            Err(e)
+        }
+    }
+}
+
+/// The writes of [`redeem_password_token`], in one transaction: a password
+/// that cannot be written leaves the token unspent, so the holder can try the
+/// same link again. `Some` is the user whose password it now is; `None`, a
+/// token that is no good (still committed: an unusable account's token is
+/// spent as a good one would be).
+async fn spend_in(
+    catalog: &Catalog,
+    tx: &SharedTx,
+    token: &str,
+    password: &str,
+) -> Result<Option<Uuid>> {
     let delete = Delete {
         returning: vec![Projection::expr(Expr::col(COL_USER))],
         ..Delete::from(PASSWORD_TOKENS_TABLE).filter(
@@ -228,7 +260,7 @@ pub async fn redeem_password_token(
                 )),
         )
     };
-    let spent = rows(catalog, Statement::from(delete)).await?;
+    let spent = tx.run(None, &Statement::from(delete)).await?;
     let Some(user_id) = spent.first().map(|row| match row.get(COL_USER) {
         Some(Value::Uuid(id)) => Ok(*id),
         other => Err(Error::invalid(format!(
@@ -242,12 +274,24 @@ pub async fn redeem_password_token(
         Some(user) if !user.is_disabled() => {}
         _ => return Ok(None),
     }
-    set_user_password(catalog, user_id, password).await?;
-    // The link went to the address, so whoever followed it holds it.
-    let user = crate::manage::mark_email_proven(catalog, user_id).await?;
-    delete_password_tokens_for_user(catalog, user_id).await?;
-    crate::session::delete_sessions_for_user(catalog, user_id).await?;
-    Ok(Some(user))
+    // One statement: the password, and — the link went to the address, so
+    // whoever followed it holds it — the address proven.
+    let update = Update {
+        table: USERS_TABLE.to_owned(),
+        assignments: vec![
+            Assignment::new(COL_PASSWORD_HASH, Expr::lit(hash_password(password)?)),
+            Assignment::new(COL_EMAIL_VERIFIED, Expr::lit(true)),
+        ],
+        filter: Some(Expr::col(COL_ID).eq(Expr::lit(user_id))),
+        returning: vec![Projection::expr(Expr::col(COL_ID))],
+    };
+    if tx.run(None, &Statement::from(update)).await?.is_empty() {
+        return Ok(None);
+    }
+    let others =
+        Delete::from(PASSWORD_TOKENS_TABLE).filter(Expr::col(COL_USER).eq(Expr::lit(user_id)));
+    tx.run(None, &Statement::from(others)).await?;
+    Ok(Some(user_id))
 }
 
 /// Delete every token `user_id` holds, returning how many went.

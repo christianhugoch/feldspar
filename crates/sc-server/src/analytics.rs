@@ -906,6 +906,32 @@ pub(crate) fn register(reg: &mut HandlerRegistry, catalog: Arc<Catalog>) {
         }
     });
 
+    reg.register("saveMapSettings", {
+        let catalog = catalog.clone();
+        move |ctx| {
+            let catalog = catalog.clone();
+            async move {
+                // Not one of an application's endpoints (`APP_ENDPOINTS`), so
+                // only the admin host's admin reaches it; refused here too, as
+                // it changes what every application's maps may load.
+                if ctx.analytics_app.is_some() {
+                    return Err(Error::auth("the base maps are the admin's to change"));
+                }
+                let values: sc_types::Attrs = ctx
+                    .body
+                    .get("values")
+                    .and_then(Json::as_object)
+                    .ok_or_else(|| Error::invalid("`values` is required"))?
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let settings = sc_config::save_map_settings(&catalog, &values).await?;
+                Ok(HandlerResponse::ok(map_settings_json(&settings)))
+            }
+        }
+    });
+
     reg.register("allowMapHost", {
         let catalog = catalog.clone();
         move |ctx| {
@@ -1479,6 +1505,7 @@ fn map_settings_json(settings: &sc_config::MapSettings) -> Json {
         "style": settings.style,
         "style_dark": settings.dark_style(),
         "hosts": settings.hosts(),
+        "values": settings.form_values(),
     })
 }
 

@@ -457,6 +457,18 @@ pub fn build_router_with_apps(
                 sc_module::WEBHOOK_MAX_BODY,
             )),
         )
+        // v1 plugin routes: on the admin host, as the person calling, with
+        // the webhook's body limit (`crate::module_routes`).
+        .route(
+            crate::module_routes::ROUTE,
+            axum::routing::on(
+                axum::routing::MethodFilter::GET.or(axum::routing::MethodFilter::POST),
+                crate::module_routes::route,
+            )
+            .layer(axum::extract::DefaultBodyLimit::max(
+                sc_module::WEBHOOK_MAX_BODY,
+            )),
+        )
         .route(
             crate::oauth::CONSENT_ROUTE,
             axum::routing::get(crate::oauth::consent),
@@ -1392,6 +1404,12 @@ fn open_to_public(state: &AppState, request: &axum::extract::Request) -> bool {
         .path()
         .starts_with(&format!("{}/", sc_module::HOOKS_PREFIX))
     {
+        return true;
+    }
+    // A module route that declared v1's `noCsrf`: served as nobody, unless the
+    // request carries a session, which the check above then still demands
+    // the token for.
+    if crate::module_routes::no_csrf_route(state, request) {
         return true;
     }
     let jar = CookieJar::from_headers(request.headers());
@@ -3482,7 +3500,7 @@ async fn serve_analytics(
 }
 
 /// The origins the Analytics UI's maps may load a base map from (analytics
-/// TODO A5.6): Settings → Maps, read per response as the MCP switches are, so a
+/// TODO A5.6): Analytics → Settings → Base maps, read per response as the MCP switches are, so a
 /// changed base map is served on the next page load rather than after a
 /// restart. A server without a catalog, or one whose settings do not read,
 /// uses the default base map's.

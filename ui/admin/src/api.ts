@@ -114,12 +114,16 @@ async function rawError(op: string, res: Response): Promise<Error> {
  * already in memory by the time the response resolves. The name comes from the
  * server's `Content-Disposition` when it sent one, since the server is what knows
  * the date the backup was taken.
+ *
+ * With a `password`, every entry in the zip is encrypted with AES-256 (WinZip
+ * AES), which 7-Zip and other standard tools open with the same password. An
+ * empty one is the same as none.
  */
-export async function createBackup(include: unknown): Promise<void> {
+export async function createBackup(include: unknown, password?: string): Promise<void> {
   const res = await browserFetch("/backup/create", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ include }),
+    body: JSON.stringify(password ? { include, password } : { include }),
   });
   if (!res.ok) throw await rawError("createBackup", res);
   const blob = await res.blob();
@@ -145,6 +149,9 @@ function filenameFrom(header: string | null): string | null {
  * the admin decides what to take from it. */
 export type UploadedBackup = {
   id: string;
+  /** Whether the file is protected by a password (already given, here). */
+  encrypted: boolean;
+  locked: false;
   created_at: string | null;
   /** What wrote the file — "Feldspar 0.1.0", or "Saltcorn 1.7.0, imported" for a
    * Saltcorn 1 backup the server translated on the way in. */
@@ -153,18 +160,24 @@ export type UploadedBackup = {
   include: GetBackupOptionsResponse["include"];
 };
 
+/** An uploaded backup that is protected by a password: held on the server
+ * under `id` until `unlockBackup` is given the password, which answers what an
+ * unprotected upload does. */
+export type LockedBackup = { id: string; encrypted: true; locked: true };
+
 /**
- * Hand a backup file to the server and get back what is in it.
+ * Hand a backup file to the server and get back what is in it — or, for a
+ * password-protected file, that it is locked.
  *
  * Nothing is restored by this: the file waits on the server while the admin
  * unticks what they do not want, and `restoreBackup` (which *is* in the generated
  * client) names it by the `id` this returns. One upload rather than two — the
  * alternative is sending a large archive again with the choice attached.
  */
-export async function uploadBackup(file: File): Promise<UploadedBackup> {
+export async function uploadBackup(file: File): Promise<UploadedBackup | LockedBackup> {
   const res = await browserFetch("/backup/upload", { method: "POST", body: file });
   if (!res.ok) throw await rawError("uploadBackup", res);
-  return (await res.json()) as UploadedBackup;
+  return (await res.json()) as UploadedBackup | LockedBackup;
 }
 
 /**

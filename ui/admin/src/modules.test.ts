@@ -92,6 +92,7 @@ function module_(overrides: Partial<Module> = {}): Module {
     reads: [],
     services: [],
     webhooks: [],
+    routes: [],
     csp_sources: [],
     model_providers: [],
     stream_providers: [],

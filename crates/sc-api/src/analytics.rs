@@ -591,39 +591,52 @@ pub(crate) fn register(set: &mut EndpointSet) {
 
     // --- maps (A5.6, A5.7, A5.11, A5.12) ------------------------------------------
 
-    // The base maps a map is drawn over (Settings → Maps): the MapLibre style
-    // for a light page and for a dark one, each absent for no base map; and
-    // `hosts`, every origin the Analytics UI's policy lets a map load from —
-    // what a reference layer's service must be on (A5.11).
+    // The base maps a map is drawn over (the Analytics UI's Settings page): the
+    // MapLibre style for a light page and for a dark one, each absent for no
+    // base map; `hosts`, every origin the Analytics UI's policy lets a map load
+    // from — what a reference layer's service must be on (A5.11); and `values`,
+    // the three settings as the Settings page's form shows them (each style's
+    // URL, empty for none, and the further hosts comma-separated).
     set.register(
         Endpoint::new(
             "mapSettings",
             Method::Get,
             api().lit("maps").lit("settings"),
         )
-        .output(TypeSchema::struct_of([
-            StructField::new("style", TypeSchema::optional(TypeSchema::text())),
-            StructField::new("style_dark", TypeSchema::optional(TypeSchema::text())),
-            StructField::new("hosts", TypeSchema::array(TypeSchema::text())),
-        ]))
+        .output(map_settings_schema())
         .auth(AuthRequirement::admin()),
     );
 
-    // Let a map load from one more origin (A5.11): adds it to Settings →
-    // Maps' further hosts, so the Analytics UI's policy names it from the
-    // next page load on. The origin of `url` is taken, and anything that is
-    // not one refused by name. Answers `mapSettings`' answer.
+    // Save the base maps from the Analytics UI's Settings page: the form's
+    // `values` back, a key left out kept as stored. All three are checked
+    // together and a URL that is not one is refused by name, nothing written.
+    // The admin's alone: not an Analytics application's. Answers
+    // `mapSettings`' answer.
+    set.register(
+        Endpoint::new(
+            "saveMapSettings",
+            Method::Post,
+            api().lit("maps").lit("settings"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "values",
+            map_values_schema(),
+        )]))
+        .output(map_settings_schema())
+        .auth(AuthRequirement::admin()),
+    );
+
+    // Let a map load from one more origin (A5.11): adds it to the base maps'
+    // further hosts, so the Analytics UI's policy names it from the next page
+    // load on. The origin of `url` is taken, and anything that is not one
+    // refused by name. Answers `mapSettings`' answer.
     set.register(
         Endpoint::new("allowMapHost", Method::Post, api().lit("maps").lit("hosts"))
             .input(TypeSchema::struct_of([StructField::new(
                 "url",
                 TypeSchema::text(),
             )]))
-            .output(TypeSchema::struct_of([
-                StructField::new("style", TypeSchema::optional(TypeSchema::text())),
-                StructField::new("style_dark", TypeSchema::optional(TypeSchema::text())),
-                StructField::new("hosts", TypeSchema::array(TypeSchema::text())),
-            ]))
+            .output(map_settings_schema())
             .auth(AuthRequirement::admin()),
     );
 
@@ -951,6 +964,32 @@ fn dataset_summary_schema() -> TypeSchema {
         StructField::new("share_role", TypeSchema::optional(TypeSchema::int())),
         // Whether the caller may edit, share and delete it.
         StructField::new("may_change", TypeSchema::bool()),
+    ])
+}
+
+/// The base maps as `mapSettings` answers them.
+fn map_settings_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("style", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("style_dark", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("hosts", TypeSchema::array(TypeSchema::text())),
+        StructField::new(
+            "values",
+            TypeSchema::struct_of([
+                StructField::new("map_style", TypeSchema::text()),
+                StructField::new("map_style_dark", TypeSchema::text()),
+                StructField::new("map_hosts", TypeSchema::text()),
+            ]),
+        ),
+    ])
+}
+
+/// What `saveMapSettings` takes: any of the form's three values.
+fn map_values_schema() -> TypeSchema {
+    TypeSchema::struct_of([
+        StructField::new("map_style", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("map_style_dark", TypeSchema::optional(TypeSchema::text())),
+        StructField::new("map_hosts", TypeSchema::optional(TypeSchema::text())),
     ])
 }
 

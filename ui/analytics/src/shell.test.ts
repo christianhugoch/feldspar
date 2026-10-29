@@ -66,10 +66,12 @@ describe("the shell", () => {
       { name: "newDataset", table: null },
       { name: "model", id: "m" },
       { name: "fit", id: "f" },
+      // The base maps are the admin's: no application shows its settings.
+      { name: "settings" },
     ];
-    expect(routes.map((r) => shows(null, r))).toEqual([true, true, true, true, true, true]);
-    expect(routes.map((r) => shows(fixed, r))).toEqual([true, false, false, false, false, false]);
-    expect(routes.map((r) => shows(selfServe, r))).toEqual([true, true, true, true, false, false]);
+    expect(routes.map((r) => shows(null, r))).toEqual([true, true, true, true, true, true, true]);
+    expect(routes.map((r) => shows(fixed, r))).toEqual([true, false, false, false, false, false, false]);
+    expect(routes.map((r) => shows(selfServe, r))).toEqual([true, true, true, true, false, false, false]);
     expect(shows({ ...selfServe, datasetEditor: false }, { name: "newDataset", table: null })).toBe(false);
   });
 

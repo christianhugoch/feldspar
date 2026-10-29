@@ -27,12 +27,14 @@
 //! closed, the `fetch` aborted — the drive is dropped with it and the run is
 //! written as `aborted`, exactly as the admin chat does on a closed socket.
 //!
-//! **Whose a run is.** A run started here records the application, the mode
-//! (`chat` or `prompt`) and its owner — `user:<id>`, or for somebody who is
-//! not signed in a hash of the browser's cookie, as an upload's uploader is —
-//! in its attributes. Only its owner sees it through this route, in this
-//! application; anybody else asking for it gets the 404 a run that does not
-//! exist gets. The admin chat still lists it under the agent, as a record.
+//! **Whose a run is.** A run started here records the mode (`chat` or
+//! `prompt`) and its owner — `user:<id>`, or for somebody who is not signed in
+//! a hash of the browser's cookie, as an upload's uploader is — in its
+//! attributes. A run belongs to its owner and its agent, not to the
+//! application it was started in: every application that exposes the agent
+//! lists, continues, renames and deletes the owner's conversations with it.
+//! Anybody else asking for one gets the 404 a run that does not exist gets.
+//! The admin chat still lists it under the agent, as a record.
 //!
 //! **A turn spends the provider's budget**, so starting one is limited
 //! (security review #22): per address and per asker by
@@ -65,8 +67,6 @@ use crate::apps::MountedApp;
 use crate::chat::{TurnInput, done_event, error_event, may_chat, summarise};
 use crate::router::{AppState, app_caller, error_status, json_error, log_failure, parse_query};
 
-/// The run attribute naming the application a run was started through.
-pub(crate) const ATTR_APP: &str = "app";
 /// The run attribute naming whose run it is: `user:<id>` or `anon:<hash>`.
 pub(crate) const ATTR_OWNER: &str = "owner";
 /// The run attribute saying how it was started: `chat` or `prompt`.
@@ -387,13 +387,12 @@ struct AgentCtx {
 }
 
 impl AgentCtx {
-    /// Whether `run` is this caller's, of this agent, started in this
-    /// application in this mode. A run that is not is answered as one that
-    /// does not exist.
+    /// Whether `run` is this caller's, of this agent, in this mode — through
+    /// whichever application exposing the agent it was started. A run that
+    /// is not is answered as one that does not exist.
     fn owns(&self, run: &Run, mode: &str) -> bool {
         let attr = |key: &str| run.attributes.get(key).and_then(Json::as_str);
         run.subject == self.agent.name
-            && attr(ATTR_APP) == Some(self.app.app.id.0.to_string().as_str())
             && attr(ATTR_APP_MODE) == Some(mode)
             && self.asker.owner.is_some()
             && attr(ATTR_OWNER) == self.asker.owner.as_deref()
@@ -413,11 +412,9 @@ impl AgentCtx {
         Ok(run)
     }
 
-    /// Mark a new run as this application's and this caller's.
+    /// Mark a new run as this caller's, in this mode.
     fn claim(&self, run: Run, mode: &str) -> Run {
         let mut run = run;
-        run.attributes
-            .insert(ATTR_APP.to_owned(), json!(self.app.app.id.0.to_string()));
         run.attributes.insert(ATTR_APP_MODE.to_owned(), json!(mode));
         if let Some(owner) = &self.asker.owner {
             run.attributes.insert(ATTR_OWNER.to_owned(), json!(owner));

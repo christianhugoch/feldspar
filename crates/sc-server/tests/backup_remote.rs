@@ -350,6 +350,7 @@ async fn an_automated_backup_goes_to_an_s3_bucket() -> sc_error::Result<()> {
             "frequency": "weekly",
             "retention_days": 30,
             "include": entry["include"],
+            "include_all": entry["include_all"],
         })),
     )
     .await;
@@ -755,6 +756,7 @@ async fn an_automated_backup_goes_to_an_sftp_server() -> sc_error::Result<()> {
             "frequency": "daily",
             "retention_days": 30,
             "include": entry["include"],
+            "include_all": entry["include_all"],
         })),
     )
     .await;

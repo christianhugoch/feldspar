@@ -127,7 +127,7 @@ async fn a_backup_from_the_cli_restores_everything_but_tls_into_another_database
         stderr.contains("site.zip"),
         "it says what it wrote: {stderr}"
     );
-    let (contents, _) = sc_server::inspect_backup(&file)?;
+    let (contents, _) = sc_server::inspect_backup(&file, None)?;
     assert!(!contents.ssl, "the TLS settings are left out");
     assert!(contents.settings, "the other settings are in");
     let books = contents
@@ -141,14 +141,49 @@ async fn a_backup_from_the_cli_restores_everything_but_tls_into_another_database
         "the partial file is renamed into place"
     );
 
-    // --- restore into an empty installation ------------------------------------
+    // --- the same backup down a pipe, with no file of its own -------------------
+    let piped = Command::new(env!("CARGO_BIN_EXE_feldspar"))
+        .args(["backup", "-", "--database-url", &source_url])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the feldspar binary");
+    let stderr = String::from_utf8_lossy(&piped.stderr);
+    assert!(piped.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("stdout"),
+        "it says where it wrote: {stderr}"
+    );
+    assert!(
+        piped.stdout.starts_with(b"PK\x03\x04"),
+        "stdout is the zip and only the zip"
+    );
+    let piped_file = tmp.path().join("piped.zip");
+    std::fs::write(&piped_file, &piped.stdout)?;
+    let (piped_contents, _) = sc_server::inspect_backup(&piped_file, None)?;
+    assert!(!piped_contents.ssl);
+    assert_eq!(
+        piped_contents
+            .tables
+            .iter()
+            .find(|t| t.name == "books")
+            .and_then(|t| t.count),
+        Some(2),
+        "the rows are in the streamed zip too"
+    );
+    assert_eq!(
+        std::fs::read_dir(tmp.path())?.count(),
+        2,
+        "nothing but the two zips in the directory"
+    );
+
+    // --- restore the streamed one into an empty installation --------------------
     let target_db = TestDb::new().await?;
     let target_url = target_db.url();
     let modules = tmp.path().join("modules");
     let stan_cache = tmp.path().join("stan-cache");
     let (ok, stdout, stderr) = feldspar(&[
         "restore",
-        &file_arg,
+        &piped_file.display().to_string(),
         "--database-url",
         &target_url,
         "--modules-dir",

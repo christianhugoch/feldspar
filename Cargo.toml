@@ -18,6 +18,10 @@ members = [
     # Name resolution for the whole process, glibc's NSS taken out of the path
     # (§13.5): layer 0 because it is linked in front of libc rather than called.
     "crates/sc-dns",
+    # The admin UI's help topics (v1's `help/*.tmd`): markdown templates filled
+    # in with what the screen is about and rendered to HTML. Layer 0 because it
+    # is handed plain JSON and knows nothing of the catalog.
+    "crates/sc-help",
     # Layer 1 — query language, expression language
     "crates/sc-query",
     "crates/sc-expr",
@@ -141,6 +145,7 @@ sc-error = { path = "crates/sc-error" }
 sc-log = { path = "crates/sc-log" }
 sc-ratelimit = { path = "crates/sc-ratelimit" }
 sc-i18n = { path = "crates/sc-i18n" }
+sc-help = { path = "crates/sc-help" }
 # `feldspar.toml` — the deployment file naming this machine's databases. Layer 0
 # because both ends of the workspace read it: the binary, to know where the
 # primary database is, and the integration-test harness, to know which database
@@ -221,6 +226,8 @@ futures = "0.3"
 getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 # The `feldspar.toml` configuration file (`sc-cli`): per-environment database
 # connection parameters, read when the environment does not supply them. TOML
 # rather than YAML or JSON because it is the format a Rust operator already has
@@ -396,11 +403,14 @@ csv = "1"
 # is not a backup. `default-features = false` drops every compression method but
 # the one a backup wants: `deflate-flate2-zlib-rs` is DEFLATE (what every
 # unarchiver on every desktop reads) through a **pure-Rust** zlib, so §16's
-# no-C-dependencies posture holds here as it does for TLS. No `aes-crypto`, no
+# no-C-dependencies posture holds here as it does for TLS. No
 # bzip2/lzma/zstd: a format only this system writes gains nothing from methods a
-# reader might not have.
+# reader might not have. `aes-crypto` is there for a password-protected backup:
+# WinZip AES-256 (AE-x), what 7-Zip, WinZip, Keka and `7z x` open — the
+# standard, unlike ZipCrypto, which is broken and is never written.
 zip = { version = "8", default-features = false, features = [
     "deflate-flate2-zlib-rs",
+    "aes-crypto",
 ] }
 # A Stan fit's raw run is published with its chains' CSVs gzipped (Stan TODO
 # §14): `chain-1.csv.gz` is what `cmdstanpy.from_csv` and every other Stan tool

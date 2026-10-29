@@ -860,6 +860,7 @@ ALTER TABLE IF EXISTS "_fd_applications" ADD COLUMN IF NOT EXISTS "agents" jsonb
 
 -- Security review #41: whether an account's address was ever proven. Only `false` (a
 -- self-service signup nobody has confirmed) says anything; existing accounts stay NULL.
+-- (Bootstrap adds it too, since 2026-10-27.)
 ALTER TABLE IF EXISTS "users" ADD COLUMN IF NOT EXISTS "email_verified" boolean;
 
 -- The entities list (admin home page): when each definition was last saved. NULL reads back as

@@ -689,6 +689,25 @@ impl DenoModuleHost {
     ///
     /// Routed like [`run`](DenoModuleHost::run), and bounded like it: a
     /// provider waiting on a webhook is a caller like any other.
+    /// One request to one of a module's v1 routes; `request` carries the
+    /// route, its params and what arrived, and goes to the worker as it is.
+    pub async fn run_route(
+        &self,
+        module: &str,
+        request: Json,
+        call: CallHosts<'_>,
+    ) -> Result<Json> {
+        let index = self.worker_for(module).await;
+        let mut message = request;
+        if let Json::Object(map) = &mut message {
+            map.insert("op".to_owned(), json!("route_call"));
+            map.insert("module".to_owned(), json!(module));
+        }
+        self.send_with(index, message, None, call)
+            .await
+            .map_err(|e| denial(module, e))
+    }
+
     pub async fn run_webhook(
         &self,
         module: &str,
@@ -1415,7 +1434,8 @@ impl DenoModuleHost {
             || call.module_files.is_some()
             || call.roles.is_some()
             || call.credits.is_some()
-            || call.oauth.is_some();
+            || call.oauth.is_some()
+            || call.system.is_some();
         if let Json::Object(map) = &mut request {
             map.insert("asks".to_owned(), Json::Bool(can_ask));
             // The functions this call's modules supply, by name, for v1's
@@ -1459,6 +1479,7 @@ impl DenoModuleHost {
         let roles = call.roles;
         let credits = call.credits;
         let oauth = call.oauth;
+        let system = call.system;
         // The run's budget, and the same one a code body's run gets: a module's
         // N+1 costs what a body's N+1 costs, because it is the same bound on the
         // same server doing the same work. A service has none (`None`).
@@ -1529,6 +1550,7 @@ impl DenoModuleHost {
                             roles,
                             credits,
                             oauth,
+                            system,
                         };
                         let (ok, text) = match serve(surfaces, ask.request).await {
                             Ok(value) => (
@@ -1634,6 +1656,7 @@ struct Surfaces<'a> {
     roles: Option<&'a dyn crate::host::RoleAsks>,
     credits: Option<&'a dyn crate::host::CreditAsks>,
     oauth: Option<&'a dyn crate::host::OAuthAsks>,
+    system: Option<&'a dyn crate::host::SystemAsks>,
 }
 
 /// One ask, on the surface it names.
@@ -1705,13 +1728,21 @@ async fn serve(surfaces: Surfaces<'_>, request: Json) -> Result<Json> {
                 "only an action called by a user can ask for their consent (`oauth.begin`)",
             )),
         },
+        "system" => match surfaces.system {
+            Some(system) => system.ask(plan).await,
+            None => Err(Error::config(
+                "only a module's route can read the installation's state and the machine's \
+                 resources (`systeminformation`, `EventLog`, `MetaData`)",
+            )),
+        },
         other => Err(Error::config(format!(
             "`{other}` is not something a module can ask this server for; what a module may \
              reach is the database (`db`), this server's triggers (`trigger`), its modules' \
              functions (`function`), the file stores it was given (`files`), its own \
              file areas (`module_files`), role grants (`roles`), LLM credits \
              (`credits`), from a service its \
-             supervisor (`service`) and, from an action, a consent flow (`oauth`)"
+             supervisor (`service`), from an action a consent flow (`oauth`) and, \
+             from a route, the installation's state (`system`)"
         ))),
     }
 }

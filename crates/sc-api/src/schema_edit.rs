@@ -492,6 +492,20 @@ pub enum Operation {
         /// The table.
         table: String,
     },
+    /// Rename a table, keeping its columns, rows and settings, and move every
+    /// stored reference to it — the other tables' keys, the formulas that
+    /// aggregate over it, its row history, and (through the catalog's
+    /// [`TableRenameHook`](sc_catalog::TableRenameHook)) the views, triggers,
+    /// applications and other definitions that name it. Code is not rewritten.
+    ///
+    /// Always the only operation in its batch: everything after it would have
+    /// to be planned against overlay rows that have not moved yet.
+    RenameTable {
+        /// The table.
+        table: String,
+        /// Its new name.
+        to: String,
+    },
     /// Add a constraint — a jointly-unique key, an index, a full-text index or a
     /// row constraint — to a table.
     ///
@@ -528,6 +542,7 @@ impl Operation {
             Operation::AlterField { .. } => "alter_field",
             Operation::DropField { .. } => "drop_field",
             Operation::DropTable { .. } => "drop_table",
+            Operation::RenameTable { .. } => "rename_table",
             Operation::AddConstraint { .. } => "add_constraint",
             Operation::DropConstraint { .. } => "drop_constraint",
         }
@@ -543,6 +558,7 @@ impl Operation {
             | Operation::DropField { table, .. }
             | Operation::AddConstraint { table, .. }
             | Operation::DropConstraint { table, .. }
+            | Operation::RenameTable { table, .. }
             | Operation::DropTable { table } => table,
         }
     }
@@ -559,6 +575,8 @@ pub struct Applied {
     pub tables_altered: Vec<String>,
     /// Tables dropped.
     pub tables_dropped: Vec<String>,
+    /// Tables renamed, as `(old name, new name)`.
+    pub tables_renamed: Vec<(String, String)>,
     /// Fields added, as `table.field`.
     pub fields_added: Vec<String>,
     /// Fields whose settings changed, as `table.field`.
@@ -600,6 +618,21 @@ pub async fn apply(
 ) -> Result<Applied> {
     if operations.is_empty() {
         return Err(Error::invalid("a schema edit needs at least one operation"));
+    }
+    if operations.len() > 1
+        && let Some((index, op)) = operations
+            .iter()
+            .enumerate()
+            .find(|(_, op)| matches!(op, Operation::RenameTable { .. }))
+    {
+        return Err(at(
+            index,
+            op,
+            Error::invalid(
+                "a table is renamed in a batch of its own; send the other operations \
+                 in a second batch, naming the table by its new name",
+            ),
+        ));
     }
     let mut plan = Plan::new(catalog).await?;
     for (index, op) in operations.iter().enumerate() {
@@ -648,6 +681,17 @@ pub async fn apply(
     }
 
     catalog.reload().await?;
+
+    // The rows other crates own follow a rename here, after the catalog names
+    // the new table and before the observer re-projects what names it.
+    for (from, to) in &plan.applied.tables_renamed {
+        match catalog.notify_table_renamed(from, to).await {
+            Ok(notes) => plan.applied.notes.extend(notes),
+            Err(e) => plan.applied.notes.push(format!(
+                "`{from}` was renamed to `{to}`, but updating what names it failed: {e}"
+            )),
+        }
+    }
 
     // Every table the batch created or changed was edited now (the entities
     // list's "recently edited"); a dropped one forgot its time with its overlay.
@@ -704,9 +748,12 @@ pub async fn apply(
 ///   here with one is a caller that did not check, so it is refused rather than
 ///   allowed to issue a `DROP TABLE` for a table no database has.
 fn refuse_on_provided(catalog: &Catalog, op: &Operation) -> Result<()> {
+    // A rename of a provided table is a rename of its row, which is the table.
     if matches!(
         op,
-        Operation::AlterTable { .. } | Operation::CreateTable { .. }
+        Operation::AlterTable { .. }
+            | Operation::CreateTable { .. }
+            | Operation::RenameTable { .. }
     ) {
         return Ok(());
     }
@@ -739,6 +786,7 @@ fn refuse_on_module_table(catalog: &Catalog, op: &Operation) -> Result<()> {
     let tables = catalog.module_tables();
     match op {
         Operation::DropTable { table } => tables.refuse_drop(table, None),
+        Operation::RenameTable { table, .. } => tables.refuse_table_rename(table),
         Operation::DropField { table, field } => tables.refuse_drop(table, Some(field)),
         Operation::AlterField {
             table,
@@ -847,6 +895,7 @@ enum MetaOp {
     ForgetTable(String),
     SaveField(Box<FieldMeta>),
     ForgetField(String, String),
+    RenameTable(String, String),
 }
 
 impl MetaWrite {
@@ -856,6 +905,7 @@ impl MetaWrite {
             MetaOp::ForgetTable(name) => catalog.forget_table_meta(name).await,
             MetaOp::SaveField(meta) => save_field_meta_row(catalog, meta).await,
             MetaOp::ForgetField(table, field) => catalog.forget_field_meta(table, field).await,
+            MetaOp::RenameTable(from, to) => sc_catalog::rename_table_meta(catalog, from, to).await,
         }
     }
 }
@@ -1036,6 +1086,10 @@ impl Plan {
             Operation::DropTable { table } => {
                 grants.check(grants.drop, "drop a table", GRANT_DROP)?;
                 self.drop_table(catalog, index, op, table)
+            }
+            Operation::RenameTable { table, to } => {
+                grants.check(grants.edit, "rename a table", GRANT_EDIT)?;
+                self.rename_table(catalog, index, op, table, to).await
             }
             Operation::AddConstraint {
                 table,
@@ -2029,6 +2083,154 @@ impl Plan {
         Ok(())
     }
 
+    /// Rename `table` to `to`: the DDL, the projection (its own name and the
+    /// keys onto it), the change log's entries, and the overlay rows after the
+    /// commit.
+    ///
+    /// Refused for the tables the system itself names (users, roles, role
+    /// grants, the credits ledger, Saltcorn's metadata tables), for a table a
+    /// module declared, for one in a database the schema cannot be edited in,
+    /// and for a new name that is taken — by a table, or by a settings row left
+    /// over from one.
+    async fn rename_table(
+        &mut self,
+        catalog: &Catalog,
+        index: usize,
+        op: &Operation,
+        table: &str,
+        to: &str,
+    ) -> Result<()> {
+        self.require_editable(table)?;
+        let to = to.trim();
+        check_identifier(to, "table")?;
+        if to == table {
+            return Err(Error::invalid(format!("`{table}` already has that name")));
+        }
+        if table == USERS_TABLE
+            || table == ROLES_TABLE
+            || table == ROLE_GRANTS_TABLE
+            || CREDIT_TABLES.contains(&table)
+        {
+            return Err(Error::invalid(format!(
+                "`{table}` is a built-in table and keeps its name"
+            )));
+        }
+        if to.starts_with("_fd_") {
+            return Err(Error::invalid(format!(
+                "`{to}` is a system table name; the `_fd_` prefix is reserved"
+            )));
+        }
+        if self.projection.get(to).is_some() {
+            return Err(Error::invalid(format!("table `{to}` already exists")));
+        }
+        if load_table_meta_by_name(catalog, to).await?.is_some() {
+            return Err(Error::invalid(format!(
+                "there are stored settings for a table `{to}` that is no longer there; \
+                 forget them first (the tables list shows them), then rename"
+            )));
+        }
+        let projected =
+            self.projection.get(table).cloned().ok_or_else(|| {
+                Error::not_found(format!("table `{table}` is not in the catalog"))
+            })?;
+        if projected.is_metadata() {
+            return Err(Error::invalid(format!(
+                "`{table}` is one of Saltcorn's metadata tables and keeps its name"
+            )));
+        }
+        let provided = projected.provider().is_some();
+
+        if !provided {
+            self.ddl.push(SchemaChange::RenameTable {
+                from: table.to_owned(),
+                to: to.to_owned(),
+            });
+            // SQLite's full-text index is a virtual table that reads its
+            // content from the table *by name*, which the rename does not
+            // follow: it is dropped under the old name and built again,
+            // under the name derived from the new one.
+            if catalog
+                .driver_named(&projected.database)?
+                .dialect()
+                .is_sqlite()
+                && let Some(fts) = projected
+                    .constraints
+                    .iter()
+                    .find(|c| matches!(c.kind, ConstraintKind::FullTextSearch { .. }))
+            {
+                self.constraints
+                    .push((table.to_owned(), ConstraintOp::Drop(Box::new(fts.clone()))));
+                let mut rebuilt = fts.clone();
+                rebuilt.name = TableConstraint::derived_name(to, &fts.kind, "");
+                self.constraints
+                    .push((to.to_owned(), ConstraintOp::Add(Box::new(rebuilt))));
+            }
+        }
+        if let Some(sql) = rename_in_change_log_tables_sql(catalog, &self.projection, table, to) {
+            self.change_log_edits.push(sql);
+        }
+
+        let mut renamed = projected;
+        renamed.name = to.to_owned();
+        renamed.id = sc_catalog::TableId(to.to_owned());
+        for constraint in &mut renamed.constraints {
+            if constraint.name == TableConstraint::derived_name(table, &constraint.kind, "")
+                && matches!(constraint.kind, ConstraintKind::FullTextSearch { .. })
+            {
+                constraint.name = TableConstraint::derived_name(to, &constraint.kind, "");
+            }
+        }
+        self.projection.remove(table);
+        self.projection.insert(renamed);
+        let names: Vec<String> = self
+            .projection
+            .tables()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        for name in names {
+            let Some(other) = self.projection.get_mut(&name) else {
+                continue;
+            };
+            for field in &mut other.fields {
+                if let DataFieldKind::Key { target_table, .. } = &mut field.kind
+                    && target_table.0 == table
+                {
+                    *target_table = sc_catalog::TableId(to.to_owned());
+                }
+            }
+        }
+        for set in [
+            &mut self.was_logged,
+            &mut self.rls_dirty,
+            &mut self.change_log_dirty,
+        ] {
+            if set.remove(table) {
+                set.insert(to.to_owned());
+            }
+        }
+        if let Some(was) = self.was_rls.remove(table) {
+            self.was_rls.insert(to.to_owned(), was);
+        }
+        self.metas.push(MetaWrite {
+            index,
+            op_name: op.op_name(),
+            what: MetaOp::RenameTable(table.to_owned(), to.to_owned()),
+        });
+        self.applied
+            .tables_renamed
+            .push((table.to_owned(), to.to_owned()));
+        self.applied.notes.push(format!(
+            "`{table}` is now `{to}`; code that names `{table}` — code queries, code actions, \
+             code libraries, an application's own source — is not rewritten and needs the new name"
+        ));
+        self.changes
+            .push(SchemaChanged::TableDropped(table.to_owned()));
+        self.changes
+            .push(SchemaChanged::TableCreated(to.to_owned()));
+        Ok(())
+    }
+
     // --- constraints ------------------------------------------------------------
 
     /// Add a constraint to a table: check what can be checked now, put it on the
@@ -2677,6 +2879,39 @@ fn rename_in_change_log_sql(
         old = renamed("old_values"),
         new = renamed("new_values"),
     ))
+}
+
+/// The statements that move a renamed table's change-log entries, sync's key
+/// pairs and the changesets that undo into it to the new name, or `None` when
+/// the table has no log. Run in the batch's transaction, so the retention job
+/// never sees entries for a table that is not in the catalog.
+fn rename_in_change_log_tables_sql(
+    catalog: &Catalog,
+    projection: &SchemaProjection,
+    from: &str,
+    to: &str,
+) -> Option<String> {
+    if !has_change_log(catalog, projection, from) {
+        return None;
+    }
+    let dialect = catalog.primary().dialect();
+    let (from, to) = (dialect.quote_literal(from), dialect.quote_literal(to));
+    let mut sql = format!(
+        "UPDATE {log} SET table_name = {to} WHERE table_name = {from};\n\
+         UPDATE {keys} SET table_name = {to} WHERE table_name = {from};",
+        log = dialect.quote_ident(sc_catalog::CHANGES_TABLE),
+        keys = dialect.quote_ident(sc_catalog::SYNC_KEYS_TABLE),
+    );
+    if catalog
+        .get(sc_catalog::CHANGESETS_TABLE)
+        .is_ok_and(|t| t.is_some())
+    {
+        sql.push_str(&format!(
+            "\nUPDATE {sets} SET undo_table = {to} WHERE undo_table = {from};",
+            sets = dialect.quote_ident(sc_catalog::CHANGESETS_TABLE),
+        ));
+    }
+    Some(sql)
 }
 
 /// The statements that remove a dropped table's change-log entries and sync's

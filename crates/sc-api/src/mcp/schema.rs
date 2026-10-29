@@ -315,7 +315,7 @@ fn edit_description(grants: &Grants, rls_available: bool) -> String {
         allowed.push("create_table");
     }
     if grants.edit {
-        allowed.push("alter_table, add_field, alter_field");
+        allowed.push("alter_table, rename_table, add_field, alter_field");
     }
     if grants.drop {
         allowed.push("drop_field, drop_table");
@@ -394,8 +394,9 @@ fn edit_parameters() -> Json {
                             "type": "string",
                             "description": "Which operation this is.",
                             "enum": [
-                                "create_table", "alter_table", "add_field",
-                                "alter_field", "drop_field", "drop_table",
+                                "create_table", "alter_table", "rename_table",
+                                "add_field", "alter_field", "drop_field",
+                                "drop_table",
                             ],
                         },
                         "table": {
@@ -414,7 +415,15 @@ fn edit_parameters() -> Json {
                         "rename_to": {
                             "type": "string",
                             "description":
-                                "Rename the field (`alter_field`): its column, its \
+                                "The new name, for `rename_table` (required, and \
+                                 alone in its batch): the table keeps its rows, \
+                                 fields, settings and row history, and the keys, \
+                                 formulas, views, triggers, workflows, agents, \
+                                 streams, datasets, models and application table \
+                                 subsets that name it follow. Code — code queries, \
+                                 code actions, code libraries, an application's \
+                                 source — is not rewritten; update it yourself. \
+                                 Or rename the field (`alter_field`): its column, its \
                                  settings and its row history follow. Refused while \
                                  a calculated field, a constraint, the ownership \
                                  formula or another table's key names it. Views, \
@@ -726,6 +735,11 @@ async fn edit(catalog: &Catalog, grants: &Grants, args: &Json) -> Result<Json> {
         "tables_created": applied.tables_created,
         "tables_altered": applied.tables_altered,
         "tables_dropped": applied.tables_dropped,
+        "tables_renamed": applied
+            .tables_renamed
+            .iter()
+            .map(|(from, to)| json!({ "from": from, "to": to }))
+            .collect::<Vec<Json>>(),
         "fields_added": applied.fields_added,
         "fields_altered": applied.fields_altered,
         "fields_dropped": applied.fields_dropped,
@@ -847,9 +861,15 @@ fn parse_operation(item: &Json) -> Result<Operation> {
             field: require_field(obj, op)?,
         }),
         "drop_table" => Ok(Operation::DropTable { table }),
+        "rename_table" => Ok(Operation::RenameTable {
+            table,
+            to: optional_string(obj, "rename_to")?
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| Error::invalid("`rename_table` needs a `rename_to`"))?,
+        }),
         other => Err(Error::invalid(format!(
             "unknown `op` `{other}`; it is one of create_table, alter_table, \
-             add_field, alter_field, drop_field, drop_table"
+             rename_table, add_field, alter_field, drop_field, drop_table"
         ))),
     }
 }

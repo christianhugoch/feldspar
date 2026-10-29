@@ -19,8 +19,10 @@
 //! table, serialise it, add it to a zip in memory — and is what a 43 MB `bytea`
 //! table taking 3.4 GB to back up taught. So:
 //!
-//! - The zip is written to a [`std::fs::File`] ([`write_backup_to`]), never to a
-//!   buffer. The callers spool it to disk and serve, rename or send that file.
+//! - The zip is written to a [`std::fs::File`] ([`write_backup_to`]) or straight
+//!   down a pipe ([`write_backup_stream`]), never to a buffer. The callers
+//!   spool it to disk and serve, rename or send that file — or, for
+//!   `feldspar backup -`, hand it to whatever reads stdout.
 //! - A table's rows are read a **page** at a time ([`write_table_rows`]) and
 //!   written one compact JSON line each as they arrive. The page size adapts to
 //!   the rows, so a table of large blobs is read a few rows at a time.
@@ -42,7 +44,7 @@ use sc_error::{Error, Result};
 use sc_query::{BinOp, Expr, OrderBy, Projection, Select, Source, Statement, Value};
 use serde_json::{Map, Value as Json, json};
 use tokio::io::AsyncReadExt;
-use zip::write::SimpleFileOptions;
+use zip::write::{FileOptions, SimpleFileOptions};
 
 use super::values;
 use super::{
@@ -234,17 +236,19 @@ async fn kept_fits(
 ///
 /// The zip writes are synchronous calls into a buffered file — the page cache —
 /// made from async code, as the in-memory writes they replaced were.
+///
+/// With a `password`, every entry is encrypted with WinZip AES-256 (see
+/// [`entry_options`]); the entry *names* stay readable, as in every zip.
 pub async fn write_backup_to(
     catalog: &Catalog,
     selection: &Selection,
+    password: Option<&str>,
     file: std::fs::File,
 ) -> Result<u64> {
-    let mut zip = ZipBuilder::new(std::io::BufWriter::with_capacity(256 * 1024, file));
-    let mut source = RowSource::open(catalog).await?;
-    write_entries(catalog, selection, &mut source, &mut zip).await?;
-    source.finish().await;
-    let file = zip
-        .finish()?
+    let zip =
+        ZipBuilder::new(std::io::BufWriter::with_capacity(OUT_BUFFER, file)).encrypted(password)?;
+    let file = write_archive(catalog, selection, zip)
+        .await?
         .into_inner()
         .map_err(|e| zip_error("the archive", &e.error().to_string()))?;
     // On disk before anyone is told it is there: the CLI and the scheduler
@@ -254,6 +258,46 @@ pub async fn write_backup_to(
     file.metadata()
         .map(|m| m.len())
         .map_err(|e| zip_error("the archive", &e.to_string()))
+}
+
+/// Write the zip for `selection` into `out`, which need not seek — a pipe,
+/// stdout — returning its length. `feldspar backup -` is this, for a caller
+/// that streams the backup on to S3 without a copy on disk.
+///
+/// The same entries and the same bounded memory as [`write_backup_to`]. What
+/// a writer that cannot go back changes is only where each entry's CRC and
+/// sizes go: into a data descriptor after its bytes rather than into its local
+/// header, which every unzip reads through the central directory anyway.
+pub async fn write_backup_stream<W: Write>(
+    catalog: &Catalog,
+    selection: &Selection,
+    password: Option<&str>,
+    out: W,
+) -> Result<u64> {
+    let zip = ZipBuilder::new_stream(std::io::BufWriter::with_capacity(OUT_BUFFER, out))
+        .encrypted(password)?;
+    let mut out = write_archive(catalog, selection, zip).await?;
+    let length = out
+        .stream_position()
+        .map_err(|e| zip_error("the archive", &e.to_string()))?;
+    out.flush()
+        .map_err(|e| zip_error("the archive", &e.to_string()))?;
+    Ok(length)
+}
+
+/// The buffer between the zip writer and the file or pipe it writes to.
+const OUT_BUFFER: usize = 256 * 1024;
+
+/// Every entry of `selection` into `zip`, returning the writer it finished.
+async fn write_archive<W: Write + Seek>(
+    catalog: &Catalog,
+    selection: &Selection,
+    mut zip: ZipBuilder<W>,
+) -> Result<W> {
+    let mut source = RowSource::open(catalog).await?;
+    write_entries(catalog, selection, &mut source, &mut zip).await?;
+    source.finish().await;
+    zip.finish()
 }
 
 async fn write_entries<W: Write + Seek>(
@@ -1111,6 +1155,35 @@ struct ZipBuilder<W: Write + Seek> {
     zip: zip::ZipWriter<W>,
     /// One row's line, reused from row to row.
     line: Vec<u8>,
+    /// The password every entry is encrypted with, when there is one.
+    password: Option<String>,
+}
+
+/// The options for one entry: `method`, and AES-256 under `password` when
+/// there is one.
+///
+/// WinZip AES (AE-2), not the original "ZipCrypto": AES is what 7-Zip, WinZip
+/// and Keka open, and ZipCrypto is broken by a known-plaintext attack that
+/// every backup — whose `manifest.json` begins `{"format"` — would hand an
+/// attacker. Each entry gets its own random salt, so its own key, and an HMAC
+/// that a reader checks before trusting a byte of it.
+fn entry_options(password: Option<&str>, method: zip::CompressionMethod) -> FileOptions<'_, ()> {
+    let options = SimpleFileOptions::default().compression_method(method);
+    match password {
+        Some(password) => options.with_aes_encryption(zip::AesMode::Aes256, password),
+        None => options,
+    }
+}
+
+impl<W: Write> ZipBuilder<zip::write::StreamWriter<W>> {
+    /// A zip written straight through to `out`, never seeking back.
+    fn new_stream(out: W) -> ZipBuilder<zip::write::StreamWriter<W>> {
+        ZipBuilder {
+            zip: zip::ZipWriter::new_stream(out).set_auto_large_file(),
+            line: Vec::new(),
+            password: None,
+        }
+    }
 }
 
 impl<W: Write + Seek> ZipBuilder<W> {
@@ -1118,19 +1191,27 @@ impl<W: Write + Seek> ZipBuilder<W> {
         ZipBuilder {
             zip: zip::ZipWriter::new(out).set_auto_large_file(),
             line: Vec::new(),
+            password: None,
         }
     }
 
-    fn deflated() -> SimpleFileOptions {
-        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    /// Encrypt every entry with `password`. An empty one is refused rather
+    /// than taken as none: a backup the admin believes is protected must be.
+    fn encrypted(mut self, password: Option<&str>) -> Result<ZipBuilder<W>> {
+        if let Some(password) = password {
+            super::check_password(password)?;
+            self.password = Some(password.to_owned());
+        }
+        Ok(self)
     }
 
     /// Add a JSON entry, pretty-printed: a backup is a thing people open and
     /// read, and `git diff` on an unpacked one is a real way to answer "what
     /// changed".
     fn json(&mut self, path: &str, value: &Json) -> Result<()> {
+        let options = entry_options(self.password.as_deref(), zip::CompressionMethod::Deflated);
         self.zip
-            .start_file(path, Self::deflated())
+            .start_file(path, options)
             .map_err(|e| zip_error(path, &e.to_string()))?;
         serde_json::to_writer_pretty(&mut self.zip, value)
             .map_err(|e| zip_error(path, &e.to_string()))
@@ -1139,8 +1220,9 @@ impl<W: Write + Seek> ZipBuilder<W> {
     /// Start an NDJSON entry of rows. How long it will be is not known, so it
     /// is written with Zip64 sizes in case it passes 4 GiB.
     fn start_rows(&mut self, path: &str) -> Result<()> {
+        let options = entry_options(self.password.as_deref(), zip::CompressionMethod::Deflated);
         self.zip
-            .start_file(path, Self::deflated().large_file(true))
+            .start_file(path, options.large_file(true))
             .map_err(|e| zip_error(path, &e.to_string()))
     }
 
@@ -1166,11 +1248,12 @@ impl<W: Write + Seek> ZipBuilder<W> {
     /// Start the entry for a store file named `name`, of `size` bytes where
     /// the store said.
     fn start_file(&mut self, path: &str, name: &str, size: Option<u64>) -> Result<()> {
-        let options = if already_compressed(name) {
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+        let method = if already_compressed(name) {
+            zip::CompressionMethod::Stored
         } else {
-            Self::deflated()
+            zip::CompressionMethod::Deflated
         };
+        let options = entry_options(self.password.as_deref(), method);
         let large = size.is_none_or(|size| size >= ZIP64_FROM);
         self.zip
             .start_file(path, options.large_file(large))
@@ -1248,10 +1331,21 @@ mod tests {
 
     /// The central directory's general-purpose flags of the entry `name`.
     fn flags_of(zip: &[u8], name: &str) -> u16 {
+        central_field(zip, name, 8)
+    }
+
+    /// The compression method `name`'s central directory entry records: 99
+    /// for WinZip AES, whatever it wraps.
+    fn method_of(zip: &[u8], name: &str) -> u16 {
+        central_field(zip, name, 10)
+    }
+
+    /// The 16-bit field at `field` in `name`'s central directory entry.
+    fn central_field(zip: &[u8], name: &str, field: usize) -> u16 {
         let mut at = 0;
         while let Some(offset) = zip[at..].windows(4).position(|w| w == b"PK\x01\x02") {
             let header = at + offset;
-            let flags = u16::from_le_bytes([zip[header + 8], zip[header + 9]]);
+            let flags = u16::from_le_bytes([zip[header + field], zip[header + field + 1]]);
             let length = usize::from(u16::from_le_bytes([zip[header + 28], zip[header + 29]]));
             if &zip[header + 46..header + 46 + length] == name.as_bytes() {
                 return flags;
@@ -1284,7 +1378,7 @@ mod tests {
         assert_ne!(flags_of(&bytes, NOTE) & 0x0800, 0, "the UTF-8 flag");
         assert_eq!(flags_of(&bytes, VIDEO) & 0x0800, 0, "ASCII needs no flag");
 
-        let archive = Archive::open_zip(spool.path()).unwrap();
+        let archive = Archive::open_zip(spool.path(), None).unwrap();
         assert_eq!(archive.json("manifest.json").unwrap()["a"], 1);
         assert_eq!(
             archive.names_under("file-stores/s/files/"),
@@ -1312,6 +1406,149 @@ mod tests {
         assert_eq!(
             zip.by_name(NOTE).unwrap().compression(),
             zip::CompressionMethod::Deflated
+        );
+    }
+
+    /// A writer that cannot seek, as stdout piped to `aws s3 cp -` is.
+    struct Pipe(Vec<u8>);
+
+    impl Write for Pipe {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zip_streamed_down_a_pipe_reads_back_like_one_written_to_a_file() {
+        const VIDEO: &str = "file-stores/s/files/clip.mp4";
+        let mut zip = ZipBuilder::new_stream(Pipe(Vec::new()));
+        zip.json("manifest.json", &json!({ "a": 1 })).unwrap();
+        zip.start_rows("tables/t/rows.ndjson").unwrap();
+        for i in 0..3 {
+            zip.row(&json!({ "id": i })).unwrap();
+        }
+        // A size the store did not know, and one it did.
+        zip.start_file(VIDEO, "clip.mp4", None).unwrap();
+        zip.write_chunk(VIDEO, b"not really a video").unwrap();
+        zip.start_file("file-stores/s/files/a.txt", "a.txt", Some(5))
+            .unwrap();
+        zip.write_chunk("file-stores/s/files/a.txt", b"hello")
+            .unwrap();
+        let mut out = zip.finish().unwrap();
+        let length = out.stream_position().unwrap();
+        let bytes = out.into_inner().0;
+        assert_eq!(length, bytes.len() as u64, "the length is what was written");
+        // Bit 3: the sizes follow each entry, as they must without a seek.
+        assert_ne!(flags_of(&bytes, VIDEO) & 0x0008, 0, "a data descriptor");
+
+        let spool = SpoolFile::new("backup");
+        std::fs::write(spool.path(), &bytes).unwrap();
+        let archive = Archive::open_zip(spool.path(), None).unwrap();
+        assert_eq!(archive.json("manifest.json").unwrap()["a"], 1);
+        let mut reader = archive.rows("tables/t/rows.ndjson");
+        let batch = reader.next_batch().await.unwrap().unwrap();
+        assert_eq!(
+            batch.rows,
+            vec![json!({ "id": 0 }), json!({ "id": 1 }), json!({ "id": 2 })]
+        );
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("file-stores/s/files/a.txt").unwrap(),
+            &mut text,
+        )
+        .unwrap();
+        assert_eq!(text, "hello");
+    }
+
+    /// Write a small protected archive the way each kind of output does —
+    /// a file, and a pipe — returning its bytes.
+    fn protected_archive(streamed: bool, password: &str) -> Vec<u8> {
+        fn fill<W: Write + Seek>(zip: &mut ZipBuilder<W>) {
+            zip.json("manifest.json", &json!({ "format": "x" }))
+                .unwrap();
+            zip.start_rows("tables/t/rows.ndjson").unwrap();
+            zip.row(&json!({ "id": 1 })).unwrap();
+            zip.start_file("file-stores/s/files/clip.mp4", "clip.mp4", None)
+                .unwrap();
+            zip.write_chunk("file-stores/s/files/clip.mp4", b"frames")
+                .unwrap();
+        }
+        if streamed {
+            let mut zip = ZipBuilder::new_stream(Pipe(Vec::new()))
+                .encrypted(Some(password))
+                .unwrap();
+            fill(&mut zip);
+            zip.finish().unwrap().into_inner().0
+        } else {
+            let mut zip = ZipBuilder::new(std::io::Cursor::new(Vec::new()))
+                .encrypted(Some(password))
+                .unwrap();
+            fill(&mut zip);
+            zip.finish().unwrap().into_inner()
+        }
+    }
+
+    /// A password encrypts every entry with AES-256 — stored and deflated,
+    /// written to a file or down a pipe — and the archive reads back with the
+    /// password and with nothing else.
+    #[tokio::test]
+    async fn a_password_encrypts_every_entry_with_aes() {
+        for streamed in [false, true] {
+            let bytes = protected_archive(streamed, "pässwörd");
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+            for i in 0..zip.len() {
+                let name = zip.by_index_raw(i).unwrap().name().to_owned();
+                assert!(
+                    zip.by_index_raw(i).unwrap().encrypted(),
+                    "{name} is not encrypted"
+                );
+                // AES, not ZipCrypto: the method is AES's 99, wrapping the real one.
+                assert_eq!(method_of(&bytes, &name), 99, "{name}");
+            }
+            assert!(zip.by_name("manifest.json").is_err());
+
+            let spool = SpoolFile::new("backup");
+            std::fs::write(spool.path(), &bytes).unwrap();
+            assert!(super::super::is_encrypted(spool.path()).unwrap());
+            let missing = Archive::open_zip(spool.path(), None).err().unwrap();
+            assert!(missing.to_string().contains("password"), "{missing}");
+            let wrong = Archive::open_zip(spool.path(), Some("password"))
+                .err()
+                .unwrap();
+            assert!(wrong.to_string().contains("password"), "{wrong}");
+
+            let archive = Archive::open_zip(spool.path(), Some("pässwörd")).unwrap();
+            assert_eq!(archive.json("manifest.json").unwrap()["format"], "x");
+            assert_eq!(
+                archive.bytes("file-stores/s/files/clip.mp4").unwrap(),
+                b"frames"
+            );
+            let mut reader = archive.rows("tables/t/rows.ndjson");
+            let batch = reader.next_batch().await.unwrap().unwrap();
+            assert_eq!(batch.rows, vec![json!({ "id": 1 })]);
+        }
+    }
+
+    /// An unprotected archive opens whether or not a password is offered, and
+    /// an empty password is refused when writing rather than taken as none.
+    #[test]
+    fn a_password_is_only_needed_where_there_is_one() {
+        let spool = SpoolFile::new("backup");
+        let mut zip = ZipBuilder::new(std::io::BufWriter::new(spool.create().unwrap()));
+        zip.json("manifest.json", &json!({ "a": 1 })).unwrap();
+        zip.finish().unwrap().into_inner().unwrap();
+        assert!(!super::super::is_encrypted(spool.path()).unwrap());
+        let archive = Archive::open_zip(spool.path(), Some("unneeded")).unwrap();
+        assert_eq!(archive.json("manifest.json").unwrap()["a"], 1);
+
+        assert!(
+            ZipBuilder::new(std::io::Cursor::new(Vec::new()))
+                .encrypted(Some(""))
+                .is_err()
         );
     }
 }

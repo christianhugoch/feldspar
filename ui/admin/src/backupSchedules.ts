@@ -9,6 +9,9 @@
  *
  * A schedule's `include` is the same selection the backup dialog edits
  * (`backup.ts` has its arithmetic); the server stores it as what was left out.
+ * Beside it, `includeAll` says which kinds — tables, applications, file stores —
+ * are included whole: every one there is when the backup runs, so one created
+ * after the schedule was set up is in it whatever the lists say.
  *
  * The server checks everything again (and checks what only it can — that the
  * destination can be reached and written, that no other schedule writes
@@ -26,6 +29,19 @@ export type BackupSchedule = ListBackupSchedulesResponse[number];
 export type Frequency = "daily" | "weekly" | "monthly";
 
 export const FREQUENCIES: Frequency[] = ["daily", "weekly", "monthly"];
+
+/** The kinds a schedule includes every one of, at the time it runs. */
+export type IncludeAll = { tables: boolean; applications: boolean; file_stores: boolean };
+
+/** What a new schedule starts on: everything, now and later. */
+export const INCLUDE_ALL: IncludeAll = { tables: true, applications: true, file_stores: true };
+
+/** None: the lists decide for every kind. */
+export const INCLUDE_LISTED: IncludeAll = {
+  tables: false,
+  applications: false,
+  file_stores: false,
+};
 
 export type DestinationKind = "local" | "sftp" | "s3";
 
@@ -64,6 +80,15 @@ export type ScheduleForm = {
   frequency: Frequency;
   retention: string;
   include: BackupSelection;
+  includeAll: IncludeAll;
+  /** The password each backup is encrypted with: empty for none, and
+   * `SECRET_SENTINEL` while the stored one is kept. */
+  backupPassword: string;
+  /** The password typed again; checked only for one that was typed. */
+  backupPasswordRepeat: string;
+  /** Whether the server holds a password for this schedule that the form has
+   * not removed. */
+  backupPasswordStored: boolean;
 };
 
 export type ScheduleField =
@@ -79,10 +104,12 @@ export type ScheduleField =
   | "accessKey"
   | "secretKey"
   | "retention"
-  | "include";
+  | "include"
+  | "backupPassword";
 
 /** What the Add button opens on: what to include starts as the Backup card's
- * current selection, the one choice the admin has already made. */
+ * current selection, the one choice the admin has already made, with all
+ * tables, applications and file stores — including those created later. */
 export function newScheduleForm(include: BackupSelection): ScheduleForm {
   return {
     id: null,
@@ -102,6 +129,10 @@ export function newScheduleForm(include: BackupSelection): ScheduleForm {
     frequency: "daily",
     retention: "30",
     include,
+    includeAll: INCLUDE_ALL,
+    backupPassword: "",
+    backupPasswordRepeat: "",
+    backupPasswordStored: false,
   };
 }
 
@@ -130,6 +161,9 @@ export function editScheduleForm(schedule: BackupSchedule): ScheduleForm {
       ? (schedule.frequency as Frequency)
       : "daily",
     retention: String(schedule.retention_days),
+    includeAll: { ...INCLUDE_ALL, ...schedule.include_all },
+    backupPassword: schedule.password ? SECRET_SENTINEL : "",
+    backupPasswordStored: !!schedule.password,
   };
 }
 
@@ -177,7 +211,13 @@ export function scheduleFormErrors(
     errors.retention = t("Enter a whole number of days from 1 to {max}.", {
       max: MAX_RETENTION_DAYS,
     });
-  if (isEmpty(form.include)) errors.include = t("Choose at least one thing to include.");
+  if (!includesAny(form.includeAll) && isEmpty(form.include)) errors.include = t("Choose at least one thing to include.");
+  if (
+    form.backupPassword !== "" &&
+    !isStoredSecret(form.backupPassword) &&
+    form.backupPassword !== form.backupPasswordRepeat
+  )
+    errors.backupPassword = t("The passwords do not match.");
   return errors;
 }
 
@@ -215,7 +255,30 @@ export function scheduleBody(form: ScheduleForm) {
     frequency: form.frequency,
     retention_days: Number(form.retention.trim()),
     include: form.include,
+    include_all: form.includeAll,
+    // The mask keeps the stored password; empty is none, which removes it.
+    password: form.backupPassword === "" ? null : form.backupPassword,
   };
+}
+
+/** Whether any kind is included whole — which is never nothing, since what it
+ * covers may be created after the schedule is saved. */
+export function includesAny(all: IncludeAll): boolean {
+  return all.tables || all.applications || all.file_stores;
+}
+
+/** What a schedule's line says about the kinds it includes whole, or null for
+ * none: "New tables and file stores are included automatically." */
+export function includeAllNote(all: IncludeAll | null | undefined): string | null {
+  const kinds = [
+    all?.tables && "tables",
+    all?.applications && "applications",
+    all?.file_stores && "file stores",
+  ].filter((k): k is string => !!k);
+  if (kinds.length === 0) return null;
+  const list =
+    kinds.length === 1 ? kinds[0] : `${kinds.slice(0, -1).join(", ")} and ${kinds[kinds.length - 1]}`;
+  return `New ${list} are included automatically.`;
 }
 
 /** Whether a secret box holds the stored value rather than something typed. */

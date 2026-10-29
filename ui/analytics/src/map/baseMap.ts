@@ -1,5 +1,6 @@
 // The base map a map is drawn over (analytics TODO A5.6): the style URLs of
-// Settings → Maps, asked of the server once, and each style read once.
+// the Analytics UI's Settings page (`#/settings`), asked of the server once,
+// and each style read once.
 //
 // The style is fetched here rather than handed to MapLibre as a URL for two
 // reasons: a label layer needs the fonts the style's glyphs have (its own
@@ -17,7 +18,7 @@ export type BaseMapSettings = { style: string | null; style_dark: string | null 
 
 let settings: Promise<BaseMapSettings> | null = null;
 
-/** Settings → Maps, asked once per page. */
+/** The base map settings, asked once per page. */
 export function baseMapSettings(): Promise<BaseMapSettings> {
   settings ??= api
     .mapSettings()

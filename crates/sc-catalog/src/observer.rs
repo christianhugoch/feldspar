@@ -95,6 +95,34 @@ pub trait SchemaObserver: Send + Sync {
     ) -> sc_error::Result<Vec<ReprojectedApp>>;
 }
 
+/// What it means to follow a table being **renamed**.
+///
+/// A table is referenced by name from rows the catalog does not own — a view's
+/// table, a trigger's table and the `table` its action writes to, an
+/// application's table subset, a dataset's base, an agent trait's table — and
+/// the crates that own those rows sit above the schema editor, which cannot
+/// name them. So the catalog carries this seam as it carries the
+/// [`SchemaObserver`], and `sc-server` installs the implementation at boot.
+///
+/// Async and separate from [`SchemaObserver`] because following a rename is
+/// rewriting stored rows, not re-projecting what is in memory.
+#[async_trait::async_trait]
+pub trait TableRenameHook: Send + Sync {
+    /// Rewrite every stored reference to table `from` so it names `to`.
+    ///
+    /// Called **after** the DDL committed, the catalog's own overlay rows moved
+    /// and the catalog reloaded, and before the [`SchemaObserver`] hears of the
+    /// change, so that what it re-projects already names the new table. The
+    /// answer is a list of notes for the caller — what was rewritten, and what
+    /// could not be. An `Err` is the reaction failing, never the rename.
+    async fn table_renamed(
+        &self,
+        catalog: &Catalog,
+        from: &str,
+        to: &str,
+    ) -> sc_error::Result<Vec<String>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

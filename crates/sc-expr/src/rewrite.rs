@@ -46,6 +46,29 @@ pub fn rewrite_free_refs(
     Ok(parsed.apply(edits))
 }
 
+/// `source` with every inverse relation out of table `from` (`fromↃkey`)
+/// spelled out of table `to` instead (`toↃkey`) — what renaming a table does to
+/// a formula that aggregates over it. `None` when the formula names no such
+/// relation, or is not one expression and so cannot be rewritten by its
+/// references.
+pub fn rename_relation_table(source: &str, from: &str, to: &str) -> Option<String> {
+    let prefix = format!("{from}{}", crate::INVERSE);
+    if !source.contains(&prefix) {
+        return None;
+    }
+    let mut changed = false;
+    let out = rewrite_free_refs(source, &mut |path| {
+        let key = path[0].strip_prefix(&prefix)?;
+        if key.is_empty() || key.contains(crate::INVERSE) {
+            return None;
+        }
+        changed = true;
+        Some((1, format!("{to}{}{key}", crate::INVERSE)))
+    })
+    .ok()?;
+    changed.then_some(out)
+}
+
 /// The entries of an object literal, each value as its source text: `{a: x + 1,
 /// b}` is `[("a", "x + 1"), ("b", "b")]`.
 ///
@@ -385,6 +408,30 @@ mod tests {
         assert!(object_literal_entries("{}").unwrap().is_empty());
         assert!(object_literal_entries("[1]").is_err());
         assert!(object_literal_entries("{...a}").is_err());
+    }
+
+    #[test]
+    fn a_renamed_table_is_renamed_in_the_relations_out_of_it() {
+        assert_eq!(
+            rename_relation_table(
+                "booksↃauthor.filter(b => b.pages > 10).length + booksↃeditor.sum('pages')",
+                "books",
+                "titles"
+            )
+            .as_deref(),
+            Some("titlesↃauthor.filter(b => b.pages > 10).length + titlesↃeditor.sum('pages')")
+        );
+        // A table whose name merely starts the same, a field called `books`
+        // and a formula naming no relation are left alone.
+        assert_eq!(
+            rename_relation_table("books_oldↃauthor.length", "books", "x"),
+            None
+        );
+        assert_eq!(rename_relation_table("books + 1", "books", "x"), None);
+        assert_eq!(
+            rename_relation_table("not one; expression", "books", "x"),
+            None
+        );
     }
 
     #[test]

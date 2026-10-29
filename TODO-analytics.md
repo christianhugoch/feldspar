@@ -929,3 +929,18 @@ references, sources, licence and credit) is in the codebase; the data is downloa
 - [x] PD.5 Tests: the reader's quirks, installs from synthetic fixtures (references, a tree,
   missing references, rollback, PostGIS), the endpoints, and an `#[ignore]`d test that installs
   every dataset from its real source.
+
+# Analytics settings in the Analytics UI
+
+The admin UI's settings screen loses its **Maps** tab: settings that concern the Analytics UI are
+edited in the Analytics UI, on its own Settings page.
+
+- [x] AS.1 The base map keys (`map_style`, `map_style_dark`, `map_hosts`) become internal config
+  (on no settings tab); `sc_config::save_map_settings` checks all three as one act. The admin
+  UI's Maps tab is gone.
+- [x] AS.2 Admin API: `saveMapSettings` (`POST /api/maps/settings`, the admin host's admin only,
+  not an application endpoint); `mapSettings` also answers the form's `values`. Clients
+  regenerated in all four UIs.
+- [x] AS.3 Analytics UI: a Settings page at `#/settings` (header **Settings** button, hidden in an
+  application) with a **Base maps** card; the Map workspace says which base map it draws and
+  links to it. Docs (OPERATIONS §10.4, TECHNICAL_DESIGN, tutorial) updated. Tests.

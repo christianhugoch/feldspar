@@ -521,3 +521,62 @@ async fn the_cleanup_job_runs_on_sqlite() -> Result<()> {
     assert!(matches!(seq[0].get("seq"), Some(Value::Int(n)) if *n > 2));
     Ok(())
 }
+
+/// A renamed table keeps its history: the entries move to the new name in the
+/// same transaction, the triggers are regenerated under it, the next write is
+/// recorded under it, and the cleanup job does not mistake the old entries for
+/// a dropped table's.
+#[tokio::test]
+async fn a_renamed_table_keeps_its_history() -> Result<()> {
+    let catalog = setup().await?;
+    rows_of(&catalog, "UPDATE todo SET title = 'eggs' WHERE id = 1").await?;
+    edit(
+        &catalog,
+        schema_edit::Operation::RenameTable {
+            table: "todo".into(),
+            to: "tasks".into(),
+        },
+    )
+    .await?;
+    let tasks = catalog.require("tasks")?;
+    assert!(tasks.history_enabled(), "the settings came along");
+    assert!(catalog.get("todo")?.is_none());
+
+    let triggers = rows_of(
+        &catalog,
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'tasks' ORDER BY name",
+    )
+    .await?;
+    let names: Vec<String> = triggers.iter().map(|r| text_of(r, "name")).collect();
+    assert_eq!(
+        names,
+        vec![
+            "_fd_changes_tasks_del",
+            "_fd_changes_tasks_ins",
+            "_fd_changes_tasks_upd"
+        ]
+    );
+
+    rows::update_row_ctx(
+        &catalog,
+        &tasks,
+        "1",
+        &json!({ "title": "bread" }),
+        Some(&caller()),
+    )
+    .await?;
+    let tables: Vec<String> = entries(&catalog).await?.into_iter().map(|e| e.0).collect();
+    assert_eq!(
+        tables,
+        vec!["tasks", "tasks"],
+        "old and new entries both name `tasks`"
+    );
+
+    clean_change_log(&catalog, chrono::Utc::now()).await?;
+    assert_eq!(
+        entries(&catalog).await?.len(),
+        2,
+        "the cleanup job kept them"
+    );
+    Ok(())
+}

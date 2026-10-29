@@ -217,6 +217,31 @@ pub fn admin_endpoints() -> EndpointSet {
         .auth(AuthRequirement::admin()),
     );
 
+    // Rename a table: the table page's "Rename table". The rows, fields and
+    // settings stay; what names the table — keys, views, triggers, an
+    // application's subset — follows (`schema_edit::Operation::RenameTable`).
+    // Answers the table under its new name, and the notes the rename made:
+    // chiefly that code naming the old name was not rewritten.
+    set.register(
+        Endpoint::new(
+            "renameTable",
+            Method::Post,
+            api()
+                .lit("tables")
+                .param("table", ValueType::Text)
+                .lit("rename"),
+        )
+        .input(TypeSchema::struct_of([StructField::new(
+            "name",
+            TypeSchema::text(),
+        )]))
+        .output(TypeSchema::struct_of([
+            StructField::new("table", table_schema()),
+            StructField::new("notes", TypeSchema::array(TypeSchema::text())),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // --- metadata tables ------------------------------------------------------
     //
     // One of Saltcorn's own `_fd_*` tables, added to the tables list so that its
@@ -2026,6 +2051,31 @@ pub fn admin_endpoints() -> EndpointSet {
         .output(TypeSchema::struct_of([
             StructField::new("paths", TypeSchema::array(TypeSchema::text())),
             StructField::new("truncated", TypeSchema::bool()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
+    // --- help -----------------------------------------------------------------
+    // A help topic (`sc-help`), filled in with what the screen is about and
+    // rendered to HTML — v1's question-mark popups. `table` and `event` say what
+    // the screen is about: the table a formula or a trigger is on, the event a
+    // code body runs in. Both are optional; a topic with neither still renders,
+    // only less specifically. An unknown topic is a 404, an unknown table is
+    // ignored rather than refused, since a half-filled form can name one that
+    // does not exist yet.
+    set.register(
+        Endpoint::new(
+            "getHelp",
+            Method::Get,
+            api().lit("help").param("topic", ValueType::Text),
+        )
+        .query([
+            QueryParam::new("table", ValueType::Text),
+            QueryParam::new("event", ValueType::Text),
+        ])
+        .output(TypeSchema::struct_of([
+            StructField::new("title", TypeSchema::text()),
+            StructField::new("html", TypeSchema::text()),
         ]))
         .auth(AuthRequirement::admin()),
     );
@@ -4737,6 +4787,33 @@ pub fn admin_endpoints() -> EndpointSet {
             .auth(AuthRequirement::admin()),
     );
 
+    // The password of an uploaded backup that is protected by one: the upload
+    // answered `locked` and its `id`, and this answers what the upload would
+    // have — what the file holds — once the password opens it. A wrong one is
+    // refused and the file stays held, to be tried again; the right one is
+    // held with it for `restoreBackup`.
+    set.register(
+        Endpoint::new(
+            "unlockBackup",
+            Method::Post,
+            api().lit("backup").lit("unlock"),
+        )
+        .input(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::text()),
+            StructField::new("password", TypeSchema::text()),
+        ]))
+        .output(TypeSchema::struct_of([
+            StructField::new("id", TypeSchema::text()),
+            StructField::new("encrypted", TypeSchema::bool()),
+            StructField::new("locked", TypeSchema::bool()),
+            StructField::new("created_at", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("source", TypeSchema::optional(TypeSchema::text())),
+            StructField::new("available", backup_contents_schema()),
+            StructField::new("include", backup_selection_schema()),
+        ]))
+        .auth(AuthRequirement::admin()),
+    );
+
     // Restore from an archive already uploaded (`/backup/upload` handed back its
     // `id`), taking the parts `include` names.
     //
@@ -4945,6 +5022,22 @@ fn backup_schedule_input_fields() -> Vec<StructField> {
         StructField::new("frequency", TypeSchema::text()),
         StructField::new("retention_days", TypeSchema::int()),
         StructField::new("include", backup_selection_schema()),
+        // Kinds included whole: every table (definition and rows), application
+        // or file store there is when the backup runs, including ones created
+        // after the schedule was saved. Absent is all three on; a flag set
+        // false leaves that kind to `include`'s lists.
+        StructField::new(
+            "include_all",
+            TypeSchema::optional(TypeSchema::struct_of([
+                StructField::new("tables", TypeSchema::bool()),
+                StructField::new("applications", TypeSchema::bool()),
+                StructField::new("file_stores", TypeSchema::bool()),
+            ])),
+        ),
+        // The password each backup is protected with (WinZip AES-256, which
+        // 7-Zip opens); null or empty for none. Sent as the mask when one is
+        // stored, and handing the mask back on an update keeps it.
+        StructField::new("password", TypeSchema::optional(TypeSchema::text())),
     ]
 }
 
@@ -5952,6 +6045,16 @@ fn module_schema() -> TypeSchema {
             TypeSchema::array(TypeSchema::struct_of([
                 StructField::new("name", TypeSchema::text()),
                 StructField::new("description", TypeSchema::text()),
+                StructField::new("path", TypeSchema::text()),
+            ])),
+        ),
+        // The v1 routes it serves, with the path each is served at on the
+        // admin host (`/_feldspar/routes/<module><url>`).
+        StructField::new(
+            "routes",
+            TypeSchema::array(TypeSchema::struct_of([
+                StructField::new("method", TypeSchema::text()),
+                StructField::new("url", TypeSchema::text()),
                 StructField::new("path", TypeSchema::text()),
             ])),
         ),
@@ -7794,6 +7897,9 @@ fn form_field_schema() -> TypeSchema {
         StructField::new("section", TypeSchema::optional(TypeSchema::text())),
         // A sentence or two shown under the control (v1's `sublabel`), or null.
         StructField::new("sublabel", TypeSchema::optional(TypeSchema::text())),
+        // The help topic that explains the setting at length (`getHelp`), or
+        // null: the form shows a question-mark that opens it.
+        StructField::new("help_topic", TypeSchema::optional(TypeSchema::text())),
         // A regular expression a non-empty text value must match in full
         // (v1's `regexp`), and what to say when it does not, or null.
         StructField::new("pattern", TypeSchema::optional(TypeSchema::text())),
@@ -7924,6 +8030,7 @@ mod tests {
             "readFile",
             "writeFile",
             // Backup, restore and user management.
+            "unlockBackup",
             "restoreBackup",
             "createBackupSchedule",
             "updateBackupSchedule",

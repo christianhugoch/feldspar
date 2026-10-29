@@ -44,6 +44,8 @@ use tower::ServiceExt;
 
 const BASE_DOMAIN: &str = "example.com";
 const APP_HOST: &str = "shop.example.com";
+/// A second application exposing the same agents.
+const OTHER_HOST: &str = "library.example.com";
 const PASSWORD: &str = "correct-horse";
 const ROLE_MEMBER: u8 = 80;
 
@@ -288,13 +290,19 @@ async fn serve(provider: Arc<dyn LlmProvider>, tools: sc_app::ToolDetail) -> Res
         "code",
         AssetBundle::new().with("index.html", "<!doctype html>"),
     ));
-    apps.mount(MountedApp::new_with(
-        app,
-        framework,
-        &catalog,
-        apps.evaluator(),
-        apps.triggers(),
-    )?)?;
+    let library = Application::new("Library", "library", FrameworkRef::new("code"))
+        .with_api(ApiConfig::new("rest", "/api"))
+        .with_agent(AgentExposure::new("helpdesk").tools(tools));
+    sc_app::check_exposed_agents(&catalog, &library).await?;
+    for app in [app, library] {
+        apps.mount(MountedApp::new_with(
+            app,
+            framework.clone(),
+            &catalog,
+            apps.evaluator(),
+            apps.triggers(),
+        )?)?;
+    }
     let config = ServerConfig {
         base_domain: Some(BASE_DOMAIN.to_owned()),
         ..ServerConfig::default()
@@ -317,6 +325,7 @@ async fn serve(provider: Arc<dyn LlmProvider>, tools: sc_app::ToolDetail) -> Res
 
 struct Browser {
     router: Router,
+    host: &'static str,
     cookies: HashMap<String, String>,
 }
 
@@ -349,8 +358,14 @@ impl Reply2 {
 
 impl Browser {
     fn new(server: &Server) -> Browser {
+        Browser::on(server, APP_HOST)
+    }
+
+    /// A browser visiting the application at `host`.
+    fn on(server: &Server, host: &'static str) -> Browser {
         Browser {
             router: server.router.clone(),
+            host,
             cookies: HashMap::new(),
         }
     }
@@ -359,7 +374,7 @@ impl Browser {
         let mut builder = Request::builder()
             .method(method)
             .uri(path)
-            .header(header::HOST, APP_HOST);
+            .header(header::HOST, self.host);
         if !self.cookies.is_empty() {
             let jar = self
                 .cookies
@@ -633,6 +648,72 @@ async fn a_conversation_is_its_owners_alone() -> Result<()> {
         )
         .await;
     assert_eq!(unexposed.status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_conversation_follows_its_owner_to_every_application_exposing_the_agent() -> Result<()> {
+    let provider = Arc::new(FakeProvider::new([
+        Reply::says("Hello Alice."),
+        Reply::says("Still here."),
+    ]));
+    let server = serve(provider, sc_app::ToolDetail::Names).await?;
+    let mut in_shop = Browser::new(&server);
+    in_shop.login("alice").await;
+    let events = in_shop
+        .send(
+            "POST",
+            "/api/_agents/helpdesk/chat",
+            Some(json!({ "message": "hi" })),
+        )
+        .await
+        .events();
+    let run = events[0]["run"].as_str().unwrap().to_owned();
+
+    // In the other application Alice lists, reads and continues it.
+    let mut in_library = Browser::on(&server, OTHER_HOST);
+    in_library.login("alice").await;
+    let listed = in_library
+        .send("GET", "/api/_agents/helpdesk/runs", None)
+        .await
+        .json();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(listed[0]["id"], run.as_str());
+    let path = format!("/api/_agents/helpdesk/runs/{run}");
+    assert_eq!(
+        in_library.send("GET", &path, None).await.status,
+        StatusCode::OK
+    );
+    let continued = in_library
+        .send(
+            "POST",
+            "/api/_agents/helpdesk/chat",
+            Some(json!({ "message": "still there?", "run": run })),
+        )
+        .await;
+    assert_eq!(continued.status, StatusCode::OK);
+    assert_eq!(text_of(&continued.events()), "Still here.");
+
+    // Bob, in the other application, still sees none of it.
+    let mut bob = Browser::on(&server, OTHER_HOST);
+    bob.login("bob").await;
+    assert_eq!(
+        bob.send("GET", &path, None).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Deleting it there deletes it everywhere.
+    assert!(
+        in_library
+            .send("DELETE", &path, None)
+            .await
+            .status
+            .is_success()
+    );
+    assert_eq!(
+        in_shop.send("GET", &path, None).await.status,
+        StatusCode::NOT_FOUND
+    );
     Ok(())
 }
 

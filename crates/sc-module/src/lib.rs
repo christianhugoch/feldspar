@@ -77,6 +77,7 @@ pub mod paths;
 pub mod permissions;
 pub mod reads;
 pub mod roles;
+pub mod routes;
 pub mod services;
 pub mod spec;
 pub mod store;
@@ -99,8 +100,9 @@ pub use frameworks::ModuleFrameworks;
 pub use functions::ModuleFunctions;
 pub use host::{
     ActionManifest, CallHosts, FrameworkManifest, FunctionArg, FunctionManifest,
-    ModelProviderManifest, ModuleHost, ModuleManifest, OAuthAsks, ServiceAsks, ServiceManifest,
-    TableProviderManifest, UnsupportedEntity, WebhookManifest, prime_v8,
+    ModelProviderManifest, ModuleHost, ModuleManifest, OAuthAsks, RouteManifest, ServiceAsks,
+    ServiceManifest, SystemAsks, TableProviderManifest, UnsupportedEntity, WebhookManifest,
+    prime_v8,
 };
 pub use install::{
     InstalledPackage, Installer, MIN_NPM_VERSION, have_node, have_npm, npm_too_old, npm_version,
@@ -115,6 +117,10 @@ pub use permissions::{
     ANY_HOST, ModulePermissions, PERM_ENV, PERM_NET, PERM_READ, PERM_ROLES, PERM_WRITE,
 };
 pub use roles::ModuleRoles;
+pub use routes::{
+    MatchedRoute, ROUTES_PREFIX, RouteCaller, RouteRequest, allowed_methods, match_route,
+    route_module, route_path, run_route,
+};
 pub use services::{Backoff, SERVICE_EVENTS, ServiceState, ServiceStatus, ServiceSupervisor};
 pub use spec::config_fields_to_form_fields;
 pub use store::{

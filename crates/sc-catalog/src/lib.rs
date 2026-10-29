@@ -47,6 +47,7 @@ mod origin;
 mod prefetch;
 mod projection;
 mod provider;
+mod rename;
 pub mod retention;
 mod rls;
 pub mod secrets;
@@ -113,7 +114,7 @@ pub use file_stores::{
 };
 pub use model_host::{ModelHost, ModelSummary, PredictRows, check_model_calls};
 pub use module_tables::{ModuleTableClaim, ModuleTables};
-pub use observer::{ReprojectedApp, SchemaChanged, SchemaObserver};
+pub use observer::{ReprojectedApp, SchemaChanged, SchemaObserver, TableRenameHook};
 pub use origin::PublicOrigin;
 pub use prefetch::prefetch_bindings;
 pub use projection::SchemaProjection;
@@ -121,6 +122,7 @@ pub use provider::{
     DriverTableProvider, ProvidedTableProvider, ProvidedWrites, TableProvider, TableProviderHost,
     TableProviderHosts, TableProviderKind,
 };
+pub use rename::rename_table_meta;
 pub use rls::{
     Access, ROLE_GUC, clear_caller_context, disable_rls, disable_rls_sql, enable_rls,
     enable_rls_sql, run_in_context, run_in_context_read_only, set_caller_context,

@@ -60,6 +60,8 @@ async fn run(args: &[String]) -> Result<()> {
         Some("backup") => backup_command(&args[1..]).await,
         Some("restore") => restore_command(&args[1..]).await,
         Some("app") => app_command(&args[1..]).await,
+        Some("module") => module_command(&args[1..]).await,
+        Some("send-email") => send_email_command(&args[1..]).await,
         Some("agent") => agent_command(&args[1..]).await,
         Some("i18n") => i18n_command(&args[1..]).await,
         Some("cmdstan") => cmdstan_command(&args[1..]).await,
@@ -864,7 +866,8 @@ async fn reemit_client(catalog: &sc_catalog::Catalog, app: &sc_app::Application)
     }
 }
 
-/// `feldspar api add-query --app SUBDOMAIN [--api MOUNT] --name … --path … --sql …`.
+/// `feldspar api add-query --app SUBDOMAIN [--api MOUNT] --name … --path …
+/// [--language …] --code …`.
 ///
 /// Validates by **preparing** — the same call the admin UI's check button and
 /// every save make — so a query that will not prepare exits non-zero carrying
@@ -917,7 +920,11 @@ fn print_query_columns(app: &sc_app::Application, mount: &str, name: &str) -> Re
     else {
         return Ok(());
     };
-    if query.columns.is_empty() {
+    if query.is_code() {
+        // A code body has no columns to describe: what it returns is whatever
+        // the body returns, so say what was saved instead of "no columns".
+        println!("{name}: a {} query", query.language.as_str());
+    } else if query.columns.is_empty() {
         println!("{name}: returns no columns");
     } else {
         println!(
@@ -1085,11 +1092,16 @@ async fn get_cfg_command(args: &[String]) -> Result<()> {
     sc_log::set_log_sql(false);
 
     let Some(key) = parsed.key else {
-        return print_all_config(&catalog).await;
+        return print_all_config(&catalog, parsed.json).await;
     };
     // `config_value` refuses an undeclared key, naming the ones there are — the
     // typo is fixed from the message rather than from a second command.
     let value = sc_config::config_value(&catalog, &key).await?;
+    if parsed.json {
+        // `null` for a key with no value, which JSON can say outright.
+        println!("{value}");
+        return Ok(());
+    }
     if value.is_null() {
         eprintln!("feldspar: `{key}` is not set, and has no default");
         return Ok(());
@@ -1108,11 +1120,47 @@ async fn get_cfg_command(args: &[String]) -> Result<()> {
 /// Keys stored under a name no declaration describes are reported on **stderr**
 /// afterwards. Nothing reads such a row, so it is not part of the answer; but it
 /// is a setting somebody believes is in force, which is worth a sentence.
-async fn print_all_config(catalog: &sc_catalog::Catalog) -> Result<()> {
+///
+/// With `--json` the same listing is one JSON object, key to value, an unset
+/// key `null` and a secret that is set its redaction.
+async fn print_all_config(catalog: &sc_catalog::Catalog, json: bool) -> Result<()> {
     let values = sc_config::all_config(catalog).await?;
-    for field in sc_config::config_spec()
+    let fields = sc_config::config_spec()
         .into_iter()
-        .chain(sc_config::internal_defs().iter().map(|d| d.field.clone()))
+        .chain(sc_config::internal_defs().iter().map(|d| d.field.clone()));
+    if json {
+        let mut out = serde_json::Map::new();
+        for field in fields {
+            let key = field.name();
+            let value = match values.get(key) {
+                Some(value) if !value.is_null() && field.secret => {
+                    serde_json::Value::from(sc_types::SECRET_SENTINEL)
+                }
+                Some(value) => value.clone(),
+                None => serde_json::Value::Null,
+            };
+            out.insert(key.to_owned(), value);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_default()
+        );
+    } else {
+        for field in fields {
+            print_config_line(&field, &values);
+        }
+    }
+    for stray in sc_config::stray_config_keys(catalog).await? {
+        eprintln!(
+            "feldspar: `{stray}` is stored but is not a configuration key this \
+             version has, so nothing reads it"
+        );
+    }
+    Ok(())
+}
+
+/// One `key=value` line of the listing.
+fn print_config_line(field: &sc_types::FormField, values: &sc_types::Attrs) {
     {
         let key = field.name();
         let line = match values.get(key) {
@@ -1123,13 +1171,6 @@ async fn print_all_config(catalog: &sc_catalog::Catalog) -> Result<()> {
         };
         println!("{key}={line}");
     }
-    for stray in sc_config::stray_config_keys(catalog).await? {
-        eprintln!(
-            "feldspar: `{stray}` is stored but is not a configuration key this \
-             version has, so nothing reads it"
-        );
-    }
-    Ok(())
 }
 
 /// `feldspar set-cfg KEY [VALUE] [database flags]` — write one configuration
@@ -1154,9 +1195,65 @@ async fn print_all_config(catalog: &sc_catalog::Catalog) -> Result<()> {
 /// point it needs it — the TLS settings at boot, the SMTP transport per message
 /// — so what a write takes effect on, and when, is the setting's own business
 /// and not this command's to guess at.
+///
+/// Two more forms, for a script that owns a whole settings section:
+///
+/// - `set-cfg --json < settings.json` reads a JSON object of keys, checks
+///   **every** value against its declaration first, and writes them in one
+///   transaction — so a refused port leaves the SMTP settings as they were
+///   rather than half changed. A `null` value unsets that key.
+/// - `set-cfg --unset KEY` deletes the stored value; the key reads as its
+///   declared default again.
 async fn set_cfg_command(args: &[String]) -> Result<()> {
     let (db, rest) = DbConfig::extract(args)?;
-    let parsed = sc_cli::config::parse_set(&rest)?;
+    let parsed = match sc_cli::config::parse_set_command(&rest)? {
+        sc_cli::config::SetCommand::One(parsed) => parsed,
+        sc_cli::config::SetCommand::Many => {
+            let read = std::io::read_to_string(std::io::stdin()).map_err(|e| {
+                sc_error::Error::config(format!("reading the settings from stdin: {e}"))
+            })?;
+            let document: serde_json::Value = serde_json::from_str(&read).map_err(|e| {
+                sc_error::Error::invalid(format!("stdin is not a JSON object of settings: {e}"))
+            })?;
+            let values = sc_cli::config::values_from_json(&document)?;
+            if let Some(source) = db.source() {
+                eprintln!("feldspar: database configured from {source}");
+            }
+            let catalog = connect_catalog(&db).await?;
+            sc_config::set_config_many(&catalog, &values).await?;
+            for (key, value) in &values {
+                let secret = sc_config::definition(key).is_some_and(|f| f.secret);
+                eprintln!(
+                    "feldspar: {key} = {}",
+                    match (value.is_null(), secret) {
+                        (true, _) => "(unset)".to_owned(),
+                        (false, true) => sc_types::SECRET_SENTINEL.to_owned(),
+                        (false, false) => sc_cli::config::render_inline(value),
+                    }
+                );
+            }
+            return Ok(());
+        }
+        sc_cli::config::SetCommand::Unset(key) => {
+            if let Some(source) = db.source() {
+                eprintln!("feldspar: database configured from {source}");
+            }
+            let catalog = connect_catalog(&db).await?;
+            // Through `set_config`, whose `null` is a delete — so the key is
+            // checked against the declarations as a write would be.
+            let was_set = sc_config::stored_config(&catalog, &key).await?.is_some();
+            sc_config::set_config(&catalog, &key, serde_json::Value::Null).await?;
+            eprintln!(
+                "feldspar: {key} {}",
+                if was_set {
+                    "unset; it reads as its default again"
+                } else {
+                    "was not set; nothing changed"
+                }
+            );
+            return Ok(());
+        }
+    };
 
     // The key is checked against the declarations *before* stdin is read: a typo
     // should not leave the command sitting on a terminal waiting for a value
@@ -1203,6 +1300,50 @@ async fn set_cfg_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `feldspar send-email --to ADDR --subject TEXT [--html] [database flags] < body`
+/// — one message through the stored SMTP settings and the server's own
+/// transport. See `sc_cli::email`.
+///
+/// It connects nothing but the database (no catalog bootstrap beyond what
+/// every command does, no modules), and sends through `SmtpMailer`, which is
+/// what the Email settings' *Send test message* sends through.
+async fn send_email_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let parsed = sc_cli::email::parse_send(&rest)?;
+    // Before the database and stdin: an address that will not parse is a typo.
+    let recipients = sc_email::parse_recipients(&parsed.to)?;
+    let body = std::io::read_to_string(std::io::stdin())
+        .map_err(|e| sc_error::Error::config(format!("reading the body from stdin: {e}")))?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    sc_dns::init()?;
+    let settings = sc_config::EmailSettings::load(&catalog)
+        .await?
+        .ok_or_else(|| {
+            sc_error::Error::invalid(
+                "no SMTP server is configured: set smtp_host (Settings → Email, or \
+                 `feldspar set-cfg`) first",
+            )
+        })?;
+    let mut email = sc_email::Email::new(settings.from.clone());
+    email.to = recipients;
+    email.subject = parsed.subject;
+    match parsed.html {
+        true => email.html = Some(body),
+        false => email.text = Some(body),
+    }
+    email.check()?;
+    sc_email::Mailer::send(&sc_email::SmtpMailer::new(&settings)?, &email).await?;
+    eprintln!(
+        "feldspar: sent to {} via {}:{}",
+        parsed.to, settings.host, settings.port
+    );
+    Ok(())
+}
+
 /// `feldspar build-agent --server URL [--token-file PATH] [--workspace DIR] [--insecure-http]
 /// [--once]` — run this machine as a build host (`TODO-build-hosts.md`). See `sc_cli::build_agent`.
 async fn build_agent_command(args: &[String]) -> Result<()> {
@@ -1235,7 +1376,10 @@ async fn mcp_token_create_command(args: &[String]) -> Result<()> {
     let parsed = sc_cli::mcp_token::parse_create(&rest)?;
     // Before the database: a grant that will not validate is a typo, and the
     // message should not wait on a connection.
-    let grants = sc_cli::mcp_token::normalised_grants(&parsed.grants)?;
+    let grants = match parsed.routes_only {
+        true => sc_cli::mcp_token::routes_only_grants(),
+        false => sc_cli::mcp_token::normalised_grants(&parsed.grants)?,
+    };
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
@@ -1251,8 +1395,9 @@ async fn mcp_token_create_command(args: &[String]) -> Result<()> {
         .and_then(|e| e.as_text())
         .unwrap_or("the selected user")
         .to_owned();
-    // A token for a non-admin would be minted and then refused on every call.
-    if user.role > sc_auth::ROLE_ADMIN {
+    // A token for a non-admin would be minted and then refused on every call —
+    // unless it is a routes-only one, which runs as a user of any role.
+    if user.role > sc_auth::ROLE_ADMIN && !parsed.routes_only {
         return Err(sc_error::Error::invalid(format!(
             "{email} is not an administrator, and an MCP token only works for one"
         )));
@@ -1287,6 +1432,20 @@ async fn mcp_token_create_command(args: &[String]) -> Result<()> {
         .url
         .clone()
         .unwrap_or_else(|| format!("http://localhost:{}", db.serving().port().unwrap_or(3032)));
+    if parsed.routes_only {
+        eprintln!(
+            "feldspar: the token is shown once. It reaches module routes only, as {email} \
+             (role {}):",
+            user.role
+        );
+        eprintln!(
+            "  curl -H \"Authorization: Bearer {}\" {}{}/<module>/<route>",
+            minted.secret,
+            origin.trim_end_matches('/'),
+            sc_module::ROUTES_PREFIX
+        );
+        return Ok(());
+    }
     eprintln!("feldspar: the token is shown once. Register it with:");
     eprintln!(
         "  {}",
@@ -1378,13 +1537,391 @@ async fn app_command(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("list") => app_list_command(&args[1..]).await,
         Some("triggers") => app_triggers_command(&args[1..]).await,
+        Some("tables") => app_tables_command(&args[1..]).await,
         Some(other) => Err(sc_error::Error::config(format!(
-            "unknown app subcommand `{other}`; there are `list` and `triggers`"
+            "unknown app subcommand `{other}`; there are `list`, `tables` and `triggers`"
         ))),
         None => Err(sc_error::Error::config(
-            "app needs a subcommand: list or triggers",
+            "app needs a subcommand: list, tables or triggers",
         )),
     }
+}
+
+/// `feldspar module install|grant|configure|list|remove` — the Modules tab
+/// without an admin session. See `sc_cli::module`.
+///
+/// The module machinery is brought up in this process as `restore` brings it
+/// up — over the same database and the same modules root (`--modules-dir`, as
+/// the server was started with) — and every change goes through the Modules
+/// tab's own `ModuleServices` methods. Nothing here reaches a running server:
+/// its next `SIGHUP` sees that `_fd_modules` changed and reloads the modules.
+async fn module_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let (modules_dir, rest) = take_option(rest, "--modules-dir")?;
+    let parsed = sc_cli::module::parse(&rest)?;
+    let mut flags = serving_defaults(&db);
+    if let Some(dir) = modules_dir {
+        flags.push("--modules-dir".to_owned());
+        flags.push(dir);
+    }
+    let config = ServerConfig::from_args(flags.iter())?;
+
+    if let Some(source) = db.source() {
+        eprintln!("feldspar: database configured from {source}");
+    }
+    let catalog = connect_catalog(&db).await?;
+    // `list --json` is an answer on stdout.
+    sc_log::set_log_sql(false);
+    sc_dns::init()?;
+    let Services { apps, .. } =
+        install_services(&catalog, &config, &ServiceManager::default()).await?;
+    let modules = apps
+        .modules()
+        .cloned()
+        .ok_or_else(|| sc_error::Error::msg("the module services did not start"))?;
+    let named = |name: String| {
+        let catalog = catalog.clone();
+        async move {
+            sc_module::load_module_by_name(&catalog, &name)
+                .await?
+                .ok_or_else(|| {
+                    sc_error::Error::not_found(format!(
+                        "no module `{name}` is installed; `feldspar module list` shows the ones \
+                         that are"
+                    ))
+                })
+        }
+    };
+
+    use sc_cli::module::ModuleCommand;
+    match parsed {
+        ModuleCommand::Install(install) => module_install(&catalog, &modules, install).await,
+        ModuleCommand::Grant {
+            name,
+            grant,
+            revoke,
+        } => {
+            let mut module = named(name).await?;
+            if sc_cli::module::apply_grant(&mut module.permissions, &grant, revoke)? {
+                modules.update_module(&module).await?;
+                eprintln!(
+                    "feldspar: {} `{}` {} {} — a running server picks it up on SIGHUP",
+                    if revoke { "revoked" } else { "granted" },
+                    module.name,
+                    grant.permission.key(),
+                    grant.value
+                );
+            } else {
+                eprintln!("feldspar: `{}` unchanged", module.name);
+            }
+            module_report(&modules, &module.name, false)
+        }
+        ModuleCommand::Configure { name, settings } => {
+            let mut module = named(name).await?;
+            let spec = modules
+                .modules()
+                .get(&module.name)
+                .map(|loaded| loaded.config_spec.clone())
+                .unwrap_or_default();
+            if sc_cli::module::apply_settings(&mut module.configuration, &spec, &settings)? {
+                modules.update_module(&module).await?;
+                eprintln!(
+                    "feldspar: configured `{}` — a running server picks it up on SIGHUP",
+                    module.name
+                );
+            } else {
+                eprintln!("feldspar: `{}` unchanged", module.name);
+            }
+            module_report(&modules, &module.name, false)
+        }
+        ModuleCommand::List { json } => {
+            let set = modules.modules();
+            if json {
+                let out: Vec<serde_json::Value> =
+                    set.modules().iter().map(loaded_module_json).collect();
+                println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+                return Ok(());
+            }
+            for loaded in set.modules() {
+                let m = &loaded.module;
+                println!(
+                    "{}  {}  {}  {}{}",
+                    m.name,
+                    m.version.as_deref().unwrap_or("-"),
+                    if loaded.is_loaded() {
+                        "loaded"
+                    } else {
+                        "not loaded"
+                    },
+                    m.location,
+                    match loaded.issues.is_empty() {
+                        true => String::new(),
+                        false => format!("  ({})", loaded.issues.join("; ")),
+                    }
+                );
+            }
+            Ok(())
+        }
+        ModuleCommand::Remove { name } => {
+            let Some(module) = sc_module::load_module_by_name(&catalog, &name).await? else {
+                // Idempotent: removing what is not installed is what was asked.
+                eprintln!("feldspar: no module `{name}` is installed; nothing to remove");
+                return Ok(());
+            };
+            modules.remove_module(&module).await?;
+            eprintln!("feldspar: removed `{name}` — a running server drops it on SIGHUP");
+            Ok(())
+        }
+    }
+}
+
+/// `module install --local DIR …`: install (or upgrade) and load, then the
+/// grants and settings — skipping the package manager when this version from
+/// this directory is already installed.
+async fn module_install(
+    catalog: &sc_catalog::Catalog,
+    modules: &sc_server::ModuleServices,
+    install: sc_cli::module::InstallArgs,
+) -> Result<()> {
+    let dir = std::fs::canonicalize(&install.dir).map_err(|e| {
+        sc_error::Error::invalid(format!(
+            "no directory at {} to install a module from: {e}",
+            install.dir.display()
+        ))
+    })?;
+    let language = sc_cli::module::detect_language(&dir, install.python)?;
+    let location = dir.display().to_string();
+    let grant_all = |module: &mut sc_module::Module| -> Result<bool> {
+        let mut changed = false;
+        for grant in &install.grants {
+            changed |= sc_cli::module::apply_grant(&mut module.permissions, grant, false)?;
+        }
+        Ok(changed)
+    };
+
+    // The same version from the same directory, already on the disk: there is
+    // nothing for npm to do. (pip is asked every time; it is idempotent itself.)
+    let current = match language {
+        sc_module::ModuleLanguage::JavaScript if !install.force => {
+            let (name, version) = sc_cli::module::npm_package(&dir)?;
+            sc_module::load_module_by_name(catalog, &name)
+                .await?
+                .filter(|m| {
+                    m.version.as_deref() == Some(version.as_str())
+                        && m.location == location
+                        && modules.installer().is_installed(&name)
+                })
+        }
+        _ => None,
+    };
+    let module = match current {
+        Some(mut module) => {
+            let spec = modules
+                .modules()
+                .get(&module.name)
+                .map(|loaded| loaded.config_spec.clone())
+                .unwrap_or_default();
+            let granted = grant_all(&mut module)?;
+            let configured = sc_cli::module::apply_settings(
+                &mut module.configuration,
+                &spec,
+                &install.settings,
+            )?;
+            if granted || configured {
+                modules.update_module(&module).await?;
+                eprintln!(
+                    "feldspar: `{}` {} is already installed; updated its {}",
+                    module.name,
+                    module.version.as_deref().unwrap_or(""),
+                    match (granted, configured) {
+                        (true, true) => "permissions and settings",
+                        (true, false) => "permissions",
+                        _ => "settings",
+                    }
+                );
+            } else {
+                eprintln!(
+                    "feldspar: `{}` {} is already installed from {location}; nothing changed",
+                    module.name,
+                    module.version.as_deref().unwrap_or("")
+                );
+            }
+            module
+        }
+        None => {
+            let mut module = modules
+                .install_module(
+                    language,
+                    sc_module::ModuleSource::Local,
+                    &location,
+                    |module| grant_all(module).map(|_| ()),
+                )
+                .await?;
+            // The settings form is the loaded package's, so settings are typed
+            // against it once it has loaded.
+            if !install.settings.is_empty() {
+                let spec = modules
+                    .modules()
+                    .get(&module.name)
+                    .map(|loaded| loaded.config_spec.clone())
+                    .unwrap_or_default();
+                if sc_cli::module::apply_settings(
+                    &mut module.configuration,
+                    &spec,
+                    &install.settings,
+                )? {
+                    modules.update_module(&module).await?;
+                }
+            }
+            eprintln!(
+                "feldspar: installed `{}` {} from {location} — a running server loads it on \
+                 SIGHUP",
+                module.name,
+                module.version.as_deref().unwrap_or("")
+            );
+            module
+        }
+    };
+    module_report(modules, &module.name, install.json)
+}
+
+/// Say how a module stands after a change — its permissions and whether it
+/// loaded — and fail when it did not load, so a script stops there.
+fn module_report(modules: &sc_server::ModuleServices, name: &str, json: bool) -> Result<()> {
+    let set = modules.modules();
+    let loaded = set
+        .get(name)
+        .ok_or_else(|| sc_error::Error::msg(format!("`{name}` is not in the loaded set")))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&loaded_module_json(loaded)).unwrap_or_default()
+        );
+    }
+    let sentences = loaded.module.permissions.sentences();
+    eprintln!(
+        "feldspar: `{name}` {}",
+        match sentences.is_empty() {
+            true => "may reach nothing outside its own package".to_owned(),
+            false => sentences.join("; "),
+        }
+    );
+    for issue in &loaded.issues {
+        eprintln!("feldspar: `{name}`: {issue}");
+    }
+    match loaded.is_loaded() {
+        true => Ok(()),
+        false => Err(sc_error::Error::invalid(format!(
+            "`{name}` is installed but did not load: {}",
+            loaded.issues.join("; ")
+        ))),
+    }
+}
+
+/// One module as `module list --json` reports it: the row (secrets redacted),
+/// whether it loaded, what is wrong with it, and the routes it serves.
+fn loaded_module_json(loaded: &sc_module::LoadedModule) -> serde_json::Value {
+    let m = &loaded.module;
+    serde_json::json!({
+        "id": m.id.0,
+        "name": m.name,
+        "language": m.language.as_str(),
+        "source": m.source.as_str(),
+        "location": m.location,
+        "version": m.version,
+        "configuration": serde_json::Value::Object(sc_module::redacted_configuration(loaded)),
+        "permissions": serde_json::Value::Object(m.permissions.to_json()),
+        "loaded": loaded.is_loaded(),
+        "issues": loaded.issues,
+        "routes": loaded
+            .manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .routes
+                    .iter()
+                    .map(|route| sc_module::route_path(&m.name, &route.url))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+/// `feldspar app tables (add|remove|list) --app SUBDOMAIN [TABLE…] [--json]`:
+/// the tables an application reaches, changed by the rule
+/// `update_application`'s `tables` section uses (`sc_app::change_app_tables`)
+/// — so a seed script names tables rather than editing
+/// `_fd_applications.tables` as JSON. Idempotent: adding a connected table or
+/// removing one that is not changes nothing.
+///
+/// A running server serves the change after `SIGHUP`, which reloads every
+/// application row.
+async fn app_tables_command(args: &[String]) -> Result<()> {
+    let (db, rest) = DbConfig::extract(args)?;
+    let (base_domain, rest) = take_option(rest, "--base-domain")?;
+    let (file_stores, rest) = extract_file_stores(rest)?;
+    let parsed = sc_cli::app::parse_tables(&rest)?;
+
+    let (catalog, mut app) =
+        open_app(&parsed.app, &db, &file_stores, base_domain.as_deref()).await?;
+    sc_log::set_log_sql(false);
+
+    let change = match parsed.action {
+        sc_cli::app::TriggersAction::List => None,
+        sc_cli::app::TriggersAction::Add(add) => Some(sc_app::TableChange {
+            add,
+            ..Default::default()
+        }),
+        sc_cli::app::TriggersAction::Remove(remove) => Some(sc_app::TableChange {
+            remove,
+            ..Default::default()
+        }),
+    };
+    if let Some(change) = change {
+        if sc_app::change_app_tables(&catalog, &mut app, &change)? {
+            app = save_application(&catalog, &app).await?;
+            // The generated client is typed from the endpoints, which include
+            // the exposed triggers — so an app exposing any is rewritten with
+            // the live trigger set, as `app triggers` rewrites it, rather than
+            // losing their methods.
+            let triggers = match app.triggers.is_empty() {
+                true => None,
+                false => {
+                    let config = ServerConfig::from_args(serving_defaults(&db).iter())?;
+                    sc_dns::init()?;
+                    let Services { triggers, .. } =
+                        install_services(&catalog, &config, &ServiceManager::default()).await?;
+                    Some(triggers)
+                }
+            };
+            match sc_app::emit_app_client(&catalog, &app, triggers.as_ref()).await {
+                Ok(written) if written.is_empty() => {}
+                Ok(written) => eprintln!("feldspar: rewrote {}", written.join(", ")),
+                Err(e) => eprintln!(
+                    "feldspar: saved, but the generated client could not be rewritten: {e}"
+                ),
+            }
+            eprintln!("feldspar: saved; a running server serves the change after SIGHUP");
+        } else {
+            eprintln!("feldspar: `{}` unchanged", app.subdomain);
+        }
+    }
+
+    let tables: Vec<&str> = app.tables.iter().map(|t| t.0.as_str()).collect();
+    if parsed.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tables).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    if tables.is_empty() {
+        println!("application `{}` reaches no tables", app.subdomain);
+    }
+    for table in tables {
+        println!("{table}");
+    }
+    Ok(())
 }
 
 /// `feldspar app triggers (add|remove|list) --app SUBDOMAIN [NAME…] [--json]`:
@@ -1685,6 +2222,9 @@ fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, 
 
 /// `feldspar backup FILE [database flags]` — the zip Settings → Backup
 /// downloads, with everything ticked except the TLS settings, written to FILE.
+/// A FILE of `-` writes it to stdout instead, with no file on disk on the way:
+/// `feldspar backup - | aws s3 cp - s3://…` streams it in the memory one page
+/// of rows takes, however large the installation.
 ///
 /// The TLS settings are left out because they belong to the machine rather than
 /// to the installation: a certificate, its private key and the names it covers
@@ -1694,19 +2234,45 @@ fn file_argument(command: &str, args: &[String]) -> Result<(std::path::PathBuf, 
 ///
 /// Nothing is remembered: the dialog's stored selection is the dialog's, and a
 /// script's backup is not the admin saying what the next one should include.
+///
+/// `--password` or `FELDSPAR_BACKUP_PASSWORD` encrypts it with AES-256 (see
+/// [`sc_cli::backup_password`]).
 async fn backup_command(args: &[String]) -> Result<()> {
-    let (file, rest) = file_argument("backup", args)?;
+    let (file, rest) = match args.split_first() {
+        Some((first, rest)) if first == "-" => (None, rest.to_vec()),
+        _ => {
+            let (file, rest) = file_argument("backup", args)?;
+            (Some(file), rest)
+        }
+    };
+    let (password, rest) = sc_cli::backup_password::extract(rest)?;
     let (db, leftover) = DbConfig::extract(rest)?;
     if let Some(unknown) = leftover.first() {
         return Err(sc_error::Error::config(format!(
             "unknown backup argument `{unknown}`"
         )));
     }
+    // gzip's rule: a zip is not something to print on a terminal, and a `-`
+    // whose pipe was forgotten would otherwise do it.
+    if file.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Err(sc_error::Error::config(
+            "backup - writes the zip to stdout, which is a terminal: \
+             redirect or pipe it (feldspar backup - > site.zip)",
+        ));
+    }
+    // Asked for before the database is connected to, so a mistyped
+    // confirmation costs nothing.
+    let password = sc_cli::backup_password::for_backup(
+        password,
+        std::env::var(sc_cli::backup_password::PASSWORD_ENV).ok(),
+    )?;
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
     }
     let catalog = connect_catalog(&db).await?;
+    // Off whatever Settings → Development says: the echo goes to stdout, which
+    // under `-` is the zip.
     sc_log::set_log_sql(false);
     // A file store's bytes are read through its connection, so a store that is
     // not connected comes out as its definition with no files.
@@ -1717,13 +2283,34 @@ async fn backup_command(args: &[String]) -> Result<()> {
         ssl: false,
         ..sc_server::BackupSelection::everything(&available)
     };
-    let size = write_whole(&file, |out| {
-        sc_server::write_backup_to(&catalog, &selection, out)
-    })
-    .await?;
+    let size = match &file {
+        Some(file) => {
+            write_whole(file, |out| {
+                sc_server::write_backup_to(&catalog, &selection, password.as_deref(), out)
+            })
+            .await?
+        }
+        None => {
+            sc_server::write_backup_stream(
+                &catalog,
+                &selection,
+                password.as_deref(),
+                std::io::stdout(),
+            )
+            .await?
+        }
+    };
     eprintln!(
-        "feldspar: wrote {} ({} tables, {} applications, {} file stores, {})",
-        file.display(),
+        "feldspar: wrote {}{} ({} tables, {} applications, {} file stores, {})",
+        file.as_ref().map_or_else(
+            || "the backup to stdout".to_owned(),
+            |f| f.display().to_string()
+        ),
+        if password.is_some() {
+            ", protected by a password"
+        } else {
+            ""
+        },
         selection.tables.len(),
         selection.applications.len(),
         selection.file_stores.len(),
@@ -1791,15 +2378,25 @@ fn human_size(bytes: u64) -> String {
 ///
 /// A server already running on the database does not see the result until it
 /// is restarted: its catalog, mounts and trigger set were loaded at its boot.
+///
+/// A password-protected FILE is opened with `--password`,
+/// `FELDSPAR_BACKUP_PASSWORD`, or the password asked for at the terminal.
 async fn restore_command(args: &[String]) -> Result<()> {
     let (file, rest) = file_argument("restore", args)?;
+    let (password, rest) = sc_cli::backup_password::extract(rest)?;
     let (db, rest) = DbConfig::extract(rest)?;
     let config = ServerConfig::from_args(serving_defaults(&db).iter().chain(&rest))?;
 
     // The file before the database: one that is not a backup is refused before
-    // anything has been connected to, let alone written. It is read from where
-    // it is as the restore goes, never into memory whole.
-    let (contents, manifest) = sc_server::inspect_backup(&file)?;
+    // anything has been connected to, let alone written — and so is a wrong
+    // password. It is read from where it is as the restore goes, never into
+    // memory whole.
+    let password = sc_cli::backup_password::for_restore(
+        password,
+        std::env::var(sc_cli::backup_password::PASSWORD_ENV).ok(),
+        sc_server::backup_is_encrypted(&file)?,
+    )?;
+    let (contents, manifest) = sc_server::inspect_backup(&file, password.as_deref())?;
 
     if let Some(source) = db.source() {
         eprintln!("feldspar: database configured from {source}");
@@ -1827,7 +2424,8 @@ async fn restore_command(args: &[String]) -> Result<()> {
             .unwrap_or("at an unrecorded time"),
     );
     let selection = sc_server::BackupSelection::everything(&contents);
-    let report = sc_server::restore_backup(&catalog, &apps, &file, &selection).await?;
+    let report =
+        sc_server::restore_backup(&catalog, &apps, &file, password.as_deref(), &selection).await?;
     for line in &report.restored {
         println!("restored {line}");
     }
@@ -2352,11 +2950,19 @@ fn print_usage() {
         "                        [--method GET] --path /sub/path [--min-role N] \
          [--description TEXT]"
     );
-    eprintln!("                        [--param name:type[,name:type…]]… --sql TEXT|@FILE");
+    eprintln!("                        [--param name:type[,name:type…]]…");
+    eprintln!(
+        "                        [--language sql|javascript|python] --code TEXT|@FILE \
+         (or --sql)"
+    );
     eprintln!("  feldspar api list-queries --app SUBDOMAIN [--api MOUNT]");
     eprintln!("  feldspar api remove-query --app SUBDOMAIN [--api MOUNT] --name NAME");
-    eprintln!("  feldspar get-cfg [KEY] [database flags]");
+    eprintln!("  feldspar get-cfg [KEY] [--json] [database flags]");
     eprintln!("  feldspar set-cfg KEY [VALUE] [database flags]   (no VALUE: read it from stdin)");
+    eprintln!(
+        "  feldspar set-cfg --json [database flags] < settings.json   (several keys, one transaction)"
+    );
+    eprintln!("  feldspar set-cfg --unset KEY [database flags]");
     eprintln!("  feldspar agent eval SUITE [--model provider/model] [--strong P/M] [--cheap P/M]");
     eprintln!("                            [--task NAME]… [--out DIR] [--keep] [database flags]");
     eprintln!(
@@ -2383,6 +2989,10 @@ fn print_usage() {
     eprintln!("                      [--allow-applications|--no-allow-applications]");
     eprintln!("                      [--allow-modules|--no-allow-modules]");
     eprintln!("                      [--url ORIGIN] [--name NAME] [database flags]");
+    eprintln!(
+        "  feldspar mcp-token create --label TEXT --email EMAIL --routes-only [--expires-in-days N]"
+    );
+    eprintln!("                      (module routes only, as a user of any role)");
     eprintln!("  feldspar mcp-token list [--json] [database flags]");
     eprintln!("  feldspar build-agent --server URL [--token-file PATH] [--workspace DIR]");
     eprintln!("                      [--insecure-http] [--once]");
@@ -2401,8 +3011,25 @@ fn print_usage() {
     eprintln!(
         "  feldspar app triggers (add|remove|list) --app SUBDOMAIN [NAME...] [--json] [database flags]"
     );
-    eprintln!("  feldspar backup FILE [database flags]");
-    eprintln!("  feldspar restore FILE [database flags] [server flags]");
+    eprintln!(
+        "  feldspar app tables (add|remove|list) --app SUBDOMAIN [TABLE...] [--json] [database flags]"
+    );
+    eprintln!(
+        "  feldspar module install --local DIR [--python] [--grant-read PATH]... [--grant-write PATH]..."
+    );
+    eprintln!(
+        "                          [--grant-net HOST]... [--grant-env VAR]... [--setting KEY=VALUE]..."
+    );
+    eprintln!("                          [--force] [--json] [--modules-dir DIR] [database flags]");
+    eprintln!(
+        "  feldspar module grant NAME (--read|--write|--net|--env) VALUE [--revoke] [database flags]"
+    );
+    eprintln!("  feldspar module configure NAME KEY=VALUE... [database flags]");
+    eprintln!("  feldspar module list [--json] [database flags]");
+    eprintln!("  feldspar module remove NAME [database flags]");
+    eprintln!("  feldspar send-email --to ADDR --subject TEXT [database flags] < body");
+    eprintln!("  feldspar backup FILE|- [--password [P]] [database flags]");
+    eprintln!("  feldspar restore FILE [--password [P]] [database flags] [server flags]");
     eprintln!("  feldspar demo analytics [--replace] [database flags]");
     eprintln!("  feldspar cmdstan status [--cmdstan DIR]");
     eprintln!("  feldspar cmdstan install [--version V] [--dir D] [--jobs J]");
@@ -2495,7 +3122,13 @@ fn print_usage() {
        Settings → Backup downloads with every box ticked but SSL / TLS: the
        certificate, its key and the names it covers belong to this machine.
        The file's directory must exist; a FILE already there is replaced only
-       once the new one is complete.
+       once the new one is complete. A FILE of - writes the zip to stdout
+       instead, with no temporary file (feldspar backup - | aws s3 cp - …).
+       --password P, or the FELDSPAR_BACKUP_PASSWORD environment variable,
+       encrypts every entry with AES-256 (WinZip AES), which 7-Zip and other
+       standard tools open with the same password; --password with no value
+       asks for it. A password on the command line is visible to other users
+       of the machine (ps) — prefer the prompt or the variable.
 
   restore: restores everything in FILE — a backup from `feldspar backup`, from
        Settings → Backup, or from Saltcorn 1 — exactly as the Restore dialog
@@ -2505,7 +3138,9 @@ fn print_usage() {
        `serve` does to do it (modules are reinstalled, applications built), so
        give it the server flags the server is started with, or the same
        --environment. A server already running on the database loads the
-       result when it is restarted.
+       result when it is restarted. A password-protected backup is opened
+       with --password P, or FELDSPAR_BACKUP_PASSWORD, or the password asked
+       for at the terminal.
 
   app list: every application with its framework and the project directory
        its source is in on this machine; --json prints an array of

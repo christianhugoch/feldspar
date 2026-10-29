@@ -83,6 +83,15 @@ pub const BACKUP_SCHEDULES: &str = "backup_schedules";
 /// stale copy (the arrangement a trigger's `last_run_at` has).
 pub const BACKUP_SCHEDULE_STATUS: &str = "backup_schedule_status";
 
+/// When the server started, most recent last: a list of RFC 3339 instants
+/// from the last [`STARTUP_HISTORY_DAYS`] days, written at every boot. What a
+/// module's route reads as v1's `EventLog` startups — how often the server
+/// restarted (`@saltcorn/heartbeat-monitor`).
+pub const STARTUP_HISTORY: &str = "startup_history";
+
+/// How many days of [`STARTUP_HISTORY`] are kept.
+pub const STARTUP_HISTORY_DAYS: i64 = 7;
+
 /// Which LLM provider is the installation's default, by id: the one a new
 /// application's builder agent, a translation and an eval call when nothing
 /// names a provider.
@@ -103,7 +112,6 @@ pub fn config_sections() -> &'static [ConfigSection] {
             crate::development::development_section(),
             crate::authentication::authentication_section(),
             crate::localisation::localisation_section(),
-            crate::maps::maps_section(),
         ]
     })
 }
@@ -137,6 +145,10 @@ pub fn internal_defs() -> &'static [ConfigDef] {
                     .label("What each automated backup last did"),
             ),
             ConfigDef::new(
+                FormField::new(STARTUP_HISTORY, sc_types::BasicType::Json)
+                    .label("When the server started"),
+            ),
+            ConfigDef::new(
                 FormField::new(DEFAULT_LLM_PROVIDER, sc_types::BasicType::Text)
                     .label("Default LLM provider"),
             ),
@@ -150,6 +162,10 @@ pub fn internal_defs() -> &'static [ConfigDef] {
                 .label("External identity providers"),
             ),
         ]
+        .into_iter()
+        // The base maps: the Analytics UI's Settings page edits them, not a tab.
+        .chain(crate::maps::map_defs())
+        .collect()
     })
 }
 

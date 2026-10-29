@@ -50,6 +50,7 @@ mod lsp;
 mod mcp;
 mod mcp_servers;
 mod models;
+mod module_routes;
 mod modules;
 mod oauth;
 mod observe;
@@ -61,6 +62,7 @@ mod security;
 mod serve;
 mod streams;
 mod systemd;
+mod table_rename;
 mod terminal;
 // Build targets as background jobs the admin UI polls (§13.3).
 pub mod public_datasets;
@@ -77,7 +79,8 @@ pub use apps::{AppMounts, MountedApp, build_and_mount, mount_all, subdomain_in, 
 pub use backup::{
     Available as BackupContents, BACKUP_CREATE_ROUTE, BACKUP_UPLOAD_ROUTE, BackupPreferences,
     BackupScheduler, RestoreReport, Selection as BackupSelection, available as backup_available,
-    inspect as inspect_backup, restore_backup, start_backup_scheduler, write_backup_to,
+    inspect as inspect_backup, is_encrypted as backup_is_encrypted, restore_backup,
+    start_backup_scheduler, write_backup_stream, write_backup_to,
 };
 pub use oauth::{
     BINDING_COOKIE as OAUTH_BINDING_COOKIE, CALLBACK_ROUTE as OAUTH_CALLBACK_ROUTE,

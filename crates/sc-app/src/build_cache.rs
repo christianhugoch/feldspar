@@ -227,6 +227,13 @@ impl ScratchIndex {
     /// Copy `index`, or start empty in a repository that has none yet. The copy
     /// sits beside the real one, so it is on the same filesystem and inside a
     /// directory git already owns.
+    ///
+    /// The copy keeps the original's mtime. Git trusts an entry whose stat data
+    /// matches the file only when the file is older than the index; a file
+    /// written in the same second as the index is "racily clean" and re-read.
+    /// A copy stamped *now* looks newer than such a file, so a same-size edit
+    /// made in the second the index was written would keep its old blob and
+    /// its old key.
     fn new(index: &Path) -> Option<ScratchIndex> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -236,10 +243,18 @@ impl ScratchIndex {
             "feldspar-build-index-{}-{nanos}",
             std::process::id()
         ));
+        let scratch = ScratchIndex(path);
         if index.is_file() {
-            std::fs::copy(index, &path).ok()?;
+            let modified = std::fs::metadata(index).ok()?.modified().ok()?;
+            std::fs::copy(index, &scratch.0).ok()?;
+            std::fs::File::options()
+                .write(true)
+                .open(&scratch.0)
+                .ok()?
+                .set_modified(modified)
+                .ok()?;
         }
-        Some(ScratchIndex(path))
+        Some(scratch)
     }
 
     fn path(&self) -> &Path {
@@ -410,6 +425,34 @@ mod tests {
             .output()
             .unwrap();
         assert!(staged.stdout.is_empty(), "{staged:?}");
+    }
+
+    #[tokio::test]
+    async fn a_same_size_edit_in_the_second_of_the_commit_changes_the_key() {
+        // Git's stat check is to the second, so an edit that keeps the size and
+        // lands in the second the index was written is caught only by its
+        // racy-clean rule — which a scratch index stamped later would defeat.
+        let unix_now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        };
+        let start = unix_now();
+        tokio::time::sleep(std::time::Duration::from_nanos(
+            1_000_000_000 - u64::from(start.subsec_nanos()),
+        ))
+        .await;
+        let Some(tmp) = repo("racy") else { return };
+        let root = &tmp.0;
+        let clean = key(root).await;
+        std::fs::write(root.join("web/src/main.ts"), "two").unwrap();
+        let second = unix_now().as_secs();
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        if second != start.as_secs() + 1 {
+            eprintln!("skipping: the setup did not fit in one second");
+            return;
+        }
+        assert_ne!(key(root).await, clean);
     }
 
     #[tokio::test]

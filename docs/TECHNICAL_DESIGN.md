@@ -74,6 +74,8 @@ feldspar/
 │  │                              #    `core` catalogues. Layer 0 because sc-auth and sc-types
 │  │                              #    must be able to translate a sentence (§16.1); the
 │  │                              #    tree-sitter extractor is behind an `extract` feature
+│  ├─ sc-help/                    # 0. admin UI help topics: markdown templates filled in with
+│  │                              #    the screen's context, rendered to HTML
 │  ├─ sc-query/                   # 1. universal query language (enum AST) + SQL rendering trait
 │  ├─ sc-repomap/                 # 1. the coding agent's repo map: tree-sitter tags, personalised
 │  │                              #    PageRank, rendering to a token budget. No store, no deps
@@ -202,6 +204,8 @@ graph TD
   server --> coreact["sc-core-actions"]
   server --> coretraits["sc-core-traits"]
   server --> pg["sc-db-postgres"]
+  server --> help["sc-help"]
+  help --> error
   coretraits --> agent["sc-agent"]
   coretraits --> app["sc-app"]
   coretraits --> repomap["sc-repomap"]
@@ -286,6 +290,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-query` | `sc-error` |
 | `sc-repomap` | — (nothing in the workspace) |
 | `sc-i18n` | `sc-error` |
+| `sc-help` | `sc-error` |
 | `sc-types` | `sc-error` `sc-i18n` `sc-query` |
 | `sc-db` | `sc-error` `sc-query` |
 | `sc-db-postgres` | `sc-db` `sc-error` `sc-log` `sc-query` |
@@ -314,7 +319,7 @@ The complete direct dependencies, in layer order (dev-dependencies excluded):
 | `sc-module` | `sc-action` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-core-actions` `sc-db` `sc-error` `sc-expr` `sc-files` `sc-log` `sc-model` `sc-query` `sc-stream` `sc-types` `sc-viewpattern` |
 | `sc-python` | `sc-action` `sc-catalog` `sc-core-actions` `sc-error` `sc-expr` `sc-model` `sc-module` `sc-types` |
 | `sc-core-traits` | `sc-action` `sc-agent` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-db` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-llm` `sc-log` `sc-mcp` `sc-query` `sc-repomap` `sc-types` |
-| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-mcp` `sc-model` `sc-module` `sc-python` `sc-query` `sc-ratelimit` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
+| `sc-server` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-core-actions` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-email` `sc-error` `sc-expr` `sc-files` `sc-help` `sc-i18n` `sc-live` `sc-llm` `sc-log` `sc-mcp` `sc-model` `sc-module` `sc-python` `sc-query` `sc-ratelimit` `sc-stan` `sc-stream` `sc-types` `sc-viewpattern` `sc-workflow` |
 | `sc-cli` | `sc-action` `sc-agent` `sc-analytics` `sc-api` `sc-app` `sc-auth` `sc-catalog` `sc-config` `sc-config-file` `sc-core-traits` `sc-dataset` `sc-db` `sc-db-postgres` `sc-db-sqlite` `sc-dns` `sc-error` `sc-files` `sc-i18n` `sc-llm` `sc-log` `sc-mcp` `sc-query` `sc-server` `sc-stan` `sc-types` `sc-viewpattern` |
 
 Four things the graph is worth reading for:
@@ -1130,10 +1135,13 @@ so a `min_role` of 100 — on a table operation, an application's custom query o
 trigger — admits them: no login, no session, and no CSRF token. It does not mean "a logged-in
 user whose role is 100". `AuthRequirement::admits` states the rule once, and the REST
 provider, the admin dispatcher and the MCP endpoint tools all ask it. A mutating request to
-such an endpoint that fails the CSRF check is not refused; it is served as the anonymous caller
-it then is. Its session cookie is not read, and no session is started or ended, so a
-cross-site page that makes the browser send the cookie gets nothing an anonymous caller would
-not. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
+such an endpoint that fails the CSRF check and carries **no session cookie** is not refused; it
+is served as the anonymous caller it then is, and no session is started. One that carries a
+session cookie but no valid token (a stale token in an old tab, a native app that lost its token)
+is refused with 403 and handed the token, as a protected endpoint would refuse it. Its client
+retries as the signed-in user instead of silently running as nobody (a 401 from a query the user
+can plainly see). The session cookie is `SameSite=Strict`, so a cross-site page cannot make the
+browser send it in the first place. Everything stricter keeps the check, and so do the `Public` auth endpoints (`login`,
 `signup`, …) and an application's own UI pages.
 
 **One language, parsed once, evaluated two ways.** The formula lives in the `sc-expr` crate
@@ -5010,10 +5018,12 @@ is the admin socket's rule for a closed connection. A turn that keeps running fo
 has gone, and can be rejoined later, is left for when it is needed. It would need the turn detached
 from the request, plus the message bus to rejoin it from another node.
 
-**Whose a run is.** A run started here carries `attributes.app`, `attributes.app_mode` (`chat` |
-`prompt`) and `attributes.owner`. The owner is `user:<id>`, or for an anonymous caller a hash of
-the browser's cookie, as an upload's uploader is. Only the owner, in the same application and
-mode, sees a run through these routes. Anybody else gets the 404 a missing run gets. Prompt runs are
+**Whose a run is.** A run started here carries `attributes.app_mode` (`chat` | `prompt`) and
+`attributes.owner`. The owner is `user:<id>`, or for an anonymous caller a hash of the browser's
+cookie, as an upload's uploader is. A run belongs to its owner and its agent, not to the
+application it was started in: any application that exposes the agent lists, reads, continues,
+renames and deletes the owner's runs, so a chat panel can follow a user across a suite of
+applications. Only the owner, in the same mode, sees a run through these routes. Anybody else gets the 404 a missing run gets. Prompt runs are
 kept for audit and are never listed as conversations. A turn may not start, and a run may not be
 renamed or deleted, while the run is `running` (409): the turn writes the row after every step and
 would undo the change. Deleting or renaming an agent that an application exposes is refused, naming
@@ -6062,6 +6072,14 @@ a minute and what makes it correct to send *after* building by hand. The per-app
 is the boot rule: an app whose output directory is missing is reported and keeps serving what
 it was serving, and the timings are logged, because the question a reload has to answer is
 how long the caller waits before looking.
+
+It reloads the **modules** as well, but only when `_fd_modules` no longer matches the rows the
+loaded set was loaded from (`ModuleServices::reload_if_changed`): `feldspar module install|
+grant|configure|remove` runs the Modules tab's own `ModuleServices` methods in its own process,
+and the signal is how the server learns of it. Conditional, because a module reload restarts
+every module's background services, and a developer's `npm run build && pkill -HUP` must not
+hang up a module's IMAP connection each time. An install stamps `installed_at` on the row, so a
+reinstall of the same version is still a changed row.
 
 A signal rather than an endpoint because of who sends it: a shell in the application's
 project directory, belonging to a developer or to a coding agent, with no session and no
@@ -10397,7 +10415,10 @@ a map classifies by its style (§14.7), not by binning. A **Geometry** picker li
 is dragged into a report as a `map` panel, and **Open in map** makes a Map workspace of it
 (§14.7).
 
-**The base map** is a setting: Settings → Maps (`sc_config::maps`) holds a MapLibre style URL
+**The base map** is a setting of the Analytics UI's own, not a tab of the admin UI's settings
+screen: its Settings page (`#/settings`, the admin host's admin only) edits it through
+`mapSettings`/`saveMapSettings`, and `sc_config::maps` declares the keys as internal (on no
+generic settings form) and checks a save as one act (`save_map_settings`). It holds a MapLibre style URL
 for a light page, one for a dark page, and further hosts. The default is OpenFreeMap's Positron
 and Dark, which need no key and serve style, tiles, glyphs and sprites from one host. An empty
 style means no base map: the layers are drawn on the page's background. `MapView` fetches the
@@ -10406,11 +10427,11 @@ fonts the style's glyphs have (the first plain `text-font` among its layers). An
 cannot be reached should leave the data on a plain background with a sentence, not a grey box.
 
 **The policy.** MapLibre fetches a style, its tiles, glyphs and sprites, so the Analytics UI's
-`connect-src` and `img-src` name the hosts of Settings → Maps (`MapSettings::hosts`). They are
+`connect-src` and `img-src` name the hosts of Analytics → Settings → Base maps (`MapSettings::hosts`). They are
 read per response, as the MCP switches are, so a changed base map is allowed on the next page
 load. Because a host goes into a header, it is parsed, not trusted. `origin_of` accepts an
 `http` or `https` origin of letters, digits, dots and hyphens (or a bracketed IPv6 address)
-with a numeric port. `updateSettings` refuses anything else by name, and
+with a numeric port. `saveMapSettings` refuses anything else by name, and
 `analytics_content_security_policy` leaves out any entry that is not exactly such an origin.
 The one other relaxation is `blob:` in `img-src`, where MapLibre decodes images through object
 URLs. **The worker** is not a `blob:`. MapLibre 6 builds one from its own module file unless
@@ -10516,7 +10537,7 @@ with a sentence pointing at a condition. Two `Geo` functions arrived for this:
 given, a WMS as a `GetMap` in EPSG:3857 with `{bbox-epsg-3857}`, an ArcGIS map service as
 `…/tile/{z}/{y}/{x}`. The browser may load images only from the hosts the policy names
 (§14.6), so a service on another host is shown with a warning and **Allow it**, which calls
-`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Settings → Maps' further
+`allowMapHost`: the URL's origin, parsed by `origin_of`, is added to Analytics → Settings → Base maps' further
 hosts (`sc_config::allow_map_host`), and the page is reloaded for the new policy. The admin is
 the only one who can call it: it is not one of the endpoints an Analytics application exposes
 (§14.9). `mapSettings` answers
@@ -10898,7 +10919,7 @@ before the framework, whose document would otherwise answer. The dispatch is the
 dispatcher's, with three differences:
 
 1. **Only `APP_ENDPOINTS`.** These are the Analytics UI's endpoints minus what is the admin's
-   alone: models and their outputs, public datasets, Settings → Maps (`allowMapHost`). Anything
+   alone: models and their outputs, public datasets, Analytics → Settings → Base maps (`allowMapHost`). Anything
    else under `/api/` is a 404 there, as any endpoint an application does not expose is.
 2. **The application's role floor** replaces the admin's. The endpoints are declared admin-only
    for the admin host, and here the floor is `min_role`. `authStatus`, `login` and `logout` keep
@@ -13012,6 +13033,60 @@ has been answered. Where a provider differs in a way the module shows, the drive
 (`renewalPaymentsKnowTheirRow`: a Stripe renewal's PaymentIntent names no subscription). The fake-only copies of
 those scenarios were removed. An adapter added later is a driver and a simulation, run through the
 same suite.
+### 15.1g v1 plugin routes (`sc_module::routes`, `sc-server/src/module_routes.rs`)
+
+A v1 plugin's `routes` export, `[{ method, url, callback, apiToken?, noCsrf? }]` (or a function of
+its configuration returning one), is loaded. In v1 each route is mounted at its `url` on the
+tenant's own site. Here a module is installed once for every application, and a root URL would
+claim that path in every application. So a module's routes are served **on the admin host only**
+(`resolve_app` → `Admin`), under `/_feldspar/routes/<module><url>`, where `<module>` is the
+webhook segment (`hook_segment`). For example, `@saltcorn/heartbeat-monitor`'s `/heartbeat` is
+`/_feldspar/routes/heartbeat-monitor/heartbeat`. There is no per-application mount. A plugin
+whose v1 URL mattered is told its new one; the installed card lists each route's path.
+
+**Matching is the server's.** `url` is literal segments and `:param`s; Express's other pattern
+syntax is an issue on the card. The server matches before it calls the module (`match_route`,
+404, or 405 with `Allow`), because both flags are properties of the route a request reaches.
+
+**A route runs as whoever calls.** This is unlike a webhook. The caller is an API token's user
+when the request carries `Authorization: Bearer` (a bad token is a 401, never the public), else
+the admin host's session user, else nobody. `apiToken: true` refuses nobody with a 401, as v1's
+middleware does. A `POST` passes the CSRF check unless the route says `noCsrf`. In that case
+`open_to_public` lets a cookie-less request through as the anonymous caller, as it does a webhook.
+The module's `Table` reads and writes as the caller, like a view's (`TableHost::viewer_only`).
+
+**The worker side.** One `route_call` per request. `callback(req, res, next)` gets Express's
+shape: `req.user` (the row with `role_id`), `params`, `query`, `body` (JSON and urlencoded forms
+parsed, as body-parser does), `rawBody`, `headers` (cookie and credential withheld), `path` below
+the prefix, `originalUrl`, and `req.res`/`res.req`. `res` provides `status`, `set`/`header`,
+`type`, `json`, `send`, `sendStatus`, `redirect`, `write`/`end` and `locals`. Any other member of
+`res` is a named stub, so `res.render` and v1's `res.sendWrap` fail saying what they are. The
+call answers once `res` is ended, not once the callback returns, because a callback may answer
+from a promise it did not return. Calls are bounded like a webhook's: 1 MiB body, 600 requests a
+minute per address, and the action wall clock. A throw is a 500 and the `error` event.
+
+**What a route reads of the installation** (the `system` ask surface, `SystemAsks`, carried only
+by a route's call). This is what `heartbeat-monitor` needs:
+- `require("systeminformation")` is answered by the host, not the npm package, which reads `/proc`
+  and runs `df` outside a module's sandbox. Only `fsSize` (one entry: the filesystem holding the
+  modules directory, by `statvfs`), `mem` (`/proc/meminfo`, `active = total - available`) and
+  `currentLoad` (`/proc/stat`, measured from the previous call or over 250 ms) are answered, in
+  the package's shapes. Every other member is a named stub.
+- v1's `EventLog.find` reads the server's startups. Each boot records one in the internal config
+  key `startup_history`, keeping 7 days (`fire_startup`).
+- v1's `MetaData.find` reads the `Backup`/`Success` records, one per automated backup that has
+  succeeded (`backup_schedule_status`).
+- A route's `getState().getConfig("auto_backup_frequency")` is the most frequent schedule's, by
+  v1's name (`Daily` | `Weekly` | `Monthly` | `Never`). It crosses with the call because v1's
+  `getConfig` is synchronous.
+
+The two models filter in the worker by v1's `where` (equality and `gt`/`gte`/`lt`/`lte` on
+numbers and dates) and select options. Any other operator is refused by name.
+
+**Payments stays on webhooks.** Its callbacks come from a provider's servers. They need the raw
+bytes for the signature, no session or credentials, the module's own authority over its own
+tables, and one stable URL on every host. A v1 route provides none of these.
+
 ### 15.2 Python: one interpreter, code bodies and plugin modules (`sc-python`)
 
 The second adapter. It is small for a reason that is structural rather than lucky: the JavaScript

@@ -444,8 +444,14 @@ pub async fn apply_keeping_triggers(
     tx: &mut dyn sc_db::Transaction,
     change: &SchemaChange,
 ) -> Result<()> {
-    let Some(table) = altered_table(change) else {
-        return tx.apply_schema(change).await;
+    // A renamed table keeps its triggers under the old name, recording the old
+    // name: they are dropped by that name and generated again under the new one.
+    let (table, after) = match change {
+        SchemaChange::RenameTable { from, to } => (from.as_str(), to.as_str()),
+        other => match altered_table(other) {
+            Some(table) => (table, table),
+            None => return tx.apply_schema(change).await,
+        },
     };
     let triggers = tx
         .query(&Statement::raw(
@@ -466,7 +472,7 @@ pub async fn apply_keeping_triggers(
     let columns = tx
         .query(&Statement::raw(
             "SELECT name, type, pk FROM pragma_table_info($1) ORDER BY cid",
-            vec![Value::Text(table.to_owned())],
+            vec![Value::Text(after.to_owned())],
         ))
         .await?
         .try_collect()
@@ -487,7 +493,7 @@ pub async fn apply_keeping_triggers(
         .iter()
         .map(|row| (text(row, "name"), text(row, "type")))
         .collect();
-    tx.batch(&enable_sql(table, pk, &stored)).await
+    tx.batch(&enable_sql(after, pk, &stored)).await
 }
 
 #[cfg(test)]

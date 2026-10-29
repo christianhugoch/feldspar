@@ -84,8 +84,8 @@ export function landing(app: AppInfo | null, route: Route): Route {
 }
 
 /** Whether `app` shows the screen `route` names. The unrestricted UI shows
- * everything; an application never shows a model; a fixed one shows its
- * workspaces and the front page listing them, and no dataset. */
+ * everything; an application never shows a model or the settings; a fixed one
+ * shows its workspaces and the front page listing them, and no dataset. */
 export function shows(app: AppInfo | null, route: Route): boolean {
   if (!app) return true;
   switch (route.name) {
@@ -102,6 +102,7 @@ export function shows(app: AppInfo | null, route: Route): boolean {
     case "newModel":
     case "compareModels":
     case "fit":
+    case "settings":
       return false;
   }
 }

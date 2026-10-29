@@ -26,7 +26,8 @@ import { I18nProvider, T, useT } from "./i18n";
 import { FitRedirect, ModelCompare } from "./models/ModelCompare";
 import { ModelEditor } from "./models/ModelEditor";
 import { SplitView, usePane } from "./panes";
-import { layoutHash, parseLayout, type Layout, type Route } from "./router";
+import { layoutHash, parseLayout, routeHash, type Layout, type Route } from "./router";
+import { SettingsPage } from "./settings/SettingsPage";
 import { landing, readApplication, shows, ShellProvider, useShell, type ShellInfo } from "./shell";
 import { useTheme } from "./theme";
 import { WorkspaceFrame } from "./workspaces/WorkspaceFrame";
@@ -220,9 +221,20 @@ function Shell({ email }: { email: string }) {
         {application ? (
           <SignOutButton />
         ) : (
-          <a className="btn btn-sm btn-outline-secondary" href="/">
-            <T text="Admin" />
-          </a>
+          <>
+            <a
+              className={
+                layout.main.name === "settings" ? "btn btn-sm btn-secondary" : "btn btn-sm btn-outline-secondary"
+              }
+              href={routeHash({ name: "settings" })}
+              title={t("The Analytics UI's settings: the base maps")}
+            >
+              <T text="Settings" />
+            </a>
+            <a className="btn btn-sm btn-outline-secondary" href="/">
+              <T text="Admin" />
+            </a>
+          </>
         )}
       </header>
       <main className={split ? "an-main split" : "an-main"}>
@@ -267,6 +279,8 @@ function Page({ route: asked }: { route: Route }) {
       return <ModelCompare ids={route.ids} key={route.ids.join(",")} />;
     case "fit":
       return <FitRedirect id={route.id} key={route.id} />;
+    case "settings":
+      return <SettingsPage />;
     case "notFound":
       return (
         <div className="an-page">

@@ -274,3 +274,47 @@ async fn a_signup_is_unproven_until_a_link_is_redeemed_and_is_claimed_whole() ->
     assert!(user_has_password(&f.catalog, kept.id).await?);
     Ok(())
 }
+
+/// A password that cannot be written does not spend the link: an instance whose
+/// `users` table lacks `email_verified` (the 2026-10-26 upgrade, before
+/// `TABLES_RENAME.sql` was run) failed the write *after* deleting the token and
+/// setting the hash, so its holder saw an error, had a new password anyway, and
+/// needed a new link. Now none of it lands, and the same link works once a
+/// restart's bootstrap has added the column back.
+#[tokio::test]
+async fn a_failed_redemption_leaves_the_token_and_the_password_as_they_were() -> Result<()> {
+    let f = fixture().await?;
+    let InviteOutcome::Created { user, token } =
+        invite_user(&f.catalog, patient("pat@example.com"), 40).await?
+    else {
+        panic!("a new address is a new account");
+    };
+    let client = f._db.client().await?;
+    let alter = async |sql: &str| {
+        client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| sc_error::Error::database(e.to_string()))
+    };
+    alter(r#"ALTER TABLE "users" DROP COLUMN "email_verified""#).await?;
+
+    assert!(redeem_password_token(&f.catalog, &token, "pat-pw").await.is_err());
+    assert_eq!(count(&f.catalog, PASSWORD_TOKENS_TABLE).await?, 1);
+    assert!(!user_has_password(&f.catalog, user.id).await?);
+
+    // A restart puts the column back: bootstrap reconciles `users` additively.
+    let driver = Arc::new(PgDriver::from_pool(f._db.pool().clone()));
+    let catalog = Catalog::init(driver as Arc<dyn DatabaseDriver>).await?;
+    let users = bootstrap(&catalog).await?;
+    assert!(users.field("email_verified").is_some());
+
+    let redeemed = redeem_password_token(&catalog, &token, "pat-pw").await?;
+    assert_eq!(redeemed.map(|u| u.id), Some(user.id));
+    assert!(
+        authenticate(&catalog, "pat@example.com", "pat-pw")
+            .await?
+            .is_some()
+    );
+    assert_eq!(count(&catalog, PASSWORD_TOKENS_TABLE).await?, 0);
+    Ok(())
+}

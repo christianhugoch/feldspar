@@ -1,0 +1,8 @@
+{
+  "name": "@saltcorn-test/routes",
+  "version": "0.1.0",
+  "description": "A module that serves v1 routes, for the module-route tests.",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

@@ -84,6 +84,23 @@ pub fn render(dialect: &PgDialect, change: &SchemaChange) -> Result<String> {
                 dialect.quote_ident(column)
             )
         }
+        SchemaChange::RenameTable { from, to } => {
+            // The primary key's constraint is named `<table>_pkey` and does not
+            // follow the table, and `SetPrimaryKey` drops it by that name: so it
+            // is renamed too, when there is one by the old name.
+            format!(
+                "ALTER TABLE {} RENAME TO {}; DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_constraint \
+                 WHERE conname = {} AND conrelid = to_regclass({})) THEN \
+                 ALTER TABLE {} RENAME CONSTRAINT {} TO {}; END IF; END $$",
+                dialect.quote_ident(from),
+                dialect.quote_ident(to),
+                dialect.quote_literal(&format!("{from}_pkey")),
+                dialect.quote_literal(&dialect.quote_ident(to)),
+                dialect.quote_ident(to),
+                dialect.quote_ident(&format!("{from}_pkey")),
+                dialect.quote_ident(&format!("{to}_pkey")),
+            )
+        }
         SchemaChange::RenameColumn { table, from, to } => {
             format!(
                 "ALTER TABLE {} RENAME COLUMN {} TO {}",
@@ -790,6 +807,24 @@ mod tests {
                 if_exists: true,
             }),
             "ALTER TABLE \"member\" DROP COLUMN IF EXISTS \"note\""
+        );
+    }
+
+    #[test]
+    fn rename_table_takes_its_primary_key_constraint_along() {
+        let sql = render_ok(&SchemaChange::RenameTable {
+            from: "books".into(),
+            to: "titles".into(),
+        });
+        assert!(
+            sql.starts_with("ALTER TABLE \"books\" RENAME TO \"titles\";"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER TABLE \"titles\" RENAME CONSTRAINT \"books_pkey\" TO \"titles_pkey\""
+            ),
+            "{sql}"
         );
     }
 

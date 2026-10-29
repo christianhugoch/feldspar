@@ -165,7 +165,7 @@ async fn setup() -> sc_error::Result<Server> {
     let models = sc_server::install_models(&catalog, sc_model::DEFAULT_MAX_ROWS).await?;
     let dispatcher = install_triggers(&catalog, default_js_evaluator(), &agents, &models).await?;
 
-    let apps = Arc::new(AppMounts::new(catalog.clone()));
+    let apps = Arc::new(AppMounts::new(catalog.clone()).with_triggers(dispatcher.clone()));
     let router = build_router(
         &sc_api::admin_endpoints(),
         admin_handlers(catalog.clone(), apps),
@@ -575,5 +575,208 @@ async fn a_failing_action_costs_the_trigger_and_nothing_else() -> sc_error::Resu
     let message = runs[0].outcome.as_ref().unwrap_err().to_string();
     assert!(message.contains("the audit service is down"), "{message}");
     assert!(runs[1].fired(), "the second trigger still ran");
+    Ok(())
+}
+
+/// "Rename table" on the table page: the table keeps its rows under the new
+/// name, and what names it follows — a trigger on it still fires, a trigger
+/// writing into it writes into the renamed table, another table's key and a
+/// formula aggregating over it point at the new name, and so does an
+/// application's table subset. A name that is taken, and a built-in table, are
+/// refused.
+#[tokio::test]
+async fn renaming_a_table_moves_what_names_it() -> sc_error::Result<()> {
+    let mut server = setup().await?;
+    sc_catalog::bootstrap_table_meta(&server.catalog).await?;
+    sc_catalog::bootstrap_field_meta(&server.catalog).await?;
+    sc_app::bootstrap(&server.catalog).await?;
+    server.catalog.reload().await?;
+    server
+        .add_trigger(audit_action(
+            Trigger::new("audit_insert", EventKind::Insert, "insert_row").on("books"),
+            json!({ "what": "\"insert\"", "title": "row.title" }),
+        ))
+        .await?;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/authors/fields",
+            Some(json!({
+                "name": "book_count",
+                "type": "int8",
+                "kind": { "type": "calc", "expression": "booksↃauthor.length" }
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sc_app::save_application(
+        &server.catalog,
+        &sc_app::Application::new(
+            "Shelf",
+            "shelf",
+            sc_app::FrameworkRef::new("code")
+                .with("store", "apps")
+                .with("source", "web")
+                .with("output", "web/dist")
+                .with("command", "sh build.sh"),
+        )
+        .with_table(sc_catalog::TableId("books".to_owned())),
+    )
+    .await?;
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/rows",
+            Some(json!({ "title": "Dune", "author": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The table being written by a trigger, and the table a trigger is on.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/audit/rename",
+            Some(json!({ "name": "audit_log" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/books/rename",
+            Some(json!({ "name": "titles" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["table"]["name"], json!("titles"), "{body}");
+    let notes = body["notes"].to_string();
+    assert!(
+        notes.contains("is not rewritten"),
+        "code is said to be left: {notes}"
+    );
+
+    // The rows came along, and the old name is gone.
+    assert_eq!(server.client.rows("titles").await.len(), 1);
+    let (status, _) = server
+        .client
+        .send("GET", "/api/tables/books/rows", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The trigger is on `titles` now, and writes into `audit_log`.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/titles/rows",
+            Some(json!({ "title": "Emma", "author": 1 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let audit = server.client.rows("audit_log").await;
+    assert_eq!(audit.len(), 2, "both inserts were audited: {audit:?}");
+    assert_eq!(audit[1]["title"], json!("Emma"));
+
+    // The formula aggregating over the table names it by its new name, and
+    // still counts.
+    let (_, fields) = server
+        .client
+        .send("GET", "/api/tables/authors/fields", None)
+        .await;
+    let calc = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!("book_count"))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        calc["kind"]["expression"],
+        json!("titlesↃauthor.length"),
+        "{calc}"
+    );
+    let ada = server
+        .client
+        .rows("authors")
+        .await
+        .into_iter()
+        .find(|a| a["name"] == json!("Ada"))
+        .unwrap();
+    assert_eq!(ada["book_count"], json!(2), "{ada}");
+
+    // Renaming the table a key points at repoints the key.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/authors/rename",
+            Some(json!({ "name": "writers" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, fields) = server
+        .client
+        .send("GET", "/api/tables/titles/fields", None)
+        .await;
+    let author = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == json!("author"))
+        .unwrap()
+        .clone();
+    assert_eq!(author["kind"]["target_table"], json!("writers"), "{author}");
+
+    // The application's subset names the new table.
+    let app = sc_app::list_applications(&server.catalog)
+        .await?
+        .into_iter()
+        .find(|a| a.subdomain == "shelf")
+        .unwrap();
+    let tables: Vec<&str> = app.tables.iter().map(|t| t.0.as_str()).collect();
+    assert_eq!(tables, vec!["titles"]);
+
+    // Refused: a name that is taken, a built-in table, and a rename in a batch
+    // with other operations.
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/titles/rename",
+            Some(json!({ "name": "audit_log" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("already exists"), "{body}");
+    let (status, body) = server
+        .client
+        .send(
+            "POST",
+            "/api/tables/users/rename",
+            Some(json!({ "name": "people" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let err = sc_api::schema_edit::apply(
+        &server.catalog,
+        &[
+            sc_api::schema_edit::Operation::RenameTable {
+                table: "titles".into(),
+                to: "books".into(),
+            },
+            sc_api::schema_edit::Operation::DropTable {
+                table: "links".into(),
+            },
+        ],
+        &sc_api::schema_edit::ApplyOptions::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("batch of its own"), "{err}");
     Ok(())
 }

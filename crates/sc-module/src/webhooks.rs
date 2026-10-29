@@ -193,6 +193,7 @@ pub async fn run_webhook(
         roles: Some(&roles),
         credits: Some(&credits),
         oauth: None,
+        system: None,
     };
     let answer = host
         .run_webhook(module, webhook, request_json(&request), call)
@@ -202,7 +203,7 @@ pub async fn run_webhook(
 
 /// The request as the host script takes it: the body base64, the headers an
 /// object (a repeated header joined with `, `, as HTTP allows).
-fn request_json(request: &WebhookRequest) -> Json {
+pub(crate) fn request_json(request: &WebhookRequest) -> Json {
     let mut headers = Map::new();
     for (name, value) in &request.headers {
         let name = name.to_ascii_lowercase();
@@ -232,7 +233,7 @@ fn request_json(request: &WebhookRequest) -> Json {
 }
 
 /// The host script's `{ status, headers, body }` as a response.
-fn response_from(answer: &Json) -> Result<WebhookResponse> {
+pub(crate) fn response_from(answer: &Json) -> Result<WebhookResponse> {
     let status = answer
         .get("status")
         .and_then(Json::as_u64)

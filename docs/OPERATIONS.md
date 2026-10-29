@@ -915,6 +915,11 @@ what rebuilds the API providers. A table added, a column added or a custom SQL
 query saved by another process is being served by the time the signal returns.
 Applications whose row has gone are unmounted.
 
+It **reloads the modules** too, but only when `_fd_modules` changed since they
+were loaded — a module installed, upgraded, granted something, configured or
+removed by `feldspar module …` in another process (§8.2). A signal after a mere
+build reloads no module and restarts no module's background services.
+
 It **runs no bundler and no installer.** That is the point: the caller has just
 built, and re-running `npm install && npm run build` would duplicate the work that
 prompted the signal. An application that has never been built has nothing to load
@@ -997,7 +1002,7 @@ is installed synchronously, before the listeners are bound, and says so once at
 boot:
 
 ```
-feldspar: SIGHUP reloads the catalog and the applications in place — `pkill -HUP feldspar` after a build, no restart needed
+feldspar: SIGHUP reloads the catalog, the applications and changed modules in place — `pkill -HUP feldspar` after a build, no restart needed
 ```
 
 If that line is not in the journal, do not send the signal to production — either
@@ -1469,7 +1474,84 @@ feldspar set-cfg ssl_certificate < fullchain.pem   # multi-line values on stdin
 The value's type comes from the key and is checked before anything is written, so
 `set-cfg smtp_port yes` is a message and not a stored string. Secrets are redacted
 in the listing (`smtp_password=••••••••`) because a listing ends up in scrollback
-and in CI logs; naming the key prints it in full. **Nothing is restarted** — when a
+and in CI logs; naming the key prints it in full.
+
+A script that owns a whole section writes it in one go, and reads it back as JSON:
+
+```bash
+echo '{"smtp_host": "smtp.example.com", "smtp_port": 587, "smtp_security": "starttls",
+       "smtp_username": "alerts", "smtp_password": "…", "email_from": "alerts@example.com"}' \
+  | feldspar set-cfg --json
+feldspar set-cfg --unset smtp_certificate_name     # back to its default
+feldspar get-cfg --json                            # every key; secrets redacted, unset keys null
+feldspar get-cfg smtp_port --json                  # one value, as JSON
+```
+
+`set-cfg --json` checks **every** value before writing any, and writes them in one
+transaction, so a refused port leaves the old settings as they were. A string is
+accepted for a number or a yes/no key (`"587"`, `"yes"`), and `null` unsets a key.
+
+`send-email` sends one message through the stored SMTP settings, with the code the
+server sends mail with — so it tests exactly what a trigger's `send_email` would
+do. It needs the database and outbound SMTP and nothing else:
+
+```bash
+echo "All backups ran." | feldspar send-email --to ops@example.com --subject "Backup check"
+```
+
+#### Modules from a terminal
+
+The **Settings → Modules** tab's install, permissions, settings and delete, without
+a session. Each command runs the tab's own code in this process — `npm install`
+into the modules root, the `_fd_modules` row, a load to check it — so pass the
+same `--modules-dir` the server was started with (or none, if it uses the
+default), and run it as the user the server runs as. A running server picks the
+change up on `SIGHUP` (§6.1); no restart, no sessions lost:
+
+```bash
+feldspar module install --local /usr/local/lib/feldspar-hosted/modules/hosted-health \
+    --grant-read /run/feldspar-health --setting min_role=staff \
+  && pkill -HUP feldspar
+feldspar module grant hosted-health --net api.example.com       # or --read/--write/--env
+feldspar module grant hosted-health --net api.example.com --revoke
+feldspar module configure hosted-health min_role=admin
+feldspar module list [--json]
+feldspar module remove hosted-health
+```
+
+Every command is **idempotent**: installing the version already installed from
+that directory changes nothing (`--force` reinstalls anyway), a newer version is
+installed over it keeping its settings and grants, and granting what is granted
+or removing what is not installed is no error. A command fails if the module does
+not load afterwards, naming why.
+
+#### A token for module routes only
+
+An ordinary API token is an administrator's credential: the MCP server accepts it
+with that administrator's authority. A monitor that polls a module's route needs
+less. `--routes-only` mints a token that module routes (`/_feldspar/routes/…`)
+accept and the MCP server refuses, for a user of **any** role — so the module's
+own minimum-role setting decides, as it does for a signed-in user:
+
+```bash
+feldspar add-user monitor@example.com --role 80
+feldspar mcp-token create --label monitors --email monitor@example.com --routes-only
+```
+
+Only the MCP server and module routes accept API tokens; the admin HTTP API
+authenticates by session only.
+
+#### Tables of an application
+
+```bash
+feldspar app tables add --app managed user_settings backup_status
+feldspar app tables remove --app managed backup_status
+feldspar app tables list --app managed [--json]
+```
+
+The rule `update_application`'s `tables` section uses: a table that does not exist
+is refused, and adding a connected table changes nothing. A running server serves
+the change after `SIGHUP`. **Nothing is restarted** — when a
 setting takes effect is the setting's own business: the logging switches are
 immediate, the SMTP transport is read per message, and the TLS settings are read
 at boot.
@@ -1512,6 +1594,20 @@ provider is restored only where the target's file supplies a provider of that na
 them. The file is written beside its final name and renamed into place, so an
 interrupted backup leaves the previous file whole.
 
+A file name of `-` writes the zip to **stdout** instead, with no temporary file, so
+it can be streamed straight to object storage:
+
+```bash
+sudo -u feldspar feldspar backup - --environment production \
+  | aws s3 cp - s3://my-bucket/feldspar/site-$(date +%F).zip
+```
+
+Memory stays bounded the same way in this mode (one page of rows plus a 256 KB
+buffer), however large the installation. Messages go to stderr, so stdout holds
+only the zip, and the command refuses to run when stdout is a terminal. A failed
+or interrupted backup exits non-zero. The reader has already received part of the
+zip by then, so check the exit status (`set -o pipefail`) before you keep the upload.
+
 `restore` restores everything the file holds. The file can come from `feldspar
 backup`, from the dialog, or from Saltcorn 1. It behaves like the Restore dialog with
 nothing unticked: it adds to what is there and does not drop, delete or replace.
@@ -1521,6 +1617,44 @@ give it the same server flags or `--environment` the server runs with. That matt
 most for `--modules-dir`. **Restart a server that is already running on that
 database** afterwards, because it loaded its tables, applications and triggers when
 it started.
+
+#### Password-protected backups
+
+A backup can be protected by a password. Every entry in the zip is then
+encrypted with **AES-256 (WinZip AES)**, the standard zip encryption: 7-Zip,
+WinZip, Keka, `7z x` and other standard tools open the file with the same
+password. (The old "ZipCrypto" scheme is broken and is never written. macOS's
+Archive Utility and Windows Explorer's built-in unzip do not open AES zips;
+use one of the tools above.) The entry **names** are not encrypted, as in any
+zip, so someone without the password can list the tables and stores a backup
+holds but read none of them. A lost password cannot be recovered.
+
+- **Settings → Backup → Backup now**: the dialog has an optional password,
+  typed twice. It applies to that download only; the next backup is
+  unprotected unless a password is given again.
+- **Automated backups**: each schedule has an optional password, stored with
+  the schedule's other credentials (`_fd_config`, `backup_schedules`) and shown
+  as the mask. Leave the mask to keep it, type to replace it, or use **Remove
+  password**.
+- **Restore**: when the uploaded file is protected, a dialog asks for the
+  password before the dialog that asks what to restore. A wrong password is
+  refused there and can be tried again.
+- **Terminal**: `--password VALUE`, `--password` with no value (asked for
+  without echo: twice for `backup`, once for `restore`), or the
+  `FELDSPAR_BACKUP_PASSWORD` environment variable. `restore` of a protected
+  file given none of these asks at the terminal, and fails, naming both, when
+  there is no terminal.
+
+```bash
+FELDSPAR_BACKUP_PASSWORD="$(cat /etc/feldspar/backup.pass)" \
+  sudo -E -u feldspar feldspar backup - --environment production \
+  | aws s3 cp - s3://my-bucket/feldspar/site-$(date +%F).zip
+sudo -u feldspar feldspar restore site.zip --password --environment staging   # asks
+7z x -p site.zip -o site/                                                    # inspect by hand
+```
+
+A password on the command line is visible to other users of the machine in
+`ps`. Prefer the prompt or the environment variable.
 
 #### Automated backups off the server
 
@@ -1555,6 +1689,12 @@ HTTPS to the endpoint.
   - for S3, a key limited to the one bucket, with `s3:PutObject`, `s3:ListBucket`
     and `s3:DeleteObject`;
   - for SFTP, a chrooted account.
+- **What is included** is chosen per schedule. **All tables, definitions and data**,
+  **All applications** and **All files** (ticked for a new schedule) include every
+  table, application or file store there is when the backup runs, so one created
+  after the schedule was set up is in the next backup. Untick one to choose from
+  the list instead; a table created later is then still included unless it is
+  unticked.
 - **Retention** deletes only files named `feldspar-backup-YYYY-MM-DD-HHMMSS.zip`,
   and judges their age by the time in the name. Two schedules may not share a
   directory or a bucket, because each would prune the other's backups.
@@ -1578,7 +1718,8 @@ The key is not in the database, so a database dump alone opens nothing.
   table's rows include a Secret field, the zip carries the key as
   `keys/secrets.key` (the manifest says so under `secrets_key`), so a restore
   after a disaster needs no password typed in again. Treat such a backup as
-  being as sensitive as the passwords themselves. That holds for automated
+  being as sensitive as the passwords themselves, or protect it with a
+  password (see "Password-protected backups" above). That holds for automated
   backups to SFTP and S3 too, and on the hosted service for a customer's own S3
   backups.
 - **A restore re-seals.** Each value is decrypted with the backup's key and
@@ -1953,7 +2094,9 @@ the map demo's test in `sc-cli` and milestone A5's definition of done in `sc-ser
 ### 10.4 The base map
 
 The Analytics UI draws map layers over a base map: a [MapLibre style](https://maplibre.org/maplibre-style-spec/)
-fetched by the browser. **Settings → Maps** names it:
+fetched by the browser. It is set on the Analytics UI's own **Settings** page (the **Settings**
+button in its header, `/analytics/#/settings`), under **Base maps** — not on the admin UI's
+settings screen. Only an admin on the admin host sees the page:
 
 | setting | default | |
 |---|---|---|

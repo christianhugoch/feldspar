@@ -22,6 +22,425 @@ still to come (TODO-claude-terminal CT4).
   background jobs and children in a session of their own.
 - Tests: `sc-server/tests/ide_terminal.rs`, `ui/ide/src/terminal.test.ts`.
 
+## CLI: set up a hosted server without the admin UI (modules, routes-only tokens, settings, mail, app tables)
+
+feldspar-hosted's root daemon can only use the `feldspar` CLI, so it could not do two setup jobs
+that took clicks in main's admin UI: installing and granting the `hosted-health` module, and the
+backup-alert mail settings (`~/feldspar-hosted/FELDSPAR-CLI-ISSUE.md`). This adds:
+
+- **`feldspar module install|grant|configure|list|remove`** (`sc_cli::module`). The Modules tab's
+  install, update and delete steps moved out of the handlers into `ModuleServices::install_module`,
+  `update_module` and `remove_module`. The tab, the agents' module manager and the CLI now all
+  call those. The CLI brings the module services up in its own process (as `restore` and
+  `app triggers` do) over the same database and `--modules-dir`. `install --local DIR` takes
+  `--grant-read/-write/-net/-env`, `--setting KEY=VALUE` (typed by the module's own settings form; not `--config`, as the issue
+  proposed, because every command already reads `--config` as the path of `feldspar.toml`),
+  `--force` and `--json`, and detects npm or pip from the directory. It is idempotent: if the same
+  version is already installed from the same directory, npm is not run and the row is untouched.
+  A newer version is installed over the old one and keeps its id, settings and grants. Grants are
+  checked the way the tab checks them. A command fails if the module does not load afterwards.
+- **`SIGHUP` reloads modules** when `_fd_modules` changed (`ModuleServices::reload_if_changed`,
+  called first in `reload_all`; `ReloadReport` gained `modules`, `modules_reloaded` and
+  `modules_error`). It compares each row with the row the loaded set came from, so a signal sent
+  after a build does not restart module services. `install_module` stamps
+  `attributes.installed_at`, so a same-version reinstall still counts as a changed row. So
+  `feldspar module … && pkill -HUP feldspar` works without a restart.
+- **Routes-only API tokens**: `feldspar mcp-token create --email E --routes-only`. A token with
+  the `routes_only` grant (`sc_auth::GRANT_ROUTES_ONLY`; every MCP grant stored off) is refused by
+  the MCP server (`authenticate_api_token`). Module routes accept it through the new
+  `authenticate_route_token`, for a user of any role, so a role-80 monitor account works and the
+  module's `min_role` applies again. Ordinary tokens still need an admin user, as before. Only MCP
+  and module routes accept API tokens; the admin HTTP API takes sessions only.
+- **`set-cfg --json`** (a JSON object on stdin; strings accepted for numbers and booleans, `null`
+  unsets) and **`set-cfg --unset KEY`**. `sc_config::set_config_many` now writes in **one
+  transaction** (`SharedTx`) after checking every value, so the settings screen's Save gets that
+  too. **`get-cfg --json`** prints every declared key (secrets redacted, unset keys `null`), or
+  one value as JSON.
+- **`feldspar send-email --to ADDR --subject TEXT [--html] < body`**: `SmtpMailer` over the
+  stored `EmailSettings`, the same pair *Send test message* uses. It needs only the database and
+  outbound SMTP.
+- **`feldspar app tables add|remove|list --app SUBDOMAIN TABLE… [--json]`**. The rule moved out
+  of `update_application` into `sc_app::change_app_tables`, which both use. A table already
+  connected can now always be removed, even if it was dropped since.
+
+Docs: OPERATIONS.md §6.1 and §8.2, and TECHNICAL_DESIGN.md's `SIGHUP` paragraph. Tests:
+`sc-cli/tests/hosted_setup.rs` runs each command through the real binary against Postgres. It
+covers install, idempotent reinstall, upgrade, grant/revoke, configure and remove with npm; the
+routes-only token against both authenticators; a refused `set-cfg --json` writing nothing;
+`send-email` against `TestSmtp`; and `app tables`. Also
+`modules_api::a_sighup_reload_picks_up_a_module_changed_elsewhere`, plus parser unit tests in
+`sc_cli::{module, email, config, app, mcp_token}`.
+
+## i18n: wrap the strings the lint found, and fill the core, admin and builder catalogues
+
+Reworded strings had left the catalogues behind. `feldspar i18n lint` found six unwrapped
+literals in the admin SPA: `PublicBadge`'s title and label (`layout.tsx`), the Changesets
+page title, the table picker's aria-label and its "All tables" option (`Changesets.tsx`), and
+the entity diagram's "PK" marker (`EntityDiagram.tsx`). All six are now wrapped. Then
+`feldspar i18n translate` filled every missing key of the `core`, `admin` and `builder` domains
+for fr, de, es, zh-Hans and ar. Keys that the source no longer uses (the old wordings) are kept,
+because `check` reports them but never deletes them. The `analytics` domain still has no
+catalogues.
+
+## Fix: add `sc-help` to the design's crate graph
+
+The new `sc-help` crate was not in §2 of `docs/TECHNICAL_DESIGN.md`, so
+`repo_hygiene::the_design_crate_diagram_matches_the_workspace_manifests` failed. Added it to the
+crate tree (layer 0), the mermaid diagram (`sc-server --> sc-help --> sc-error`) and the
+direct-dependency table (its own row, and in `sc-server`'s list).
+
+## Fix: regenerate the IDE, builder and analytics copies of the admin client
+
+The help-topic endpoints were added to `sc_api::admin_endpoints()` and `ui/admin/src/client.ts`
+was regenerated, but the other three copies (`ui/ide`, `ui/builder`, `ui/analytics`) were not,
+so `admin_client_sync::committed_admin_clients_match_generator` failed. Regenerated them with
+`emit_admin_client`; all four are now identical and type-check.
+
+## Help topics: a question-mark beside a setting opens a popup with more help (v1's help system)
+
+v1 put a question-mark next to a field's sublabel (or its label, without one) that opened a
+markdown help page in a modal. The page was a template, so it could list the current table's
+fields. This brings that back, starting with the ownership formula and `run_js_code`'s code.
+
+- **New crate `sc-help`**: the topics, compiled into the binary from `crates/sc-help/topics/*.md`.
+  A topic is a markdown template in **MiniJinja** syntax (`{{ table.name }}`,
+  `{% for f in table.fields %}`, `{% if event == "update" %}`) instead of v1's underscore
+  templates, so a topic can print, loop and branch over its context but cannot run code. It is
+  rendered to HTML with pulldown-cmark. Raw HTML in the markdown is printed as text, and links
+  may only go to `http(s):`, `mailto:`, a path on this server or another topic (`help:<id>`),
+  because the context holds values people typed (field labels, the admin's user object).
+- **Topics**: `ownership-formula` (the access rule, this table's fields, its `Ⱶ`-paths per
+  key field, the `Ↄ` relations pointing at it, the users table's fields, your own user object
+  as JSON (as v1 showed it), the operation flags, examples that use the table's own key to
+  users when it has one, and RLS). `javascript-code` (the scope by event, with the current
+  event named and `row.<field>` listed for this table, `db` and its chain, the tables on this
+  server, the other handles, the triggers `trigger()` can run, and the limits).
+- **Admin API**: `getHelp` (`GET /api/help/{topic}?table=&event=`, admin only) gives
+  `{ title, html }`. The server builds the context from the catalog. An unknown topic is a 404.
+  An unknown table is left out rather than refused.
+- **Declarations**: `FormField.help_topic` (builder `.help_topic(id)`), sent to the UI as
+  `help_topic` in every config spec. (It is not called `help` because settings keys already
+  send a `help` sentence.) `run_js_code`'s `code` setting names `javascript-code`.
+- **Admin UI**: `HelpLink.tsx` shows a Tabler help-circle icon that opens the topic in a modal.
+  A `help:` link inside the page opens that topic in the same modal, and other links open in a
+  new tab. `SettingField` puts it beside the sublabel, or beside the label when there is no
+  sublabel, for any setting with a `help_topic`, and fills the topic in with the code scope's
+  table and event. The table page's ownership formula has one beside its sublabel.
+- Tests: `sc-help` unit tests (every topic renders with an empty and a full context, the
+  ownership topic lists fields/joins/children/user fields, the JS topic follows the event,
+  unknown topic, raw HTML and `javascript:` links neutralised).
+  `field_api::help_topics_are_filled_in_with_the_table` (real Postgres, through the router).
+  `run_js_code`'s spec test checks the topic. `HelpLink.test.tsx` checks placement beside the
+  sublabel or the label, `help:` links and the query.
+
+## `feldspar api add-query` adds code queries, from a file
+
+`add-query` only added SQL queries, so a JavaScript or Python query could only be saved through
+MCP `save_api_query`, with the whole body in the call each time.
+
+- **CLI**: `add-query` takes `--language sql|javascript|python` (also `js`, `py`; default `sql`)
+  and `--code TEXT|@FILE`. `--code` is the same flag as `--sql`; giving both is refused. A code
+  query is saved through the same `save_application` path (endpoint rules apply, SQL rules and
+  preparing do not), and the command prints `NAME: a javascript query` instead of the
+  columns. The usage text says so.
+- **Generated README**: the custom-query section says how to add a code query with the
+  command.
+- Tests: `api::tests::a_code_query_takes_its_language_and_its_body_from_a_file` (parsing,
+  defaults, short names, unknown language, `--sql` and `--code` together), and
+  `api_queries::a_javascript_query_is_added_from_a_file` (real binary and Postgres: stored as
+  JavaScript with the file's body, client method generated).
+
+## The coding agent keeps working when an application moves to `@` (or any other subdomain)
+
+Changing an existing application's subdomain left its builder agent behind: its `coding` trait
+still named the old subdomain, so `check` and `view_app` failed with "no application is served
+at `…`", and the admin sidebar (which finds the builder by that setting) no longer offered it.
+For `@` the preview pane was broken too: its URL became `//@.{host}`.
+
+- **Server** (`updateApplication`): when the subdomain changes, `retarget_builder_agent` finds
+  the builder by its `coding` trait's `application` and points it at the new subdomain. The
+  preview pane URL and the system prompt move with it only while they are still what the
+  framework declared (an admin's own stays). The agent is renamed (`build-todo` → `build-@`)
+  only while it has the derived name, the new name is free, and no application exposes it. The
+  response says which agent moved in `agent`, or why it could not in `agent_error`, as on create.
+- **Preview pane URL**: builders are now created with `//<subdomain>.{base}`, and `//{base}` for
+  the application on `@`. The admin resolves `{base}` to the base domain the server reports
+  (with the admin's port), falling back to its own host, the way it builds app links. `{host}`
+  is still accepted. It is no longer used for builders because once the admin UI is on a
+  subdomain of its own, which `@` needs, the admin's host is not where applications are served.
+- **Prompts**: the application on `@` is described as "served on the base domain (subdomain
+  `@`)" instead of "at the `@` subdomain".
+- Tests: `app_builder_agent::moving_an_application_to_another_subdomain_takes_its_builder_along`
+  (todo → `@` → shop, with an admin-edited pane URL kept), a unit test for the `@` pane URL, and
+  an `agentChat` test for `{base}`.
+
+## Test fixes after "All tables / applications / files"
+
+- `sc-cli` tests: `inspect_backup` takes a password now; the backup test passes `None`.
+- `sc-server` backup tests that check one particular selection now send `include_all` with all
+  three kinds off (`no_include_all()`), and the schedule edits send back the `include_all` they
+  read. Without it, the new default (everything) overrode the lists the tests check.
+- `module_routes` tests: each test has its own module directory. They shared one per process,
+  so whichever test finished first deleted it while the other was still running. That showed
+  up as "no module here serves `routes/facts`" (404) or a failed `statvfs` (500).
+
+## Automated backups: "All tables", "All applications" and "All files"
+
+An automated backup can now include every table, application or file store there is when it
+runs, so one created after the schedule was set up is always in it — whatever the lists say.
+
+- **Admin UI** (Settings → Backup → Automated backups): the schedule dialog has three new boxes,
+  **All tables, definitions and data**, **All applications** and **All files**, each above its
+  pickers, which are hidden while the box is ticked. They are shown even when there is nothing of
+  that kind yet, and a new schedule starts with all three ticked. Ticking one counts as something
+  to include. A schedule's line says "New tables, applications and file stores are included
+  automatically." for the boxes it has ticked.
+- **Server**: `BackupSchedule` has `include_all` (`IncludeAll { tables, applications,
+  file_stores }`), stored with the schedule in `backup_schedules`. `BackupSchedule::selection`
+  is what a run backs up: the stored exclusions over what is on offer, then every table (with its
+  rows), application or file store for each kind `include_all` covers. `listBackupSchedules`
+  answers `include` the same way.
+- **Admin API**: `createBackupSchedule` / `updateBackupSchedule` take an optional `include_all:
+  {tables, applications, file_stores}`, and the schedule answers carry it. Absent (or a flag
+  missing from it) means on; only `false` leaves that kind to `include`'s lists. A schedule stored
+  before this therefore includes all tables, applications and files, and its dialog opens with
+  the three boxes ticked. Clients regenerated in all four UIs.
+- Tests: `include_all_covers_what_was_created_later` (sc-server unit) and the form model's
+  tests in `backupSchedules.test.ts`.
+- Docs: OPERATIONS "Automated backups off the server".
+
+## Map settings moved into the Analytics UI
+
+The admin UI's settings screen no longer has a **Maps** tab. The base map settings are now on the
+Analytics UI's own **Settings** page, so everything about the Analytics UI is set in the Analytics
+UI.
+
+- **Analytics UI**: a **Settings** button in the header (admin host only) opens `#/settings`. Its
+  **Base maps** card has the same three fields as before (light style, dark style, other map
+  hosts) and lists every host maps may load from. Save sends only what changed; a URL that is not
+  one is refused by name and nothing is saved. An Analytics application's shell has no Settings
+  button and does not show the page.
+- **Map workspace**: under the reference layers it says which base map it draws ("Base map:
+  tiles.openfreemap.org · positron"), with a **change** link to the Settings page for the admin.
+- **Admin API**: new `saveMapSettings` (`POST /api/maps/settings`, body `{values: {map_style?,
+  map_style_dark?, map_hosts?}}`), the admin's only and not reachable from an Analytics
+  application. `mapSettings` also answers `values`, the three settings as the form shows them.
+  `POST /api/settings` (`updateSettings`) now refuses any key that is not on the settings form
+  ("`map_style` is not a setting on this screen"). Before, it would store any declared key,
+  internal ones included (backup selection, OAuth providers, …), without the checks their own
+  screens run. Clients regenerated in all four UIs.
+- **Config**: `map_style`, `map_style_dark` and `map_hosts` are internal keys
+  (`sc_config::map_defs`, in `internal_defs`) instead of a settings section. The stored keys are
+  unchanged, so no migration is needed. `sc_config::save_map_settings` checks all three together
+  before writing; `map_settings` reads them with `config_value`, since `all_config` covers only
+  the settings screen's keys.
+- Docs: OPERATIONS §10.4, TECHNICAL_DESIGN and the analytics tutorial point at the new page.
+
+## Rename a table
+
+A table can now be renamed, from the table page, the admin API and `edit_schema` (MCP and the admin
+copilot). The table keeps its rows, fields and settings, and what names it follows. Code is not
+rewritten.
+
+- **Table page**: the data menu beside **Delete all rows** and **Drop table** has **Rename table**.
+  It asks for the new name in a dialog, then opens the table under that name. It is not offered on
+  a metadata table.
+- **Admin API**: `renameTable` (`POST /api/tables/{table}/rename`, body `{name}`) answers
+  `{table, notes}`. The notes say what was rewritten and that code naming the old name was not.
+- **MCP / agents**: `edit_schema` has `op: "rename_table"`, with the new name in `rename_to`. It
+  needs the edit grant and must be the only operation in its batch. The result lists
+  `tables_renamed`.
+- `sc_api::schema_edit::Operation::RenameTable` issues `ALTER TABLE … RENAME TO`
+  (`sc_db::SchemaChange::RenameTable`). On Postgres it also renames the `<table>_pkey` constraint,
+  so a later primary-key change still finds it. On SQLite it moves the driver's
+  `_fd_object_comments` rows, regenerates the change-log triggers under the new name
+  (`apply_keeping_triggers`), and rebuilds the full-text index, whose virtual table reads its
+  content by table name. The change-log entries, sync's key pairs and changesets' `undo_table`
+  move in the same transaction.
+- **The catalog's rows follow** (`sc_catalog::rename_table_meta`): the `_fd_tables` row and edit
+  time, the table's `_fd_fields` rows, every key onto the table, and every calculated-field,
+  default and ownership formula that aggregates over it (`booksↃauthor`, rewritten with the new
+  `sc_expr::rename_relation_table`).
+- **Everything else that names the table follows** through a new catalog seam,
+  `TableRenameHook`, implemented in `sc-server` (`table_rename.rs`):
+  - applications' table subsets and Saltcorn UI's `exttables_min_role_read`;
+  - views' table, and the relations in view configurations and page and library layouts
+    (`ChildList:…`, `agg_relation`);
+  - triggers' channel, `only_if` and action `table`;
+  - workflow steps, agent traits, stream configurations, and dataset bases and joins;
+  - models' table.
+  The rows are rewritten in place. The trigger set and the streams are then reloaded, and the
+  affected applications are mounted again.
+- Refused: the built-in tables (users, roles, role grants, the credits ledger), metadata tables,
+  tables a module declared, and a new name that is taken by a table or by a leftover settings row.
+- No stored-data migration is needed.
+
+## Password-protected backups (AES-256, opens in 7-Zip)
+
+A backup can now be protected by a password. Every entry in the zip is encrypted with WinZip
+AES-256 (AE-2), the standard zip encryption that 7-Zip, WinZip, Keka and `7z x` open with the same
+password. Each entry has its own salt and an HMAC. ZipCrypto is never written. Entry names stay
+readable, as in any zip.
+
+- **Backup now**: the dialog has an optional password, typed twice. It is not remembered: the next
+  backup is protected only if a password is given again. `POST /backup/create` takes `password`.
+- **Automated backups**: a schedule has an optional `password`. It is stored like the destination's
+  credentials, sent to the UI as the mask, and kept when the mask comes back. An empty one removes
+  it, and the dialog has a **Remove password** link. The list marks protected schedules.
+- **Restore**: uploading a protected file answers `{id, encrypted: true, locked: true}`. The admin
+  UI then asks for the password in a modal, before the "What should be restored?" dialog. The new
+  `unlockBackup` (`POST /api/backup/unlock`) checks the password against the file and holds it with
+  the upload for `restoreBackup`. It answers what an upload answers. A wrong password is refused and
+  can be retried. `restoreBackup` refuses a locked upload without consuming it.
+- **CLI**: `feldspar backup` and `feldspar restore` take `--password VALUE`, `--password` (asks
+  without echo: twice for a backup, once for a restore) or `FELDSPAR_BACKUP_PASSWORD`. A restore of a
+  protected file given none of these asks at the terminal, and fails naming both when there is none
+  (`sc-cli::backup_password`).
+- `sc-server::backup`: `write_backup_to`, `write_backup_stream`, `inspect` and `restore_backup`
+  take the password; `is_encrypted` (exported as `backup_is_encrypted`) reads only the zip's
+  directory. `Archive::open_zip` verifies the password by reading the manifest (or the first
+  encrypted entry) to its end, so the HMAC settles it rather than AES's two-byte check.
+- Workspace `zip` dependency: `aes-crypto` feature enabled.
+- Docs: OPERATIONS.md "Password-protected backups".
+- Tests: `write::tests::a_password_encrypts_every_entry_with_aes` (file and pipe, method 99, wrong
+  and missing password), `a_password_is_only_needed_where_there_is_one`,
+  `schedule::tests::a_schedule_password_is_stored_masked_and_kept`, `sc-cli`
+  `backup_password::tests`, and the integration tests
+  `backup_api::a_password_protected_backup_restores_with_its_password` and
+  `backup_api::an_automated_backup_can_be_password_protected`. On the UI side,
+  `backupSchedules.test.ts` covers the schedule form's password.
+
+## Build keys no longer miss a same-size edit made in the second of the last index write
+
+The boot-time build cache hashes the source tree through a copy of git's index. The copy was
+stamped with the current time, which defeats git's "racily clean" check (git compares mtimes to the
+second, and re-reads a file only when it is no older than the index). So an edit that kept the
+file's size and landed in the same second as the last index write kept its old blob. The key then
+matched the last build, and boot served a stale bundle. This was also why
+`build_cache::tests::the_key_follows_the_source_directorys_content_in_any_git_state` failed now
+and then under load. The scratch index now keeps the real index's mtime. Fixed the admin client
+copies too: `ui/ide`, `ui/builder` and `ui/analytics` were regenerated for the module `routes`
+field, which only `ui/admin` had been regenerated for.
+
+## v1 plugin routes, served on the admin host (`@saltcorn/heartbeat-monitor` runs)
+
+A v1 plugin's `routes` export now loads, and each route is served on the admin host at
+`/_feldspar/routes/<module><url>`. For example, `@saltcorn/heartbeat-monitor` serves
+`/_feldspar/routes/heartbeat-monitor/heartbeat`. Routes are served only there, never on an
+application's host. A route runs as whoever calls: an API token's user (`Authorization: Bearer`),
+else the admin host's session, else nobody. v1's `apiToken` (nobody gets a 401) and `noCsrf` (a
+`POST` needs no CSRF token) are enforced by the server. The module card lists each route's URL.
+Payments stays on module webhooks: its callbacks need the raw body, no session, and the module's
+own authority, which a route does not give.
+
+- `sc-module`: `routes` key, `RouteManifest`, `route_call` with an Express-shaped `req`/`res`
+  (`module-host.mjs`), `routes.rs` (`route_path`, `route_module`, `match_route`, `run_route`), and
+  a `system` ask surface (`SystemAsks`) carried only by a route's call.
+- The host answers `require("systeminformation")` (`fsSize`, `mem` and `currentLoad`, from
+  `statvfs` and `/proc`), v1's `EventLog.find` (the server's startups) and `MetaData.find`
+  (successful automated backups). A route's `getState().getConfig("auto_backup_frequency")` is
+  the most frequent backup schedule's.
+- `sc-server`: `module_routes.rs` (route, caller, rate limit, body cap, `no_csrf_route` for the
+  CSRF layer, `SystemFacts`). Every boot now records its time in the internal config key
+  `startup_history`, keeping 7 days. Adds a `libc` dependency, for `statvfs`.
+- Admin API: the module card has `routes: [{ method, url, path }]`, and the Modules tab shows
+  them.
+- `TECHNICAL_DESIGN.md` §15.1g.
+- The plugin itself (`saltcorn/heartbeat-monitor` 0.2.0, released separately):
+  - the callback is Express's `(req, res)`; `({ res }, { req })` only worked through Express's
+    back-references;
+  - startups are filtered to the last 24 hours in the query rather than all read;
+  - the thresholds and `min_role` (now admin by default) apply before the settings are saved;
+    an unsaved module used to compare against `undefined` and report a full disk as `ok`;
+  - `Monthly` backups are known;
+  - a 500 no longer returns the stack trace;
+  - the README says how to call it on Feldspar.
+- Tests:
+  - `module_routes::a_modules_routes_are_served_on_the_admin_host_as_whoever_calls` (fixture
+    `route-module`): session, nobody and token callers; not served on an application's host;
+    `noCsrf` and CSRF; `apiToken`; `:param` and JSON body; an answer from an unreturned promise;
+    a throw; `res.render` named; 405 and 404.
+  - `module_routes::a_route_reads_the_machine_the_startups_and_the_backups`.
+  - Unit tests for matching, `req.user`, `/proc` parsing and `statvfs`.
+  - The real plugin was also checked by hand: public refused, token answered.
+
+## A signed-in caller with a stale CSRF token is refused, not served as anonymous
+
+A mutating request to an endpoint open to the public role (`min_role` 100) that failed the CSRF
+check used to run as the anonymous caller. When the browser was signed in but held a stale token,
+for example in an old tab, a public query answered 401 while a protected one answered 403. The
+client could recover from the 403 but not from the 401. Now any request that carries a session
+cookie but no valid token gets the 403 refusal, which names the current token, so the client
+retries as the signed-in user. Before, only native apps got this. A request with no session cookie
+is still served as anybody, token or not. The session cookie is `SameSite=Strict`, so a
+cross-site page could never make the browser send it. Refusing is no looser than anonymising.
+
+- `sc-server/src/security.rs` (`csrf_middleware`): the `signed_in_native` exception is now
+  `signed_in`, any request carrying `sc_session`.
+- `TECHNICAL_DESIGN.md` §7.3 ("The public role is everybody") updated.
+- Test: `app_public_endpoints::a_session_without_the_token_is_served_as_nobody` became
+  `a_session_with_a_stale_token_is_refused_not_anonymised`. A stale or missing token on the public
+  trigger and the public query is 403 with nothing written. A retry with the cookie's token
+  succeeds, and the same request with no session cookie still runs as anybody.
+
+## Agent conversations belong to the user and the agent, not the application
+
+A chat run started through an application's `/api/_agents/{name}/…` routes no longer records
+`attributes.app`, and ownership no longer checks it. Any application exposing the same agent now
+lists, reads, continues, renames and deletes the user's conversations with it, so a chat panel
+that follows the user across a suite of applications keeps the conversation. Ownership is still the
+agent (`subject`), the mode (`app_mode`: `chat` | `prompt`), the owner (`user:<id>` or the
+anonymous cookie hash) and `user_id`. Another user still gets 404.
+
+- `sc-server/src/app_agents.rs`: dropped `ATTR_APP` from `AgentCtx::owns` and `claim`. Turn
+  slots and rate limits are still per application.
+- `TECHNICAL_DESIGN.md` §"Whose a run is" updated.
+- Test: `app_agents::a_conversation_follows_its_owner_to_every_application_exposing_the_agent`
+  mounts a second application exposing `helpdesk`. Alice lists, reads, continues and deletes a
+  conversation from the shop there, and Bob gets 404.
+- Existing runs keep the stale `attributes.app` key. It is ignored, so no migration is needed.
+
+## `feldspar backup -` streams the backup to stdout
+
+`feldspar backup -` (the Unix convention for "stdout" in place of a file) writes the zip
+straight to stdout with no `.partial` file on disk, for a caller that pipes it to S3
+(`feldspar backup - | aws s3 cp - s3://…`).
+
+- `sc_server::write_backup_stream` takes any `Write`, not just a seekable file. It uses
+  `zip::ZipWriter::new_stream`, which puts each entry's CRC and sizes in a data descriptor
+  after the entry instead of seeking back to its local header. The entries are the same,
+  and so is the memory bound (one page of rows plus a 256 KB buffer).
+  `write_backup_to` and the new function share `write_archive`.
+- Messages stay on stderr, and the SQL echo is forced off, so stdout holds only the zip. The command
+  refuses to write to a terminal, as gzip does.
+- Tests: a unit test streams a zip into a non-seekable writer and reads it back.
+  `sc-cli`'s backup test now pipes `backup -`, checks that no file appears on disk,
+  and restores *that* zip into the second database.
+- `docs/OPERATIONS.md` and the CLI help describe the mode.
+
+## `users.email_verified` added at startup; password links redeemed in one transaction
+
+A production instance upgraded on 2026-10-26 without running the `users.email_verified` line of
+`TABLES_RENAME.sql` (security review #41). There, `POST /api/set-password` returned a 500 for
+every invite and reset link. Worse, the failure was only half a failure. `redeem_password_token`
+deleted the token, then wrote the new password hash, and only then failed on `email_verified`. The
+holder saw an error, had in fact got the new password, and could not retry the link.
+
+- `redeem_password_token` now runs its writes in one `SharedTx`: spend the token, set
+  `password_hash` and `email_verified` in a **single** `UPDATE`, delete the user's other tokens,
+  and commit. A failed write rolls everything back, so the link still works once the cause is
+  fixed. Sessions are still ended after the commit, as before.
+- `manage::mark_email_proven` is gone; that `UPDATE` was its only caller.
+- `sc_auth::bootstrap` now creates the `users` table with `Catalog::bootstrap_table`, as the
+  `_fd_*` tables already do. A declared column an existing `users` table lacks is added at
+  startup, so `email_verified` reaches old databases with no manual step. Columns that exist are
+  left as they are, including the unconstrained `role` of a database older than `_fd_roles`. The
+  `TABLES_RENAME.sql` line stays, marked "(Bootstrap adds it too.)".
+- Test: `db_password_tokens::a_failed_redemption_leaves_the_token_and_the_password_as_they_were`
+  drops the column and checks that a redemption fails and changes nothing. It then starts a fresh
+  catalog and bootstrap, as a restart would, checks that the column is back, and redeems the same
+  link.
+
 ## Test suite green again: drifted docs, a v1 table name, and unreadable i18n call sites
 
 A full `cargo test --workspace` failed only in `sc-cli`'s `it` target (four hygiene checks), and
